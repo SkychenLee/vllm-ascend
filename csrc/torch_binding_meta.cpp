@@ -36,24 +36,6 @@
 namespace vllm_ascend {
 namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
-std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
-  at::Tensor &positions,
-  at::Tensor &query,
-  at::Tensor &key,
-  int64_t head_size,
-  at::Tensor &cos_sin_cache,
-  bool is_neox) {
-    auto num_tokens = positions.sym_numel();
-    auto query_hidden_size = query.sym_numel() / num_tokens;
-    auto key_hidden_size = key.sym_numel() / num_tokens;
-
-    auto num_heads = query_hidden_size / head_size;
-    auto num_kv_heads = key_hidden_size / head_size;
-    at::Tensor query_dst = at::empty_symint({num_tokens, num_heads, head_size}, query.options());
-    at::Tensor key_dst = at::empty_symint({num_tokens, num_kv_heads, head_size}, key.options());
-
-    return {query_dst, key_dst};
-}
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     at::Tensor &input,
@@ -209,7 +191,7 @@ at::Tensor& dispatch_ffn_combine_meta(
     return out;
 }
 
-at::Tensor npu_lightning_indexer_meta(
+at::Tensor npu_lightning_indexer_custom_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
     const c10::optional<at::Tensor> &actual_seq_lengths_key,
@@ -243,11 +225,11 @@ at::Tensor npu_lightning_indexer_meta(
         output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
     }
     // construct the output tensor
-    at::Tensor lightning_indexer_output = at::empty(output_size, query.options().dtype(at::kInt));
-    return lightning_indexer_output;
+    at::Tensor lightning_indexer_custom_output = at::empty(output_size, query.options().dtype(at::kInt));
+    return lightning_indexer_custom_output;
 }
 
-at::Tensor npu_sparse_flash_attention_meta(
+at::Tensor npu_sparse_flash_attention_custom_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value, int64_t sparse_block_size,
     const c10::optional<at::Tensor> &block_table,
@@ -442,8 +424,6 @@ namespace {
 // the custom kernel been captured into aclgraph
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 
-    // Rotary embedding meta implementation
-    ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Bgmv expand
@@ -461,9 +441,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
     // Lightning indexer
-    ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
+    ops.impl("npu_lightning_indexer_custom", &vllm_ascend::meta::npu_lightning_indexer_custom_meta);
     // Sparse flash attention
-    ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_sparse_flash_attention_custom", &vllm_ascend::meta::npu_sparse_flash_attention_custom_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // matmul allreduce add rmsnorm

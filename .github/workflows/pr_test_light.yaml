@@ -41,7 +41,7 @@ jobs:
     with:
       vllm: v0.13.0
   changes:
-    runs-on: linux-aarch64-a2-0
+    runs-on: linux-aarch64-a2b3-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
@@ -84,7 +84,7 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-amd64-cpu-16-hk
-      image: quay.nju.edu.cn/ascend/cann:8.2.rc2-910b-ubuntu22.04-py3.11
+      image: quay.nju.edu.cn/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: pr
 
   e2e-light:
@@ -99,6 +99,6 @@ jobs:
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
+      runner: linux-aarch64-a2b3
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: light

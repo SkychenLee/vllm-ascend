@@ -91,6 +91,12 @@ class NPUWorker(WorkerBase):
             # Additional parameters for compatibility with vllm
             **kwargs):
         """Initialize the worker for Ascend."""
+        if not envs_ascend.COMPILE_CUSTOM_KERNELS:
+            logger.warning(
+                "COMPILE_CUSTOM_KERNELS is set to False. "
+                "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
+            )
+
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
@@ -519,9 +525,9 @@ class NPUWorker(WorkerBase):
                 ],
                 with_stack=False,
                 profile_memory=bool(envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY) != '0' if envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY is not None else False,
+                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY != '0') if envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY is not None else False,
                 with_modules=bool(envs_vllm.\
-                    VLLM_TORCH_PROFILER_WITH_STACK) != '0' if envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK is not None else True,
+                    VLLM_TORCH_PROFILER_WITH_STACK != '0') if envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK is not None else True,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))

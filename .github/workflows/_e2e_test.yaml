@@ -100,8 +100,7 @@ jobs:
           pytest -sv --durations=0 tests/e2e/singlecard/test_camem.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_cpu_offloading.py
-          # xgrammar has parameter mismatching bug, please follows: https://github.com/vllm-project/vllm-ascend/issues/5524
-          # pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv --durations=0 tests/e2e/singlecard/test_guided_decoding.py
           # torch 2.8 doesn't work with lora, fix me
           pytest -sv --durations=0 tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv --durations=0 tests/e2e/singlecard/test_models.py
@@ -131,7 +130,7 @@ jobs:
     name: multicard-2
     runs-on: linux-aarch64-a3-2
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -240,7 +239,7 @@ jobs:
     if: ${{ needs.e2e.result == 'success' && needs.e2e-2-cards.result == 'success' && inputs.type == 'full' }}
     runs-on: linux-aarch64-a3-4
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True

@@ -105,75 +105,6 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     }
 }
 
-std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::Tensor &query, at::Tensor &key,
-    int64_t head_size, at::Tensor &cos_sin_cache,  bool is_neox)
-{
-    int32_t deviceId = 0;
-    int64_t num_tokens = positions.numel();
-    int positions_ndim = positions.dim();
-    TORCH_CHECK(
-        positions_ndim == 1 || positions_ndim == 2,
-        "positions must have shape [num_tokens] or [batch_size, seq_len]");
-    if (positions_ndim == 1) {
-      TORCH_CHECK(
-          query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
-          "query, key and positions must have the same number of tokens");
-    }
-    if (positions_ndim == 2) {
-      TORCH_CHECK(
-          query.size(0) == positions.size(0) &&
-              key.size(0) == positions.size(0) &&
-              query.size(1) == positions.size(1) &&
-              key.size(1) == positions.size(1),
-          "query, key and positions must have the same batch_size and seq_len");
-    }
-    TORCH_CHECK(head_size % 32 == 0, "rotary_embedding: headSize should be divisible by 32");
-    int query_hidden_size = query.numel() / num_tokens;
-    int key_hidden_size = key.numel() / num_tokens;
-    TORCH_CHECK(query_hidden_size % head_size == 0);
-    TORCH_CHECK(key_hidden_size % head_size == 0);
-    TORCH_CHECK(is_neox == true, "rotary_embedding: neox=false is not supported as custom kernel in vllm-ascend");
-
-    // Make sure query and key have consistent number of heads
-    int num_heads = query_hidden_size / head_size;
-    int num_kv_heads = key_hidden_size / head_size;
-    TORCH_CHECK(num_heads % num_kv_heads == 0);
-    at::Tensor query_dst = at::empty({num_tokens, num_heads, head_size}, query.options());
-    at::Tensor key_dst = at::empty({num_tokens, num_kv_heads, head_size}, key.options());
-
-    int rot_dim = cos_sin_cache.size(1);
-    int seq_dim_idx = positions_ndim - 1;
-    int64_t *position_ids_ptr = positions.data_ptr<int64_t>();
-    void *query_dst_ptr = query_dst.data_ptr();
-    void *key_dst_ptr = key_dst.data_ptr();
-    void *query_ptr = query.data_ptr();
-    void *key_ptr = key.data_ptr();
-    void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
-    int64_t query_stride = query.stride(seq_dim_idx);
-    int64_t key_stride = key.stride(seq_dim_idx);
-    int64_t dst_query_stride = query_dst.stride(0);
-    int64_t dst_key_stride = key_dst.stride(0);
-    at::ScalarType scalar_type = query.scalar_type();
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at_npu::native::OpCommand cmd;
-    cmd.Name("rotary_embedding");
-    cmd.SetCustomHandler([scalar_type, is_neox, num_tokens, stream, position_ids_ptr, query_dst_ptr, key_dst_ptr,
-                          query_ptr, key_ptr, cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
-                          dst_query_stride, dst_key_stride, num_heads, num_kv_heads, head_size]() -> int {
-        auto dtype_num = get_dtype_from_torch(scalar_type);
-        int device_id = 0;
-        int64_t aiv_num = 0;
-        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
-        uint32_t loop_cnt = (num_tokens + aiv_num - 1) / aiv_num;
-        rotary_embedding_impl(dtype_num, is_neox, stream, position_ids_ptr, query_dst_ptr, key_dst_ptr, query_ptr,
-                                key_ptr, cos_sin_cache_ptr, rot_dim, query_stride, key_stride, dst_query_stride,
-                                dst_key_stride, num_heads, num_kv_heads, head_size, num_tokens, loop_cnt, aiv_num);
-        return 0;
-    });
-    cmd.Run();
-    return {query_dst, key_dst};
-}
-
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1, const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
@@ -752,7 +683,7 @@ at::Tensor& dispatch_ffn_combine(
     return out;
 }
 
-at::Tensor npu_lightning_indexer(
+at::Tensor npu_lightning_indexer_custom(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
     const c10::optional<at::Tensor> &actual_seq_lengths_key,
@@ -785,12 +716,12 @@ at::Tensor npu_lightning_indexer(
         n_dim_index = (key_layout_str == "TND") ? DIM_1 : DIM_2;
         output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
     }
-    at::Tensor lightning_indexer_output = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor lightning_indexer_custom_output = at::empty(output_size, query.options().dtype(at::kInt));
     // convert str
     char *query_layout_ptr = const_cast<char *>(query_layout_str.c_str());
     char *key_layout_ptr = const_cast<char *>(key_layout_str.c_str());
     EXEC_NPU_CMD(
-        aclnnLightningIndexer,
+        aclnnLightningIndexerCustom,
         query,
         key,
         weights,
@@ -801,11 +732,11 @@ at::Tensor npu_lightning_indexer(
         key_layout_ptr,
         sparse_count,
         sparse_mode,
-        lightning_indexer_output);
-    return lightning_indexer_output;
+        lightning_indexer_custom_output);
+    return lightning_indexer_custom_output;
 }
 
-at::Tensor npu_sparse_flash_attention(
+at::Tensor npu_sparse_flash_attention_custom(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value, int64_t sparse_block_size,
     const c10::optional<at::Tensor> &block_table,
@@ -830,7 +761,7 @@ at::Tensor npu_sparse_flash_attention(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnSparseFlashAttention,
+        aclnnSparseFlashAttentionCustom,
         query,
         key,
         value,
@@ -1314,14 +1245,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("weak_ref_tensor(Tensor input) -> Tensor");
     ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
 
-    // Rotary embedding
-    // Apply GPT-NeoX style rotary embedding to query and key.
-    ops.def(
-        "rotary_embedding(Tensor positions, Tensor! query,"
-        "                 Tensor! key, int head_size,"
-        "                 Tensor cos_sin_cache, bool is_neox) -> (Tensor query, Tensor key)");
-    ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
-
     ops.def(
         "get_masked_input_and_mask(Tensor input, "
         "                         int org_vocab_start_index, "
@@ -1397,22 +1320,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz_tensor_list);
 
     ops.def(
-        "npu_lightning_indexer(Tensor query, Tensor key, Tensor weights, *,"
+        "npu_lightning_indexer_custom(Tensor query, Tensor key, Tensor weights, *,"
         "                      Tensor? actual_seq_lengths_query=None, Tensor? actual_seq_lengths_key=None,"
         "                      Tensor? block_table=None, str layout_query='BSND', str layout_key='BSND',"
         "                      int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
-    ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
+    ops.impl("npu_lightning_indexer_custom", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_custom);
 
     ops.def(
-        "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
+        "npu_sparse_flash_attention_custom(Tensor query, Tensor key, Tensor value,"
         "                           Tensor sparse_indices, float scale_value, int sparse_block_size, *,"
         "                           Tensor? block_table=None, Tensor? actual_seq_lengths_query=None,"
         "                           Tensor? actual_seq_lengths_kv=None, Tensor? query_rope=None,"
         "                           Tensor? key_rope=None, str layout_query='BSND', str layout_kv='BSND',"
         "                           int sparse_mode=3) -> Tensor"
     );
-    ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+    ops.impl("npu_sparse_flash_attention_custom", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention_custom);
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"

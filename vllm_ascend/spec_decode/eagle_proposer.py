@@ -40,7 +40,6 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_attn_params,
                                                update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
-from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.utils import \
     prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -105,7 +104,7 @@ class EagleProposer(VllmEagleProposer):
             and not self.vllm_config.model_config.enforce_eager
             and not self.vllm_config.speculative_config.enforce_eager)
         if self.method == "mtp":
-            self.use_cuda_graph = self.use_cuda_graph and not self.use_async_scheduling
+            self.use_cuda_graph = False
 
         self.cudagraph_batch_sizes = list(
             sorted(
@@ -325,8 +324,6 @@ class EagleProposer(VllmEagleProposer):
                   batch_descriptor=None,
                   dummy_compute_logits=lambda hidden_states: None,
                   is_profile=False):
-        # update global cos, sin
-        update_cos_sin(self.positions[:num_tokens])
 
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
@@ -388,7 +385,9 @@ class EagleProposer(VllmEagleProposer):
         ) = self.runner._sync_metadata_across_dp(num_tokens,
                                                  is_draft_model=True)
 
-        batch_size = num_tokens // (self.num_speculative_tokens + 1)
+        batch_size = num_tokens // (
+            self.num_speculative_tokens +
+            1) if not is_profile else self.runner.max_num_reqs
         with set_ascend_forward_context(
                 multi_steps_attn_metadata[0]
                 if multi_steps_attn_metadata else None,
@@ -503,9 +502,6 @@ class EagleProposer(VllmEagleProposer):
         builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
-
-        # update global cos, sin
-        update_cos_sin(self.positions[:num_input_tokens])
 
         used_update_positions = target_positions[last_token_indices]
         per_layer_attn_metadata = dict()
@@ -622,7 +618,7 @@ class EagleProposer(VllmEagleProposer):
         hidden_states = hidden_states[last_token_indices]
         last_token_indices = self.arange[:batch_size]
 
-        input_batch_size = num_input_tokens
+        input_batch_size = num_input_tokens if self.use_cuda_graph else batch_size
 
         forward_context = get_forward_context()
         forward_context.num_tokens = input_batch_size
@@ -651,9 +647,6 @@ class EagleProposer(VllmEagleProposer):
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-
-            # update global cos, sin
-            update_cos_sin(self.positions[:input_batch_size])
 
             # Run the model.
 
