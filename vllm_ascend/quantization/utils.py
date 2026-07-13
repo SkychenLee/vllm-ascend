@@ -18,6 +18,8 @@
 import json
 from pathlib import Path
 
+import torch
+
 from vllm import envs
 from vllm.logger import logger
 
@@ -224,3 +226,200 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
         else:
             return True
     return False
+
+
+def quant_dequant_hif4(x: torch.Tensor, quant_type: str = "hifx4", axe: int = -1):
+    dtype_ori = x.dtype
+    device = x.device
+    C = x.shape[axe]
+    blk_size_total = 64
+    padC = (blk_size_total - C % blk_size_total) % blk_size_total
+
+    pad_shape = list(x.shape)
+    pad_shape[axe] = padC
+
+    x_pad = torch.zeros(pad_shape, dtype=dtype_ori, device=device)
+    x_padded = torch.cat([x, x_pad], dim=axe)
+
+    total_C = C + padC
+    arange_vec = torch.arange(total_C, device=device)
+    mask_vector = (arange_vec < C).to(dtype_ori)
+
+    unsqueezes = [None] * len(x_padded.shape)
+    unsqueezes[axe] = slice(None)
+    attention_mask = mask_vector[tuple(unsqueezes)]
+
+    qdq_out = quantize_hif4_kernel(x, -1)
+    qdq_out *= attention_mask
+    del x_padded, x_pad
+    return qdq_out.to(dtype_ori)
+
+
+def quantize_hif4_kernel(x: torch.Tensor, qdim: int):
+    x = x.unflatten(qdim, (-1, 8, 2, 4))  # head_size -> [16, 8, 2, 4] for 1024
+    man_bits = 3
+    x_unsigned = torch.abs(x)
+    sign = torch.sign(x)
+
+    # Three-level max: innermost 4 / middle 8 / outer 64 channels
+    max_lv3 = torch.max(x_unsigned, dim=qdim, keepdim=True)[0]
+    max_lv2 = torch.max(max_lv3, dim=qdim - 1, keepdim=True)[0]
+    max_lv1 = torch.max(max_lv2, dim=qdim - 2, keepdim=True)[0]
+
+    # div7 = 1/7: allows L2/L3 to each shrink by up to 2x so the largest
+    # value lands in [0, 2) after all scaling, ready for mantissa quant.
+    div7 = torch.ones_like(max_lv1) / 7.0
+    div7 = div7.to(torch.bfloat16).to(x.dtype)
+    scale_factor = max_lv1 * div7  # base scale
+
+    # round scale_factor to bf16 mantissa (simulate HW behavior)
+    e_sf = torch.floor(torch.log2(scale_factor))
+    mant_sf = scale_factor / 2 ** e_sf * 2 ** 7
+    scale_factor = torch.round(mant_sf) / 2 ** 7 * 2 ** e_sf
+
+    # round scale_factor to e6m2 (8-bit: 1 sign, 6 exp, 2 mant)
+    e_sf = torch.floor(torch.log2(scale_factor))
+    scale_factor = torch.round(scale_factor * torch.exp2(2 - e_sf)) * torch.exp2(e_sf - 2)
+
+    # per-sub-block dynamic shift
+    rec_sf = (1.0 / scale_factor).to(torch.bfloat16).to(x.dtype)
+    # L2 sub-block: scale_lv2 = 2 if max_lv2 >= 4*scale_factor else 1
+    scale_lv2 = (max_lv2 * rec_sf)
+    scale_lv2 = torch.exp2((scale_lv2.clip(0, 4) / 4).floor())
+    scale_lv3 = torch.exp2(((max_lv3 * rec_sf / scale_lv2).clip(0, 2) / 2).floor())
+
+    # mantissa quant (3-bit)
+    mant = x_unsigned / scale_lv2 / scale_lv3 * rec_sf
+    mant = torch.floor(mant * 2 ** (man_bits - 1) + 0.5) / 2 ** (man_bits - 1)
+    upper_bound = 2 - 2 ** (-man_bits + 1)
+    mant = torch.clamp_max(mant, max=upper_bound)
+    out = sign * mant * scale_lv2 * scale_lv3 * scale_factor
+
+    out = out.flatten(qdim - 3, qdim)
+    del scale_lv2, scale_lv3, scale_factor, x_unsigned, sign, rec_sf, mant
+    return out
+
+
+def unpack_uint8_to_bits_graph(u8_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    uint8 解包为 8 个比特位，输出 2.0 或 1.0
+    """
+    # 使用位操作替代除法和取模，图模式友好
+    bits = u8_tensor.unsqueeze(-1).bitwise_and(
+        torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], dtype=torch.uint8, device=u8_tensor.device)
+    ).ne(0)  # 非零即为 bit=1
+    
+    # 直接映射：True->2.0, False->1.0 (避免 torch.where)
+    return bits.to(torch.float32) + 1.0
+
+
+def decode_e6m2_bits_graph(f_u8: torch.Tensor, bias=31) -> torch.Tensor:
+    """
+    E6M2 比特解析
+    """
+    # 使用位操作提取指数和尾数（已经是图模式最优）
+    exp_bits = (f_u8 >> 2) & 0x3F
+    mant_bits = f_u8 & 0x03 
+    
+    # 合并数学运算，减少中间张量
+    exp = (exp_bits.to(torch.float32) - bias)
+    mant = mant_bits.to(torch.float32) * 0.25 + 1.0
+    
+    return mant * torch.exp2(exp)
+
+def unpack_hif4_scale_from_fp32_graph(weight: torch.Tensor, packed_scale_fp32: torch.Tensor, bias=31):
+    weight_ori = weight.shape
+    weight = weight.unflatten(-1,(-1,8,2,4))
+    N,G = packed_scale_fp32.shape
+    # 保持 2D 紧凑形态 [N, G]
+    packed_int32 = packed_scale_fp32.view(torch.int32)
+    # 1. 2D 矩阵基础位移拆解
+    f_u8   = (packed_int32 >> 24) & 0xFF       # 提取最高8位（bit 24~31）
+    l2_u8  = (packed_int32 >> 16) & 0xFF       # 提取次高8位（bit 16~23）
+    l3_u16 = packed_int32 & 0xFFFF 
+    
+    l3_u8_high = (l3_u16 >> 8) & 0xFF    # 提取高8位（bit 8~15）
+    l3_u8_low  = l3_u16 & 0xFF
+    l3_u16 = torch.stack([l3_u8_low, l3_u8_high], dim=-1) 
+
+    # 2. 基础比特解包
+    scale_factor_raw = decode_e6m2_bits_graph(f_u8, bias=bias)      # [N, G]
+    scale_lv2_raw = unpack_uint8_to_bits_graph(l2_u8)               # [N, G, 8]
+    scale_lv3_raw = unpack_uint8_to_bits_graph(l3_u16)              # [N, G, 2, 8]
+    del l3_u16, l2_u8, f_u8, l3_u8_high, l3_u8_low, packed_int32
+    # 3. 维度对齐
+    scale_factor = scale_factor_raw.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+    scale_lv2 = scale_lv2_raw.unsqueeze(-1).unsqueeze(-1)
+    scale_lv3 = scale_lv3_raw.reshape(N, G, 8, 2, 1)
+    
+    weight = weight * scale_factor * scale_lv2 * scale_lv3
+    weight = weight.reshape(weight_ori)
+    del scale_lv3_raw, scale_lv2_raw, scale_factor_raw, scale_factor, scale_lv2, scale_lv3
+    # gc.collect()
+    # torch.npu.empty_cache()
+    return weight.to(torch.bfloat16)
+
+def unpack_moe_hif4_scale_from_fp32_graph(weight: torch.Tensor, packed_scale_fp32: torch.Tensor, bias=31):
+    weight_ori = weight.shape
+    weight = weight.unflatten(-1,(-1,8,2,4))
+    E,N,G = packed_scale_fp32.shape
+    packed_int32 = packed_scale_fp32.view(torch.int32)
+
+    # 1. 3D 矩阵基础位移拆解
+    f_u8   = (packed_int32 >> 24) & 0xFF   # 提取最高8位（bit 24~31）
+    l2_u8  = (packed_int32 >> 16) & 0xFF        # 提取次高8位（bit 16~23）
+    l3_u16 = packed_int32 & 0xFFFF
+    
+    l3_u8_high = (l3_u16 >> 8) & 0xFF    # 提取高8位（bit 8~15）
+    l3_u8_low  = l3_u16 & 0xFF
+    l3_u8 = torch.stack([l3_u8_low, l3_u8_high], dim=-1) # [E, N, G, 2]
+    
+    # 2. 基础比特解包
+    scale_factor_raw = decode_e6m2_bits_graph(f_u8, bias=bias)    # [E, N, G]
+    scale_lv2_raw = unpack_uint8_to_bits_graph(l2_u8)         # [E, N, G, 8]
+    scale_lv3_raw = unpack_uint8_to_bits_graph(l3_u8)         # [E, N, G, 2, 8]
+    del  l3_u16, l3_u8, f_u8, l3_u8_high, l3_u8_low, packed_int32 
+    
+    # 3. 维度对齐
+    scale_factor = scale_factor_raw.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+    scale_lv2 = scale_lv2_raw.unsqueeze(-1).unsqueeze(-1)
+    scale_lv3 = scale_lv3_raw.reshape(E, N, G, 8, 2, 1)
+    weight = weight * scale_factor * scale_lv2 * scale_lv3
+    weight = weight.reshape(weight_ori)
+    del scale_lv3_raw, scale_lv2_raw, scale_factor_raw, scale_factor, scale_lv2, scale_lv3
+    return weight.to(torch.bfloat16)
+
+def unpack_dynamic_hif4_tensor(packed_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    支持任意动态维度的 uint8 HIF4 权重解包（TorchCompile / 图模式极致优化版）
+    """
+    init_shape = packed_tensor.shape
+    device = packed_tensor.device
+    
+    # 动态计算恢复后的全维度 Shape（最后一维 * 2）
+    target_shape = init_shape[:-1] + (init_shape[-1] * 2,)
+    result = torch.empty(target_shape, dtype=torch.float32, device=device)
+    
+    # 将输入一次性转为 int32，避免后续多次强转
+    packed_int8 = packed_tensor.to(torch.uint8)
+    
+    # --- 处理低 4 位（写入偶数索引位置 0::2） ---
+    low_indices = packed_int8 & 0x0F
+    low_sign = (low_indices >> 3) & 0x01
+    
+    # 核心优化：用数学运算 * 0.25 代替查表，对编译器极度友好
+    low_abs = (low_indices & 0x07).to(torch.float32) * 0.25
+    low_sign_multiplier = 1.0 - 2.0 * low_sign.to(torch.float32)
+    result[..., 0::2] = low_abs * low_sign_multiplier
+
+    # --- 处理高 4 位（写入奇数索引位置 1::2） ---
+    high_indices = (packed_int8 >> 4) & 0x0F
+    high_sign = (high_indices >> 3) & 0x01
+    
+    # 同理，算术代替查表
+    high_abs = (high_indices & 0x07).to(torch.float32) * 0.25
+    high_sign_multiplier = 1.0 - 2.0 * high_sign.to(torch.float32)
+    result[..., 1::2] = high_abs * high_sign_multiplier
+    del high_sign, high_indices, packed_int8, high_sign_multiplier, high_abs, low_sign_multiplier, low_abs, low_sign, low_indices
+
+    return result
