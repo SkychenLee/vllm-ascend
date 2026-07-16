@@ -17,12 +17,13 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from vllm.logger import logger
+
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -71,15 +72,24 @@ from vllm_ascend.ops.triton.paged_attn.decode_utils import (
     DECODE_SPLIT_KV_NUM_PROGRAMS,
     build_split_kv_descriptors,
 )
+from vllm_ascend.quantization.utils import quant_dequant_hif4
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+# Hardcoded switch for QKV and KV-cache HiF4 pseudo quantization.
+# Set to False to restore the original attention path.
+ENABLE_HIF4 = True
+HIF4_ATTENTION_SINK_SIZE = 128
+HIF4_K_HIGH_PRECISION_WINDOW_SIZE = 128
+HIF4_V_HIGH_PRECISION_WINDOW_SIZE = 128
+HIF4_V_QUANT_BLOCK_SIZE = 64
 
 HIGH_PRECISION_WINDOW_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
 ATTENTION_SINK_SIZE = envs_ascend.VLLM_ASCEND_ATTENTION_SINK_SIZE
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
@@ -190,6 +200,9 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
+    # Prompt lengths anchor HiF4 decode windows so they never include prefill
+    # tokens (including the attention sink).
+    num_prompt_tokens_tensor: torch.Tensor = None
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
     query_start_loc: torch.Tensor = None
@@ -315,6 +328,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
+        num_prompt_tokens_cpu = getattr(common_attn_metadata, "num_prompt_tokens_cpu", None)
+        if isinstance(num_prompt_tokens_cpu, torch.Tensor):
+            num_prompt_tokens_cpu = num_prompt_tokens_cpu[:num_reqs]
+        else:
+            num_prompt_tokens_cpu = None
+
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
@@ -329,6 +348,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens.tolist(),
+            num_prompt_tokens_tensor=num_prompt_tokens_cpu,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
@@ -404,6 +424,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
+        self.enable_hif4_qkv_quant = ENABLE_HIF4 and attn_type == AttentionType.DECODER
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
@@ -411,6 +432,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.vllm_config.scheduler_config.max_num_seqs, dtype=torch.int64, device="npu"
         )
         self._seq_qlens_buffer = torch.zeros(
+            self.vllm_config.scheduler_config.max_num_seqs, dtype=torch.int64, device="npu"
+        )
+        self._prefill_lens_buffer = torch.zeros(
             self.vllm_config.scheduler_config.max_num_seqs, dtype=torch.int64, device="npu"
         )
         self._split_kv_work_desc_buffer = None
@@ -450,6 +474,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
 
     @staticmethod
+    def _update_hif4_graph_length_buffers(
+        attn_metadata: AscendMetadata,
+        seq_lens_buffer: torch.Tensor,
+        seq_qlens_buffer: torch.Tensor,
+        prefill_lens_buffer: torch.Tensor,
+    ) -> None:
+        """Refresh fixed-address length buffers before an ACLGraph replay."""
+        latest_seq_lens = attn_metadata.seq_lens
+        if latest_seq_lens is None:
+            return
+        num_reqs = latest_seq_lens.numel()
+        seq_lens_buffer[:num_reqs].copy_(latest_seq_lens, non_blocking=True)
+
+        cumulative_query_lens = torch.tensor(attn_metadata.actual_seq_lengths_q)
+        seq_qlens_buffer[: cumulative_query_lens.numel()].copy_(cumulative_query_lens, non_blocking=True)
+
+        prefill_lens_buffer.copy_(seq_lens_buffer, non_blocking=True)
+        prompt_lens = getattr(attn_metadata, "num_prompt_tokens_tensor", None)
+        if prompt_lens is not None:
+            prefill_lens_buffer[: prompt_lens.numel()].copy_(prompt_lens, non_blocking=True)
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
@@ -485,8 +531,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_table,
                         seq_lens,
                         output,
+                        seq_lens_buffer,
+                        seq_qlens_buffer,
+                        prefill_lens_buffer,
                     ) = param
-                    seq_lens = forward_context.attn_metadata[key].seq_lens
+                    current_attn_metadata = forward_context.attn_metadata[key]
+                    seq_lens = current_attn_metadata.seq_lens
+                    AscendAttentionBackendImpl._update_hif4_graph_length_buffers(
+                        current_attn_metadata,
+                        seq_lens_buffer,
+                        seq_qlens_buffer,
+                        prefill_lens_buffer,
+                    )
 
                     workspace = torch_npu._npu_paged_attention_get_workspace(
                         query=query,
@@ -559,16 +615,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         sinks,
                         attn_output,
                         softmax_lse,
+                        seq_lens_buffer,
+                        seq_qlens_buffer,
+                        prefill_lens_buffer,
                     ) = param
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        current_attn_metadata = attn_metadata[draft_step][key]
+                        seq_lens = current_attn_metadata.seq_lens_list
+                        actual_seq_lengths_q = current_attn_metadata.actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        current_attn_metadata = attn_metadata[key]
+                        seq_lens = current_attn_metadata.seq_lens_list
+                        actual_seq_lengths_q = current_attn_metadata.actual_seq_lengths_q
+
+                    AscendAttentionBackendImpl._update_hif4_graph_length_buffers(
+                        current_attn_metadata,
+                        seq_lens_buffer,
+                        seq_qlens_buffer,
+                        prefill_lens_buffer,
+                    )
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -635,9 +703,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             attn_count = 0
-            split_kv_descriptor_cache: dict[
-                tuple[int, ...], tuple[torch.Tensor, torch.Tensor]
-            ] = {}
+            split_kv_descriptor_cache: dict[tuple[int, ...], tuple[torch.Tensor, torch.Tensor]] = {}
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
@@ -668,6 +734,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_v_aq_offset,
                         seq_lens_buffer,
                         seq_qlens_buffer,
+                        prefill_lens_buffer,
                         split_kv_partial_output,
                         split_kv_partial_lse,
                         split_kv_work_desc,
@@ -680,6 +747,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         latest_cpu_seq_qlens = torch.tensor(actual_seq_lengths_q)
+                        latest_cpu_prefill_lens = getattr(
+                            attn_metadata[draft_step][key], "num_prompt_tokens_tensor", None
+                        )
                         block_tables = attn_metadata[draft_step][key].block_tables
                         attn_count = attn_count + 1
                         if not attn_metadata[draft_step][key].causal:
@@ -689,6 +759,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
                         latest_cpu_seq_qlens = torch.tensor(actual_seq_lengths_q)
+                        latest_cpu_prefill_lens = getattr(attn_metadata[key], "num_prompt_tokens_tensor", None)
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -706,6 +777,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     if seq_qlens_buffer is not None and latest_cpu_seq_qlens is not None:
                         num_reqs = latest_cpu_seq_qlens.numel()
                         seq_qlens_buffer[:num_reqs].copy_(latest_cpu_seq_qlens, non_blocking=True)
+                    if prefill_lens_buffer is not None and latest_cpu_seq_lens is not None:
+                        # Missing prompt lengths (for example in an unsupported
+                        # scheduler path) disable window quantization safely by
+                        # making decode_len zero.
+                        prefill_lens_buffer.copy_(seq_lens_buffer, non_blocking=True)
+                        if latest_cpu_prefill_lens is not None:
+                            num_reqs = latest_cpu_prefill_lens.numel()
+                            prefill_lens_buffer[:num_reqs].copy_(latest_cpu_prefill_lens, non_blocking=True)
 
                     split_kv_workspace = None
                     split_kv_descriptors = None
@@ -928,9 +1007,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 None,
                 self._seq_lens_buffer,
                 self._seq_qlens_buffer,
+                self._prefill_lens_buffer,
             )  # type: ignore
         else:
-            attn_params = attn_params + (None, None, None, None, self._seq_lens_buffer, self._seq_qlens_buffer)  # type: ignore
+            attn_params = attn_params + (
+                None,
+                None,
+                None,
+                None,
+                self._seq_lens_buffer,
+                self._seq_qlens_buffer,
+                self._prefill_lens_buffer,
+            )  # type: ignore
 
         use_split_kv = (
             envs_ascend.VLLM_ASCEND_USE_PAGED_ATTENTION
@@ -1094,6 +1182,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sinks,
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
+                self._seq_lens_buffer,
+                self._seq_qlens_buffer,
+                self._prefill_lens_buffer,
             )
         )
         torch.npu.graph_task_group_begin(stream)
@@ -1164,6 +1255,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     attn_metadata.block_tables,
                     attn_metadata.seq_lens,
                     weak_ref_tensors(output),
+                    self._seq_lens_buffer,
+                    self._seq_qlens_buffer,
+                    self._prefill_lens_buffer,
                 )
             )
 
@@ -1212,7 +1306,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         #         actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
         # elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
         if attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
-            logger.info_once(f"run in PrefillCacheHit")
+            logger.info_once("run in PrefillCacheHit")
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
@@ -1224,7 +1318,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            logger.info_once(f"run in DecodeOnly")
+            logger.info_once("run in DecodeOnly")
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
             key = self.key_cache.view(  # type: ignore
                 num_block, block_size, -1
@@ -1236,8 +1330,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         # chunked prefill.
         else:
-            logger.info_once(f"run in else")
-            
+            logger.info_once("run in else")
+
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
             key = self.key_cache.view(  # type: ignore
                 num_block, block_size, -1
@@ -1363,9 +1457,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     )
                     if block_table is not None and block_table.dtype != torch.int32:
                         block_table = block_table.to(torch.int32)
-                    
+
                     kv_lens = kv_lens_or_cu
-                    logger.info_once(f"fia_triton")
+                    logger.info_once("fia_triton")
                     attn_output = fia_triton(
                         query=query,
                         key_cache=key,
@@ -1383,7 +1477,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         use_hif4_p=envs_ascend.VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P,
                     )
                 else:
-                    logger.info_once(f"torch_npu.npu_fused_infer_attention_score")
+                    logger.info_once("torch_npu.npu_fused_infer_attention_score")
                     attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                         query=query,
                         key=key,
@@ -1493,6 +1587,262 @@ class AscendAttentionBackendImpl(AttentionImpl):
             notify_kv_cache_written()
         return query, key, value, output
 
+    def _get_hif4_quant_mask(self, attn_metadata: AscendMetadata, device: torch.device) -> torch.Tensor:
+        """Build a per-token mask that preserves the initial attention sink.
+
+        ``query_start_loc`` contains offsets inside the current scheduler step,
+        while ``seq_lens`` contains the full sequence lengths. Combining both
+        yields absolute token positions, including chunked-prefill context.
+        The mask is cached on metadata because every attention layer shares it.
+        """
+        is_capturing = bool(getattr(_EXTRA_CTX, "capturing", False))
+        cached_mask = vars(attn_metadata).get("_hif4_quant_mask")
+        if not is_capturing and cached_mask is not None and cached_mask.device == device:
+            return cached_mask
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        query_start_loc = attn_metadata.query_start_loc
+        token_indices = torch.arange(num_actual_tokens, device=device)
+        if not attn_metadata.causal:
+            absolute_positions = token_indices + HIF4_ATTENTION_SINK_SIZE
+        elif query_start_loc is None or query_start_loc.numel() < 2:
+            absolute_positions = token_indices
+        else:
+            query_start_loc = query_start_loc.to(device=device)
+            sequence_ids = torch.bucketize(token_indices, query_start_loc[1:], right=True)
+            relative_positions = token_indices - query_start_loc[sequence_ids]
+
+            # ACLGraph replay refreshes this fixed-address buffer before every
+            # run. Eager mode can use the metadata's current CPU lengths.
+            seq_lens = self._seq_lens_buffer[: query_start_loc.numel() - 1] if is_capturing else attn_metadata.seq_lens
+            if seq_lens is None:
+                absolute_positions = relative_positions
+            else:
+                seq_lens = seq_lens.to(device=device, non_blocking=True)
+                query_lens = query_start_loc[1:] - query_start_loc[:-1]
+                context_lens = (seq_lens[: query_lens.numel()] - query_lens).clamp_min(0)
+                absolute_positions = context_lens[sequence_ids] + relative_positions
+
+        quant_mask = absolute_positions >= HIF4_ATTENTION_SINK_SIZE
+        if not is_capturing:
+            vars(attn_metadata)["_hif4_quant_mask"] = quant_mask
+        return quant_mask
+
+    @staticmethod
+    def _apply_hif4_quant_mask(
+        tensor: torch.Tensor,
+        quant_mask: torch.Tensor,
+        num_actual_tokens: int,
+    ) -> torch.Tensor:
+        actual_tensor = tensor[:num_actual_tokens]
+        quantized_tensor = quant_dequant_hif4(actual_tensor, axe=-1)
+        mask_shape = (num_actual_tokens,) + (1,) * (tensor.ndim - 1)
+        actual_output = torch.where(quant_mask.view(mask_shape), quantized_tensor, actual_tensor)
+        if num_actual_tokens == tensor.shape[0]:
+            return actual_output
+        return torch.cat((actual_output, tensor[num_actual_tokens:]), dim=0)
+
+    def _quantize_qkv_hif4(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize Q and prefill K/V while keeping new decode K/V in FP.
+
+        Decode K/V are written to the cache at their original precision and
+        quantized only after they leave the high-precision windows. Decode
+        requests are ordered before prefill requests in mixed batches.
+        """
+        quant_mask = self._get_hif4_quant_mask(attn_metadata, query.device)
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        kv_quant_mask = quant_mask
+        if num_decode_tokens > 0:
+            token_indices = torch.arange(num_actual_tokens, device=query.device)
+            kv_quant_mask = quant_mask & (token_indices >= num_decode_tokens)
+        return (
+            self._apply_hif4_quant_mask(query, quant_mask, num_actual_tokens),
+            self._apply_hif4_quant_mask(key, kv_quant_mask, num_actual_tokens),
+            self._apply_hif4_quant_mask(value, kv_quant_mask, num_actual_tokens),
+        )
+
+    def _get_hif4_decode_lengths(
+        self,
+        attn_metadata: AscendMetadata,
+        device: torch.device,
+        is_capturing: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Return total, step-query and prompt lengths for decode requests."""
+        num_decodes = attn_metadata.num_decodes
+        if num_decodes <= 0:
+            return None
+
+        if is_capturing:
+            seq_lens = self._seq_lens_buffer[:num_decodes]
+            cumulative_query_lens = self._seq_qlens_buffer[:num_decodes]
+            query_lens = torch.cat(
+                (
+                    cumulative_query_lens[:1],
+                    cumulative_query_lens[1:] - cumulative_query_lens[:-1],
+                )
+            )
+            prompt_lens = self._prefill_lens_buffer[:num_decodes]
+        else:
+            prompt_lens = attn_metadata.num_prompt_tokens_tensor
+            query_start_loc = attn_metadata.query_start_loc
+            if prompt_lens is None or attn_metadata.seq_lens is None or query_start_loc is None:
+                return None
+            seq_lens = attn_metadata.seq_lens[:num_decodes].to(device=device, non_blocking=True)
+            query_start_loc = query_start_loc[: num_decodes + 1].to(device=device, non_blocking=True)
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            prompt_lens = prompt_lens[:num_decodes].to(device=device, non_blocking=True)
+
+        return seq_lens.long(), query_lens.long(), prompt_lens.long()
+
+    @staticmethod
+    def _get_hif4_cache_slots(
+        cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        positions: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Map logical positions to safe physical slots without host sync."""
+        num_decodes = positions.shape[0]
+        active_blocks = block_tables[:num_decodes]
+        if active_blocks.shape[1] == 0:
+            return None
+
+        block_size = cache.shape[1]
+        max_logical_position = active_blocks.shape[1] * block_size - 1
+        safe_positions = positions.clamp(min=0, max=max_logical_position)
+        block_indices = (safe_positions // block_size).long()
+        offsets = (safe_positions % block_size).long()
+
+        row_shape = (num_decodes,) + (1,) * (positions.ndim - 1)
+        row_indices = torch.arange(num_decodes, device=cache.device).view(row_shape).expand_as(positions)
+        physical_blocks = active_blocks[row_indices, block_indices]
+        write_mask = valid_mask & (positions >= 0) & (physical_blocks >= 0)
+        physical_slots = (physical_blocks * block_size + offsets).long()
+
+        # Invalid rows still participate in the fixed-shape graph. Point them
+        # at the request's first block and write their unchanged value back.
+        fallback_blocks = active_blocks[:, 0].clamp_min(0)
+        fallback_slots = (fallback_blocks * block_size).view(row_shape).expand_as(positions)
+        safe_slots = torch.where(write_mask, physical_slots, fallback_slots)
+        return safe_slots.flatten(), write_mask.flatten()
+
+    def _quantize_hif4_k_window(
+        self,
+        attn_metadata: AscendMetadata,
+        seq_lens: torch.Tensor,
+        query_lens: torch.Tensor,
+        window_start_lens: torch.Tensor,
+    ) -> None:
+        """Quantize every K token that left the 128-token decode tail."""
+        if self.key_cache is None or attn_metadata.block_tables is None:
+            return
+        max_evictions = attn_metadata.num_decode_tokens
+        if max_evictions <= 0:
+            return
+
+        offsets = torch.arange(max_evictions, device=self.key_cache.device)
+        positions = (
+            seq_lens.unsqueeze(1) - query_lens.unsqueeze(1) - HIF4_K_HIGH_PRECISION_WINDOW_SIZE + offsets.unsqueeze(0)
+        )
+        valid_mask = (offsets.unsqueeze(0) < query_lens.unsqueeze(1)) & (positions >= window_start_lens.unsqueeze(1))
+        slot_data = self._get_hif4_cache_slots(
+            self.key_cache,
+            attn_metadata.block_tables,
+            positions,
+            valid_mask,
+        )
+        if slot_data is None:
+            return
+        slots, write_mask = slot_data
+
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        key_window = flat_key[slots]
+        quantized_key = quant_dequant_hif4(key_window, axe=-1)
+        flat_key[slots] = torch.where(write_mask.view(-1, 1, 1), quantized_key, key_window)
+
+    def _quantize_hif4_v_window(
+        self,
+        attn_metadata: AscendMetadata,
+        seq_lens: torch.Tensor,
+        query_lens: torch.Tensor,
+        window_start_lens: torch.Tensor,
+    ) -> None:
+        """Quantize completed V blocks on the token axis behind the FP tail."""
+        if self.value_cache is None or attn_metadata.block_tables is None:
+            return
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        if num_decode_tokens <= 0:
+            return
+
+        max_new_groups = (num_decode_tokens + HIF4_V_QUANT_BLOCK_SIZE - 1) // HIF4_V_QUANT_BLOCK_SIZE
+        decode_lens = seq_lens - window_start_lens
+        previous_decode_lens = (decode_lens - query_lens).clamp_min(0)
+        completed_groups = (decode_lens - HIF4_V_HIGH_PRECISION_WINDOW_SIZE).clamp_min(0) // HIF4_V_QUANT_BLOCK_SIZE
+        previous_completed_groups = (previous_decode_lens - HIF4_V_HIGH_PRECISION_WINDOW_SIZE).clamp_min(
+            0
+        ) // HIF4_V_QUANT_BLOCK_SIZE
+
+        group_offsets = torch.arange(max_new_groups, device=self.value_cache.device)
+        group_indices = previous_completed_groups.unsqueeze(1) + group_offsets.unsqueeze(0)
+        valid_groups = group_indices < completed_groups.unsqueeze(1)
+        token_offsets = torch.arange(HIF4_V_QUANT_BLOCK_SIZE, device=self.value_cache.device)
+        positions = (
+            window_start_lens.view(-1, 1, 1)
+            + group_indices.unsqueeze(-1) * HIF4_V_QUANT_BLOCK_SIZE
+            + token_offsets.view(1, 1, -1)
+        )
+        valid_mask = valid_groups.unsqueeze(-1).expand_as(positions)
+        slot_data = self._get_hif4_cache_slots(
+            self.value_cache,
+            attn_metadata.block_tables,
+            positions,
+            valid_mask,
+        )
+        if slot_data is None:
+            return
+        slots, write_mask = slot_data
+
+        num_decodes = seq_lens.shape[0]
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+        value_window = flat_value[slots].view(
+            num_decodes,
+            max_new_groups,
+            HIF4_V_QUANT_BLOCK_SIZE,
+            self.num_kv_heads,
+            self.head_size,
+        )
+        token_axis_value = value_window.permute(0, 1, 3, 4, 2).contiguous()
+        quantized_value = quant_dequant_hif4(token_axis_value, axe=-1)
+        quantized_value = quantized_value.permute(0, 1, 4, 2, 3).reshape(value_window.shape)
+        write_mask = write_mask.view(num_decodes, max_new_groups, HIF4_V_QUANT_BLOCK_SIZE, 1, 1)
+        flat_value[slots] = torch.where(write_mask, quantized_value, value_window).reshape(
+            -1, self.num_kv_heads, self.head_size
+        )
+
+    def _quantize_hif4_kv_windows(
+        self,
+        attn_metadata: AscendMetadata,
+        device: torch.device,
+        is_capturing: bool,
+    ) -> None:
+        """Apply graph-compatible K/V sliding-window pseudo-quantization."""
+        decode_lengths = self._get_hif4_decode_lengths(attn_metadata, device, is_capturing)
+        if decode_lengths is None:
+            return
+        seq_lens, query_lens, prompt_lens = decode_lengths
+        # A short prompt does not cover the whole attention sink. Decode tokens
+        # at absolute positions below 128 remain permanently high precision.
+        window_start_lens = prompt_lens.clamp_min(HIF4_ATTENTION_SINK_SIZE)
+        self._quantize_hif4_k_window(attn_metadata, seq_lens, query_lens, window_start_lens)
+        self._quantize_hif4_v_window(attn_metadata, seq_lens, query_lens, window_start_lens)
+
     def forward_impl(
         self,
         query: torch.Tensor,
@@ -1564,29 +1914,44 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-        
-        if envs_ascend.VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4 or envs_ascend.VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4:
+        is_capturing = bool(getattr(_EXTRA_CTX, "capturing", False))
+        use_c4_kv_quant = not self.enable_hif4_qkv_quant and (
+            envs_ascend.VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4 or envs_ascend.VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4
+        )
+        if use_c4_kv_quant:
             self._prepare_c4_scales(layer, query.device)
-        
+
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
-            
-            # Prefill阶段: 全部伪量化再写入cache
-            # Decode阶段: 延迟量化——新KV不量化直接写入, 稍后对滑出窗口的旧KV做原地伪量化
-            if not is_decode and envs_ascend.VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4:
-                key, value = self._quantize_kv_to_mxfp4_sink(key, value, layer, attn_metadata.num_actual_tokens, attn_metadata.query_start_loc)
-                # key, value = self._quantize_kv_to_mxfp4(key, value, layer, attn_metadata.num_actual_tokens)
-            
+            if self.enable_hif4_qkv_quant:
+                query, key, value = self._quantize_qkv_hif4(query, key, value, attn_metadata)
+            elif not is_decode and envs_ascend.VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4:
+                key, value = self._quantize_kv_to_mxfp4_sink(
+                    key,
+                    value,
+                    layer,
+                    attn_metadata.num_actual_tokens,
+                    attn_metadata.query_start_loc,
+                )
+
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output
             )
-            
-            if is_decode and envs_ascend.VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4:
-                if _EXTRA_CTX.capturing:
+
+            if use_c4_kv_quant and is_decode and envs_ascend.VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4:
+                if is_capturing:
                     self._quantize_evicted_kv_slots_mx(layer, attn_metadata, self._seq_lens_buffer)
                 else:
                     self._quantize_evicted_kv_slots_eager_mx(layer, attn_metadata)
+        elif self.enable_hif4_qkv_quant:
+            # Decode-only paths may update K/V separately and pass only Q here.
+            quant_mask = self._get_hif4_quant_mask(attn_metadata, query.device)
+            query = self._apply_hif4_quant_mask(query, quant_mask, attn_metadata.num_actual_tokens)
+
+        if self.enable_hif4_qkv_quant and attn_metadata.num_decodes > 0:
+            self._quantize_hif4_kv_windows(attn_metadata, query.device, is_capturing)
+
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
@@ -1605,7 +1970,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         """
         if hasattr(layer, "_c4_scales_prepared"):
             return
-        logger.info_once(f"run in _prepare_c4_scales")
+        logger.info_once("run in _prepare_c4_scales")
+
         def _shard_and_reshape(raw: torch.Tensor) -> torch.Tensor:
             if raw.numel() == 1:
                 return raw.to(device=device)
@@ -1638,15 +2004,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         layer._c4_scales_prepared = True
 
-
     def _quantize_kv_to_mxfp4_sink(
-            self,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            layer: AttentionLayer,
-            num_actual_tokens: int,
-            query_start_loc: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer: AttentionLayer,
+        num_actual_tokens: int,
+        query_start_loc: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pseudo-quantize K/V, keeping the first `sink_size` tokens of each sequence unquantized."""
         self._prepare_c4_scales(layer, key.device)
         dtype = key.dtype
@@ -1654,7 +2019,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         actual_key = key[:num_actual_tokens]
         actual_value = value[:num_actual_tokens]
-        
+
         # query_start_loc:[10 ,25 ,30]
         # seq_ids:[0-n] [0...... 1..... 2........]
         # seq_start_locs[0-n] [0..10....... 25............ 30............]
@@ -1667,28 +2032,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
         seq_ids = torch.bucketize(global_idx, query_start_loc[1:], right=True)
 
         seq_start_locs = query_start_loc[seq_ids]
-        relative_idx = global_idx - seq_start_locs # 形状: [num_actual_tokens]
+        relative_idx = global_idx - seq_start_locs  # 形状: [num_actual_tokens]
 
         # 形状扩展为 [num_actual_tokens, 1, 1] 方便广播
         quant_mask = (relative_idx >= sink_size).view(-1, 1, 1)
 
-        k_qdq_all = (torch.clamp(
-            torch.round(actual_key * layer._c4_k_inv_scale_bf16),
-            -6,
-            6,
-        ) / layer._c4_k_inv_scale_bf16).to(dtype)
-        
-        v_qdq_all = (torch.clamp(
-            torch.round(actual_value * layer._c4_v_inv_scale_bf16),
-            -6,
-            6,
-        ) / layer._c4_v_inv_scale_bf16).to(dtype)
-        
+        k_qdq_all = (
+            torch.clamp(
+                torch.round(actual_key * layer._c4_k_inv_scale_bf16),
+                -6,
+                6,
+            )
+            / layer._c4_k_inv_scale_bf16
+        ).to(dtype)
+
+        v_qdq_all = (
+            torch.clamp(
+                torch.round(actual_value * layer._c4_v_inv_scale_bf16),
+                -6,
+                6,
+            )
+            / layer._c4_v_inv_scale_bf16
+        ).to(dtype)
+
         k_qdq = torch.where(quant_mask, k_qdq_all, actual_key)
         v_qdq = torch.where(quant_mask, v_qdq_all, actual_value)
-        
+
         return k_qdq, v_qdq
-    
+
     def _quantize_kv_to_mxfp4(
         self,
         key: torch.Tensor,
@@ -1702,16 +2073,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_key = key[:num_actual_tokens]
         actual_value = value[:num_actual_tokens]
 
-        k_qdq = (torch.clamp(
-            torch.round(actual_key * layer._c4_k_inv_scale_bf16),
-            -6,
-            6,
-        ) / layer._c4_k_inv_scale_bf16).to(dtype)
-        v_qdq = (torch.clamp(
-            torch.round(actual_value * layer._c4_v_inv_scale_bf16),
-            -6,
-            6,
-        ) / layer._c4_v_inv_scale_bf16).to(dtype)
+        k_qdq = (
+            torch.clamp(
+                torch.round(actual_key * layer._c4_k_inv_scale_bf16),
+                -6,
+                6,
+            )
+            / layer._c4_k_inv_scale_bf16
+        ).to(dtype)
+        v_qdq = (
+            torch.clamp(
+                torch.round(actual_value * layer._c4_v_inv_scale_bf16),
+                -6,
+                6,
+            )
+            / layer._c4_v_inv_scale_bf16
+        ).to(dtype)
         return k_qdq, v_qdq
 
     def _quantize_evicted_kv_slots_mx(
@@ -1726,12 +2103,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_decodes = attn_metadata.num_decodes
         if num_decodes <= 0:
             return
-        
+
         # 用来验证 update param 是否生效，update 中直接赋值 -1 ，这里作为分母直接报错
         # tmp = 1.0 / (_seq_lens_buffer + 1.0)
         # tmp_int = torch.round(tmp).to(torch.int32)
         # logger.info_once(f"tmp: {len(tmp)}, ")
-        
+
         # kv_cache: shape =
         #         [2, num_blocks, block_size, num_kv_heads, head_size]
         block_tables = attn_metadata.block_tables  # (batch_size, max_blocks_per_seq)
@@ -1742,23 +2119,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         n = HIGH_PRECISION_WINDOW_SIZE
 
         active_blocks = block_tables[:num_decodes]
-        # logger.info_once(f"num_decodes: {num_decodes}, active_blocks.shape: {active_blocks.shape}, block_tables.shape:{block_tables.shape}")
-        # logger.info_once(f"_seq_lens_buffer: {_seq_lens_buffer.device}, ")
-        
         approx_seq_lens = _seq_lens_buffer[:num_decodes]
-        
+
         # 用来验证 update param 是否生效，update 中直接赋值 -1 ，这里作为分母直接报错
         # approx_seq_lens = _seq_lens_buffer[:num_decodes] + tmp_int[:num_decodes]
         # logger.info_once(f"approx_seq_lens: {len(approx_seq_lens)}")
-        
+
         # 被踢出窗口的逻辑 Token 位置：seq_len - 1 - n
-        evicted_pos = approx_seq_lens - 1 - n # (num_decodes,)
+        evicted_pos = approx_seq_lens - 1 - n  # (num_decodes,)
         valid_evict_mask = (evicted_pos >= 0) & (evicted_pos >= m)  # (num_decodes,)
 
         # 强制用 clamp 把负数和越界位置收束到 0，防止索引越界，后面通过 mask 屏蔽写回
         safe_evicted_pos = torch.clamp(evicted_pos, min=0)
         target_block_indices = safe_evicted_pos // block_size  # (num_decodes,)
-        offset_in_blocks = safe_evicted_pos % block_size       # (num_decodes,)
+        offset_in_blocks = safe_evicted_pos % block_size  # (num_decodes,)
 
         # 从 block_table 捞出物理块号 (纯 NPU Tensor 静态索引，极其高效)
         row_indices = torch.arange(num_decodes, device=device)
@@ -1779,14 +2153,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         k_evicted = flat_key[final_slots]
         v_evicted = flat_value[final_slots]
 
-        k_quantized = (torch.clamp(
-            torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6
-        ) / layer._c4_k_inv_scale_bf16).to(k_evicted.dtype)
+        k_quantized = (
+            torch.clamp(torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6) / layer._c4_k_inv_scale_bf16
+        ).to(k_evicted.dtype)
 
-        v_quantized = (torch.clamp(
-            torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6
-        ) / layer._c4_v_inv_scale_bf16).to(v_evicted.dtype)
-
+        v_quantized = (
+            torch.clamp(torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6) / layer._c4_v_inv_scale_bf16
+        ).to(v_evicted.dtype)
 
         write_mask = safe_slots_mask.unsqueeze(-1).unsqueeze(-1)  # (num_decodes, 1, 1)
 
@@ -1796,7 +2169,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Scatter 原地回写
         flat_key[final_slots] = k_final
         flat_value[final_slots] = v_final
-    
+
     def _quantize_evicted_kv_slots_eager_mx(
         self,
         layer: AttentionLayer,
@@ -1828,14 +2201,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             seq_len = seq_lens_list[req_idx]
             # 刚滑出窗口的逻辑 Token 位置
             evicted_pos = seq_len - 1 - n
-            
+
             # Eager 模式下直接通过 if 过滤，不满足条件的不处理
             if evicted_pos < 0:
                 continue
 
             block_idx = evicted_pos // block_size
             offset_in_block = evicted_pos % block_size
-            
+
             # 安全取出物理块号
             phys_block = block_tables[req_idx, block_idx].item()
             if phys_block >= 0:  # 确保块已被分配
@@ -1845,7 +2218,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # 如果当前 batch 没有任何请求需要释放高精槽位，直接返回
         if not evicted_slots:
             return
-        # logger.info_once(f"seq_lens_list: {seq_lens_list}, evicted_slots: {evicted_slots}, evicted_pos:{evicted_pos}, block_tables: {block_tables}, phys_block: {phys_block}")
         # 转换为 Tensor 用于高级索引
         device = self.key_cache.device
         evicted_indices = torch.tensor(evicted_slots, dtype=torch.long, device=device)
@@ -1859,13 +2231,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         v_evicted = flat_value[evicted_indices]
 
         # 原地量化 & 反量化
-        k_quantized = (torch.clamp(
-            torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6
-        ) / layer._c4_k_inv_scale_bf16).to(k_evicted.dtype)
+        k_quantized = (
+            torch.clamp(torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6) / layer._c4_k_inv_scale_bf16
+        ).to(k_evicted.dtype)
 
-        v_quantized = (torch.clamp(
-            torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6
-        ) / layer._c4_v_inv_scale_bf16).to(v_evicted.dtype)
+        v_quantized = (
+            torch.clamp(torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6) / layer._c4_v_inv_scale_bf16
+        ).to(v_evicted.dtype)
 
         # Scatter 回写
         flat_key[evicted_indices] = k_quantized
