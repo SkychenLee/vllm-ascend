@@ -775,7 +775,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             block_size=block_size,
                             atten_mask=attn_mask,
                             use_mxfp4_p=envs_ascend.VLLM_ASCEND_PAGED_ATTN_USE_MXFP4_P,
-                        use_hif4_p=envs_ascend.VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P,
+                            use_hif4_p=envs_ascend.VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P,
                             output=attn_output.view_as(query),
                             split_kv_num_programs=split_kv_num_programs,
                             split_kv_workspace=split_kv_workspace,
