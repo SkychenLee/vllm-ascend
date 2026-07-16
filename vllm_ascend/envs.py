@@ -123,6 +123,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # variant above. Only takes effect when VLLM_ASCEND_USE_PAGED_ATTENTION
     # is enabled.
     "VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P": lambda: bool(int(os.getenv("VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P", "0"))),
+    
+    "VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4": lambda: bool(int(os.getenv("VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4", "0"))),
+    "VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4": lambda: bool(int(os.getenv("VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4", "0"))),
+    
+    "VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE": lambda: os.getenv("VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE", 128),
+    "VLLM_ASCEND_ATTENTION_SINK_SIZE": lambda: os.getenv("VLLM_ASCEND_ATTENTION_SINK_SIZE", 128),
 }
 
 # end-env-vars-definition
