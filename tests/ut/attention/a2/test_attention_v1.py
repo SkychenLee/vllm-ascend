@@ -4,6 +4,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
+    ENABLE_HIF4,
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -230,6 +231,15 @@ class TestAscendAttentionBackendImpl(TestBase):
             sinks=torch.tensor([-3.4062], dtype=torch.bfloat16),
         )
 
+        self.hif4_enabled_by_default = self.impl.enable_hif4_qkv_quant
+        for impl in (self.impl, self.impl_192, self.impl_swa, self.impl_swa_sink):
+            impl.enable_hif4_qkv_quant = False
+
+    def test_hif4_enable_is_hardcoded_for_decoder_attention(self):
+        self.assertTrue(ENABLE_HIF4)
+        self.assertTrue(self.hif4_enabled_by_default)
+        self.assertFalse(self.impl_error.enable_hif4_qkv_quant)
+
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
         query = torch.randn(10, 8 * 64)
@@ -242,6 +252,128 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl.forward(layer, query, key, value, kv_cache, None, output)
 
         assert output.shape == (10, 8 * 64)
+
+    @patch("vllm_ascend.attention.attention_v1.quant_dequant_hif4", side_effect=lambda tensor, axe: tensor + 10)
+    def test_forward_hif4_qkv_quant_uses_absolute_sink_positions(self, mock_hif4_quant):
+        query = torch.zeros(4, 8, 64)
+        key = torch.zeros(4, 8, 64)
+        value = torch.zeros(4, 8, 64)
+        output = torch.empty_like(query)
+        kv_cache = torch.empty(2, 0, 0, 8, 64)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.query_start_loc = torch.tensor([0, 2, 4])
+        metadata.seq_lens = torch.tensor([2, 132])
+        metadata.num_actual_tokens = 4
+        metadata.num_decode_tokens = 0
+        metadata.num_decodes = 0
+        metadata.model_runner_type = "generate"
+        metadata.causal = True
+
+        self.impl.enable_hif4_qkv_quant = True
+        self.impl.reshape_and_cache = MagicMock(side_effect=lambda q, k, v, cache, meta, out: (q, k, v, out))
+        self.impl.forward_impl = MagicMock(return_value=torch.zeros_like(query))
+
+        self.impl.forward(self.layer_no_quant, query, key, value, kv_cache, metadata, output)
+
+        quantized_query, quantized_key, quantized_value = self.impl.reshape_and_cache.call_args.args[:3]
+        expected = torch.cat((torch.zeros(2, 8, 64), torch.full((2, 8, 64), 10.0)))
+        torch.testing.assert_close(quantized_query, expected)
+        torch.testing.assert_close(quantized_key, expected)
+        torch.testing.assert_close(quantized_value, expected)
+        self.assertEqual(mock_hif4_quant.call_count, 3)
+        self.impl.reshape_and_cache.assert_called_once()
+
+    @patch("vllm_ascend.attention.attention_v1.quant_dequant_hif4", side_effect=lambda tensor, axe: tensor + 10)
+    def test_hif4_decode_quantizes_q_but_keeps_new_kv_high_precision(self, mock_hif4_quant):
+        query = torch.zeros(2, 8, 64)
+        key = torch.zeros(2, 8, 64)
+        value = torch.zeros(2, 8, 64)
+        metadata = self.attn_metadata
+        metadata.query_start_loc = torch.tensor([0, 1, 2])
+        metadata.seq_lens = torch.tensor([129, 129])
+        metadata.num_actual_tokens = 2
+        metadata.num_decode_tokens = 2
+        metadata.causal = True
+
+        quantized_query, quantized_key, quantized_value = self.impl._quantize_qkv_hif4(query, key, value, metadata)
+
+        torch.testing.assert_close(quantized_query, torch.full_like(query, 10))
+        torch.testing.assert_close(quantized_key, key)
+        torch.testing.assert_close(quantized_value, value)
+        self.assertEqual(mock_hif4_quant.call_count, 3)
+
+    @staticmethod
+    def _make_cpu_hif4_window_impl():
+        impl = object.__new__(AscendAttentionBackendImpl)
+        impl.num_kv_heads = 1
+        impl.head_size = 64
+        impl.key_cache = torch.zeros(8, 64, 1, 64)
+        impl.value_cache = torch.zeros(8, 64, 1, 64)
+        return impl
+
+    @staticmethod
+    def _make_hif4_window_metadata(seq_len: int, prompt_len: int, query_len: int):
+        metadata = MagicMock()
+        metadata.num_decodes = 1
+        metadata.num_decode_tokens = query_len
+        metadata.seq_lens = torch.tensor([seq_len])
+        metadata.query_start_loc = torch.tensor([0, query_len])
+        metadata.num_prompt_tokens_tensor = torch.tensor([prompt_len])
+        metadata.block_tables = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
+        return metadata
+
+    @patch("vllm_ascend.attention.attention_v1.quant_dequant_hif4", side_effect=lambda tensor, axe: tensor + 10)
+    def test_hif4_k_window_quantizes_only_tokens_leaving_tail(self, _mock_hif4_quant):
+        impl = self._make_cpu_hif4_window_impl()
+        metadata = self._make_hif4_window_metadata(seq_len=258, prompt_len=128, query_len=2)
+
+        impl._quantize_hif4_kv_windows(metadata, torch.device("cpu"), is_capturing=False)
+
+        flat_key = impl.key_cache.view(-1, 1, 64)
+        torch.testing.assert_close(flat_key[128:130], torch.full_like(flat_key[128:130], 10))
+        torch.testing.assert_close(flat_key[130], torch.zeros_like(flat_key[130]))
+        self.assertTrue(torch.equal(impl.value_cache, torch.zeros_like(impl.value_cache)))
+
+    @patch("vllm_ascend.attention.attention_v1.quant_dequant_hif4", side_effect=lambda tensor, axe: tensor + 10)
+    def test_hif4_k_window_preserves_decode_tokens_inside_short_prompt_sink(self, _mock_hif4_quant):
+        impl = self._make_cpu_hif4_window_impl()
+        metadata = self._make_hif4_window_metadata(seq_len=140, prompt_len=10, query_len=2)
+
+        impl._quantize_hif4_kv_windows(metadata, torch.device("cpu"), is_capturing=False)
+
+        self.assertTrue(torch.equal(impl.key_cache, torch.zeros_like(impl.key_cache)))
+        self.assertTrue(torch.equal(impl.value_cache, torch.zeros_like(impl.value_cache)))
+
+    @patch("vllm_ascend.attention.attention_v1.quant_dequant_hif4", side_effect=lambda tensor, axe: tensor + 10)
+    def test_hif4_v_window_quantizes_completed_token_axis_block(self, _mock_hif4_quant):
+        impl = self._make_cpu_hif4_window_impl()
+        metadata = self._make_hif4_window_metadata(seq_len=320, prompt_len=128, query_len=1)
+
+        impl._quantize_hif4_kv_windows(metadata, torch.device("cpu"), is_capturing=False)
+
+        flat_value = impl.value_cache.view(-1, 1, 64)
+        torch.testing.assert_close(flat_value[128:192], torch.full_like(flat_value[128:192], 10))
+        torch.testing.assert_close(flat_value[192], torch.zeros_like(flat_value[192]))
+
+    @patch("vllm_ascend.attention.attention_v1.quant_dequant_hif4", side_effect=lambda tensor, axe: tensor + 10)
+    def test_hif4_kv_windows_use_fixed_graph_length_buffers(self, _mock_hif4_quant):
+        impl = self._make_cpu_hif4_window_impl()
+        impl._seq_lens_buffer = torch.tensor([320])
+        impl._seq_qlens_buffer = torch.tensor([1])
+        impl._prefill_lens_buffer = torch.tensor([128])
+        metadata = self._make_hif4_window_metadata(seq_len=0, prompt_len=0, query_len=1)
+        metadata.seq_lens = None
+        metadata.query_start_loc = None
+        metadata.num_prompt_tokens_tensor = None
+
+        impl._quantize_hif4_kv_windows(metadata, torch.device("cpu"), is_capturing=True)
+
+        flat_key = impl.key_cache.view(-1, 1, 64)
+        flat_value = impl.value_cache.view(-1, 1, 64)
+        torch.testing.assert_close(flat_key[191], torch.full_like(flat_key[191], 10))
+        torch.testing.assert_close(flat_value[128:192], torch.full_like(flat_value[128:192], 10))
 
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")

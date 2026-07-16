@@ -3,6 +3,7 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.config import KVTransferConfig
 
 from tests.ut.base import TestBase
@@ -12,7 +13,9 @@ from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME,
 from vllm_ascend.quantization.utils import (
     detect_quantization_method,
     enable_fa_quant,
+    enable_hif4_qkv_quant,
     maybe_auto_detect_quantization,
+    quant_dequant_hif4,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
@@ -191,3 +194,56 @@ class TestEnableFaQuant(TestBase):
         self.assertTrue(result)
         result = enable_fa_quant(vllm_config, layer_name="test_layer")
         self.assertFalse(result)
+
+
+class TestHiF4PseudoQuant(TestBase):
+    def test_zero_blocks_stay_finite_and_zero(self):
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype):
+                x = torch.zeros(2, 3, 70, dtype=dtype)
+
+                output = quant_dequant_hif4(x)
+
+                self.assertEqual(output.shape, x.shape)
+                self.assertTrue(torch.isfinite(output).all())
+                self.assertTrue(torch.equal(output, x))
+
+    def test_non_multiple_dimension_is_padded_and_cropped(self):
+        x = torch.randn(2, 3, 70, dtype=torch.float32)
+
+        output = quant_dequant_hif4(x)
+
+        self.assertEqual(output.shape, x.shape)
+        self.assertEqual(output.dtype, x.dtype)
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_quantization_axis_is_honored(self):
+        x = torch.randn(2, 70, 3, dtype=torch.float32)
+
+        output = quant_dequant_hif4(x, axe=1)
+        expected = quant_dequant_hif4(x.movedim(1, -1)).movedim(-1, 1)
+
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_qkv_quantization_is_enabled_only_for_hif4_projections(self):
+        vllm_config = MagicMock()
+        vllm_config.quant_config.quant_description = {
+            "model.layers.0.self_attn.q_proj.weight": "W4A4_HIFP4",
+            "model.layers.0.self_attn.k_proj.weight": "W4A4_HIFP4",
+            "model.layers.0.self_attn.v_proj.weight": "W4A4_HIFP4",
+            "model.layers.0.mlp.gate_proj.weight": "W4A4_HIFP4",
+        }
+        self.assertTrue(enable_hif4_qkv_quant(vllm_config))
+
+        vllm_config.quant_config.quant_description = {
+            "model.layers.0.self_attn.qkv_proj.weight": "W4A4_HIFP4",
+        }
+        self.assertTrue(enable_hif4_qkv_quant(vllm_config))
+
+        vllm_config.quant_config.quant_description = {
+            "model.layers.0.self_attn.q_proj.weight": "W4A4_HIFP4",
+            "model.layers.0.self_attn.k_proj.weight": "W4A4_MXFP4",
+            "model.layers.0.self_attn.v_proj.weight": "W4A4_HIFP4",
+            "model.layers.0.mlp.gate_proj.weight": "W4A4_HIFP4",
+        }
+        self.assertFalse(enable_hif4_qkv_quant(vllm_config))

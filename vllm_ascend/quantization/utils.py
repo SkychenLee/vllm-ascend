@@ -19,7 +19,6 @@ import json
 from pathlib import Path
 
 import torch
-
 from vllm import envs
 from vllm.logger import logger
 
@@ -29,6 +28,19 @@ from vllm_ascend.utils import (
     FP8_METHOD,
     AscendDeviceType,
     get_ascend_device_type,
+)
+
+HIF4_QUANT_TYPE = "W4A4_HIFP4"
+_HIF4_BLOCK_SIZE = 64
+_HIF4_SCALE_MIN_EXP = -48
+_HIF4_SEPARATE_QKV_WEIGHT_SUFFIXES = (
+    ".q_proj.weight",
+    ".k_proj.weight",
+    ".v_proj.weight",
+)
+_HIF4_FUSED_QKV_WEIGHT_SUFFIXES = (
+    ".qkv_proj.weight",
+    ".query_key_value.weight",
 )
 
 
@@ -228,32 +240,66 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     return False
 
 
-def quant_dequant_hif4(x: torch.Tensor, quant_type: str = "hifx4", axe: int = -1):
-    dtype_ori = x.dtype
-    device = x.device
-    C = x.shape[axe]
-    blk_size_total = 64
-    padC = (blk_size_total - C % blk_size_total) % blk_size_total
+def enable_hif4_qkv_quant(vllm_config) -> bool:
+    """Return whether the checkpoint uses HiF4 for a QKV projection.
 
-    pad_shape = list(x.shape)
-    pad_shape[axe] = padC
+    Attention QKV pseudo quantization is tied to the ModelSlim quantization
+    description instead of a global switch so non-HiF4 models keep their
+    original attention path.
+    """
+    quant_config = getattr(vllm_config, "quant_config", None)
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not isinstance(quant_description, dict):
+        return False
 
-    x_pad = torch.zeros(pad_shape, dtype=dtype_ori, device=device)
-    x_padded = torch.cat([x, x_pad], dim=axe)
+    hif4_weight_names = {
+        weight_name for weight_name, quant_type in quant_description.items() if quant_type == HIF4_QUANT_TYPE
+    }
+    if any(weight_name.endswith(_HIF4_FUSED_QKV_WEIGHT_SUFFIXES) for weight_name in hif4_weight_names):
+        return True
+    qkv_prefixes = [
+        {weight_name[: -len(suffix)] for weight_name in hif4_weight_names if weight_name.endswith(suffix)}
+        for suffix in _HIF4_SEPARATE_QKV_WEIGHT_SUFFIXES
+    ]
+    return bool(set.intersection(*qkv_prefixes))
 
-    total_C = C + padC
-    arange_vec = torch.arange(total_C, device=device)
-    mask_vector = (arange_vec < C).to(dtype_ori)
 
-    unsqueezes = [None] * len(x_padded.shape)
-    unsqueezes[axe] = slice(None)
-    attention_mask = mask_vector[tuple(unsqueezes)]
+def quant_dequant_hif4(x: torch.Tensor, quant_type: str = "hifx4", axe: int = -1) -> torch.Tensor:
+    """Simulate a HiF4 quantize-dequantize round trip along ``axe``.
 
-    qdq_out = _quantize_hif4_kernel(x, -1)
-    qdq_out *= attention_mask
-    return qdq_out.to(dtype_ori)
+    HiF4 uses one three-level scale hierarchy per 64 values. The selected
+    dimension is padded to a complete group for quantization and cropped back
+    afterwards. Padding is deliberately handled here rather than in the core
+    kernel, which keeps the kernel layout simple and supports non-multiple
+    attention head sizes.
+    """
+    del quant_type  # Kept for compatibility with existing callers.
+    if x.ndim == 0:
+        raise ValueError("HiF4 pseudo quantization requires a tensor with at least one dimension")
+    if not -x.ndim <= axe < x.ndim:
+        raise IndexError(f"HiF4 quantization axis {axe} is out of range for a {x.ndim}D tensor")
+    if not x.is_floating_point():
+        raise TypeError(f"HiF4 pseudo quantization requires a floating-point tensor, got {x.dtype}")
+    if x.numel() == 0:
+        return x
+
+    axis = axe % x.ndim
+    original_size = x.shape[axis]
+    x_last = x.movedim(axis, -1) if axis != x.ndim - 1 else x
+    padding = (-original_size) % _HIF4_BLOCK_SIZE
+    if padding:
+        pad_shape = (*x_last.shape[:-1], padding)
+        x_last = torch.cat((x_last, x_last.new_zeros(pad_shape)), dim=-1)
+
+    qdq_out = _quantize_hif4_kernel(x_last, -1)[..., :original_size]
+    if axis != x.ndim - 1:
+        qdq_out = qdq_out.movedim(-1, axis)
+    return qdq_out.to(x.dtype)
+
 
 def _quantize_hif4_kernel(x: torch.Tensor, qdim: int):
+    if x.shape[qdim] % _HIF4_BLOCK_SIZE != 0:
+        raise ValueError(f"HiF4 quantization dimension must be divisible by {_HIF4_BLOCK_SIZE}, got {x.shape[qdim]}")
     x = x.unflatten(qdim, (-1, 8, 2, 4))  # head_size -> [16, 8, 2, 4] for 1024
     man_bits = 3
     x_unsigned = torch.abs(x)
@@ -268,12 +314,19 @@ def _quantize_hif4_kernel(x: torch.Tensor, qdim: int):
     # value lands in [0, 2) after all scaling, ready for mantissa quant.
     div7 = torch.ones_like(max_lv1) / 7.0
     div7 = div7.to(torch.bfloat16).to(x.dtype)
-    scale_factor = max_lv1 * div7  # base scale
+    # Keep scale arithmetic in FP32. In float16, the E6M2 rounding expression
+    # can otherwise overflow at exp2(16), even when the final scale is valid.
+    scale_factor = (max_lv1 * div7).float()  # base scale
+    # A zero block otherwise produces log2(0), followed by inf * 0 and NaN.
+    # E6M2 uses exponent bias 48 in the HiF4 checkpoint format. Float16 cannot
+    # represent 2**-48, so use its smallest normal value as a safe fallback.
+    min_scale = max(2.0**_HIF4_SCALE_MIN_EXP, torch.finfo(x.dtype).tiny)
+    scale_factor = scale_factor.clamp_min(min_scale)
 
     # round scale_factor to bf16 mantissa (simulate HW behavior)
     e_sf = torch.floor(torch.log2(scale_factor))
-    mant_sf = scale_factor / 2 ** e_sf * 2 ** 7
-    scale_factor = torch.round(mant_sf) / 2 ** 7 * 2 ** e_sf
+    mant_sf = scale_factor / 2**e_sf * 2**7
+    scale_factor = torch.round(mant_sf) / 2**7 * 2**e_sf
 
     # round scale_factor to e6m2 (8-bit: 1 sign, 6 exp, 2 mant)
     e_sf = torch.floor(torch.log2(scale_factor))
@@ -282,7 +335,7 @@ def _quantize_hif4_kernel(x: torch.Tensor, qdim: int):
     # per-sub-block dynamic shift
     rec_sf = (1.0 / scale_factor).to(torch.bfloat16).to(x.dtype)
     # L2 sub-block: scale_lv2 = 2 if max_lv2 >= 4*scale_factor else 1
-    scale_lv2 = (max_lv2 * rec_sf)
+    scale_lv2 = max_lv2 * rec_sf
     scale_lv2 = torch.exp2((scale_lv2.clip(0, 4) / 4).floor())
     # L3 sub-block: scale_lv3 = 2 if max_lv3 >= 2*scale_factor else 1
     scale_lv3 = torch.exp2(((max_lv3 * rec_sf / scale_lv2).clip(0, 2) / 2).floor())
@@ -292,22 +345,25 @@ def _quantize_hif4_kernel(x: torch.Tensor, qdim: int):
     mant = torch.floor(mant * 2 ** (man_bits - 1) + 0.5) / 2 ** (man_bits - 1)
     upper_bound = 2 - 2 ** (-man_bits + 1)
     mant = torch.clamp_max(mant, max=upper_bound)
-    
+
     # dequant: sign * mant * three-level scale (S1E2M1 carries sign)
     out = sign * mant * scale_lv2 * scale_lv3 * scale_factor
     out = out.flatten(qdim - 3, qdim)
-    
+
     return out
+
 
 def _unpack_uint8_to_bits_graph(u8_tensor: torch.Tensor) -> torch.Tensor:
     """
     uint8 解包为 8 个比特位，输出 2.0 或 1.0
     """
     # 使用位操作替代除法和取模，图模式友好
-    bits = u8_tensor.unsqueeze(-1).bitwise_and(
-        torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], dtype=torch.uint8, device=u8_tensor.device)
-    ).ne(0)  # 非零即为 bit=1
-    
+    bits = (
+        u8_tensor.unsqueeze(-1)
+        .bitwise_and(torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], dtype=torch.uint8, device=u8_tensor.device))
+        .ne(0)
+    )  # 非零即为 bit=1
+
     # 直接映射：True->2.0, False->1.0 (避免 torch.where)
     return bits.to(torch.float32) + 1.0
 
@@ -317,10 +373,11 @@ def _decode_e6m2_bits_graph(f_u8: torch.Tensor, bias=48) -> torch.Tensor:
     E6M2 比特解析
     """
     # 使用位操作提取指数和尾数（已经是图模式最优）
-    exp = ((f_u8 >> 2) & 0x3F).float()-bias
+    exp = ((f_u8 >> 2) & 0x3F).float() - bias
     mant = (f_u8 & 0x03).float() * 0.25 + 1.0
 
     return mant * torch.exp2(exp)
+
 
 def unpack_hif4_scale_from_fp32_graph(
     weight: torch.Tensor,
@@ -349,18 +406,37 @@ def unpack_hif4_scale_from_fp32_graph(
     l3_u16 = packed_int32 & 0xFFFF
 
     # uint16 -> two uint8
-    l3_u8 = torch.stack((l3_u16 & 0xFF, (l3_u16 >> 8) & 0xFF,), dim=-1,)
+    l3_u8 = torch.stack(
+        (
+            l3_u16 & 0xFF,
+            (l3_u16 >> 8) & 0xFF,
+        ),
+        dim=-1,
+    )
     del packed_int32, l3_u16
     # decode
-    scale_factor_raw = _decode_e6m2_bits_graph(f_u8, bias=bias, )
-    scale_lv2_raw = _unpack_uint8_to_bits_graph(l2_u8,)
-    scale_lv3_raw = _unpack_uint8_to_bits_graph(l3_u8,)
+    scale_factor_raw = _decode_e6m2_bits_graph(
+        f_u8,
+        bias=bias,
+    )
+    scale_lv2_raw = _unpack_uint8_to_bits_graph(
+        l2_u8,
+    )
+    scale_lv3_raw = _unpack_uint8_to_bits_graph(
+        l3_u8,
+    )
     del f_u8, l2_u8, l3_u8
     # broadcast
     scale_factor = scale_factor_raw.reshape(*scale_factor_raw.shape, 1, 1, 1)
     scale_lv2 = scale_lv2_raw.reshape(*scale_lv2_raw.shape, 1, 1)
 
-    scale_lv3 = scale_lv3_raw.reshape(*leading_shape, G, 8, 2, 1,)
+    scale_lv3 = scale_lv3_raw.reshape(
+        *leading_shape,
+        G,
+        8,
+        2,
+        1,
+    )
     del scale_factor_raw, scale_lv2_raw, scale_lv3_raw
 
     # recover weight
@@ -368,24 +444,25 @@ def unpack_hif4_scale_from_fp32_graph(
     weight = weight.reshape(weight_ori)
     return weight.to(torch.bfloat16)
 
+
 def unpack_dynamic_hif4_tensor(packed_tensor: torch.Tensor) -> torch.Tensor:
     """
     支持任意动态维度的 uint8 HIF4 权重解包（TorchCompile / 图模式极致优化版）
     """
     init_shape = packed_tensor.shape
     device = packed_tensor.device
-    
+
     # 1. 动态计算恢复后的全维度 Shape（最后一维 * 2）
     target_shape = init_shape[:-1] + (init_shape[-1] * 2,)
     # 2. 极致省显存：直接按目标形状开辟 float32 空间
     result = torch.empty(target_shape, dtype=torch.float32, device=device)
     # 3. 将输入一次性转为 int32，避免后续多次强转
     packed_int8 = packed_tensor.to(torch.uint8)
-    
+
     # --- 处理低 4 位（写入偶数索引位置 0::2） ---
     low_indices = packed_int8 & 0x0F
     low_sign = (low_indices >> 3) & 0x01
-    
+
     # 核心优化：用数学运算 * 0.25 代替查表，对编译器极度友好
     low_abs = (low_indices & 0x07).to(torch.float32) * 0.25
     low_sign_multiplier = 1.0 - 2.0 * low_sign.to(torch.float32)
@@ -393,10 +470,10 @@ def unpack_dynamic_hif4_tensor(packed_tensor: torch.Tensor) -> torch.Tensor:
     # --- 处理高 4 位（写入奇数索引位置 1::2） ---
     high_indices = (packed_int8 >> 4) & 0x0F
     high_sign = (high_indices >> 3) & 0x01
-    
+
     # 同理，算术代替查表
     high_abs = (high_indices & 0x07).to(torch.float32) * 0.25
     high_sign_multiplier = 1.0 - 2.0 * high_sign.to(torch.float32)
     result[..., 1::2] = high_abs * high_sign_multiplier
-    
+
     return result
