@@ -28,8 +28,19 @@ import torch
 import triton
 import triton.language as tl
 
+from .decode_utils import (
+    DECODE_SPLIT_KV_NUM_PROGRAMS,
+    select_decode_heads_per_program,
+)
+
 DEVICE = "npu"
 
+DECODE_BLOCK_SIZE = 128
+DECODE_BLOCK_M = 16
+DECODE_BLOCK_N = 64
+DECODE_HEAD_DIM = 128
+
+NUM_AI_CORES = 32
 
 @triton.jit
 def clip(x, min_val, max_val):
@@ -68,7 +79,7 @@ def to_mxfp4c7(tensor, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, p_cx=7.0):
     tensor = tensor * mask
 
     scale_emax = tl.exp2(8.0 - 1.0) - 1
-    shared_exp = tl.where(shared_exp > scale_emax, float('nan'), shared_exp)
+    shared_exp = tl.where(shared_exp > scale_emax, float("nan"), shared_exp)
     shared_exp = tl.where(shared_exp < -scale_emax, -scale_emax, shared_exp)
 
     tensor = tensor / (tl.exp2(shared_exp))
@@ -84,9 +95,9 @@ def to_mxfp4c7(tensor, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, p_cx=7.0):
     tensor = tensor / (tl.exp2(mbits - 2)) * (tl.exp2(private_exp))
 
     tensor = clip(tensor, -max_norm, max_norm)
-    tensor = tl.where(tensor == float('inf'), float('inf'), tensor)
-    tensor = tl.where(tensor == -float('inf'), -float('inf'), tensor)
-    tensor = tl.where(tensor == float('nan'), float('nan'), tensor)
+    tensor = tl.where(tensor == float("inf"), float("inf"), tensor)
+    tensor = tl.where(tensor == -float("inf"), -float("inf"), tensor)
+    tensor = tl.where(tensor == float("nan"), float("nan"), tensor)
 
     recovered_tensor = tensor * (tl.exp2(shared_exp))
     recovered_tensor = tl.reshape(recovered_tensor, (BLOCK_M, BLOCK_N))
@@ -94,8 +105,7 @@ def to_mxfp4c7(tensor, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, p_cx=7.0):
 
 
 @triton.jit
-def to_mxfp4c7_p_only(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-                      p_cx: tl.constexpr = 7.0):
+def to_mxfp4c7_p_only(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, p_cx: tl.constexpr = 7.0):
     FP32_MIN_NORMAL = tl.exp2(-126.0)
     NUM_SUB_BLOCKS: tl.constexpr = BLOCK_N // 32
 
@@ -120,32 +130,108 @@ def to_mxfp4c7_p_only(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     x = x * tl.exp2(shared_exp)
     return tl.reshape(x, (BLOCK_M, BLOCK_N))
 
+
+@triton.jit
+def to_hif4(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    """Fake-quantize the softmax probability matrix ``p`` to HIF4.
+
+    This is a Triton port of ``vllm_ascend.quantization.utils.quantize_hif4_kernel``
+    (exercised via ``quant_dequant_hif4``).  HIF4 splits each 64-channel group
+    as ``[8, 2, 4]`` and takes a 3-level max (inner size-4 -> size-2 -> size-8),
+    a shared base ``scale_factor`` per size-8 block, and a 3-bit (mbits=3)
+    mantissa quantization with values in {0, 0.25, 0.5, ..., 1.75}.
+
+    ``p`` is the ``[BLOCK_M, BLOCK_N]`` softmax output tile.  ``BLOCK_N`` must
+    be a multiple of 64 (one outer block holds 64 channels split as 8 * 2 * 4).
+    """
+    # G: number of 64-channel groups along BLOCK_N.
+    G: tl.constexpr = BLOCK_N // 64
+    x = tl.reshape(p, (BLOCK_M, G, 8, 2, 4))
+
+    # sign(x); reuse the same buffer for abs to minimize live 5D tensors.
+    sign = tl.where(x > 0, 1.0, -1.0)
+    sign = tl.where(x == 0.0, 0.0, sign)
+    x = tl.abs(x)
+
+    # Three-level max matching quantize_hif4_kernel: over size-4, then size-2,
+    # then size-8 (i.e. axis -1, -2, -3 of the reshaped tile).
+    max_lv3 = tl.max(x, axis=-1, keep_dims=True)
+    max_lv2 = tl.max(max_lv3, axis=-2, keep_dims=True)
+    max_lv1 = tl.max(max_lv2, axis=-3, keep_dims=True)
+
+    # Base scale (1/7 keeps sub-block headroom), then rounded to e6m2
+    # (2 mantissa bits).  The reference also rounds scale_factor to bf16 first;
+    # we skip that bf16 cast because the Ascend hfusion backend rejects the
+    # explicit fp32<->bf16 cast round-trip (arith::ExtFOp).  The e6m2 rounding
+    # below already snaps scale_factor to a coarse grid, so the residual bf16
+    # rounding is negligible relative to the quantization step.
+    #
+    # NOTE: the log2 guard must be an fp32 constexpr (not a Python `1e-38`
+    # float).  ``tl.maximum(tensor, <fp64 scalar>)`` makes the Ascend hfusion
+    # backend raise ``unsupported datatype for arith::ExtFOp``; a tl.constexpr
+    # fp32 value is folded at compile time and avoids the promotion.
+    LOG2_EPS: tl.constexpr = 1.1754943508222875e-38
+    scale_factor = max_lv1 / 7.0
+    e_sf = tl.floor(tl.log2(tl.maximum(scale_factor, LOG2_EPS)))
+    scale_factor = tl.floor(scale_factor * tl.exp2(2.0 - e_sf) + 0.5) * tl.exp2(e_sf - 2.0)
+
+    # Guard against all-zero groups (e.g. padded/fully-masked P rows in
+    # prefill): scale_factor would be 0 and 1/scale_factor -> inf/nan that
+    # propagates.  Use a safe denominator; the final output is still 0 there
+    # because ``sign`` is 0 wherever the input is 0.
+    scale_factor = tl.where(scale_factor > 0.0, scale_factor, 1.0)
+    rec_sf = 1.0 / scale_factor
+
+    # Per-sub-block dynamic shifts, each in {1, 2}.
+    scale_lv2 = tl.exp2(tl.floor(clip(max_lv2 * rec_sf, 0.0, 4.0) / 4.0))
+    scale_lv3 = tl.exp2(tl.floor(clip(max_lv3 * rec_sf / scale_lv2, 0.0, 2.0) / 2.0))
+
+    # 3-bit mantissa quantization, clamped to the max representable 1.75.
+    # Fold the final reconstruction directly to keep live-tensor count low
+    # (the prefill kernel is already large; too many simultaneous 5D tiles make
+    # the Ascend backend's local-memory allocation pass fail and emit NaNs).
+    mant = x / scale_lv2 / scale_lv3 * rec_sf
+    mant = tl.floor(mant * 4.0 + 0.5) * 0.25
+    mant = tl.minimum(mant, 1.75)
+    out = sign * mant * scale_lv2 * scale_lv3 * scale_factor
+    return tl.reshape(out, (BLOCK_M, BLOCK_N))
+
+
 @triton.jit
 def _paged_attn_fwd_inner(
-        acc, l_i, m_i, q,
-        K_base, V_base,
-        block_tables_ptr,
-        BLOCK_SIZE: tl.constexpr,
-        stride_k_blk, stride_k_slot, stride_k_flat: tl.constexpr,
-        stride_v_blk, stride_v_slot, stride_v_flat: tl.constexpr,
-        qk_scale,
-        kv_head_idx,
-        kv_start,
-        q_abs_pos,
-        q_mask,
-        kv_seq_len,
-        context_len,
-        atten_mask_ptr,
-        stride_mask_q,
-        stride_mask_k,
-        mask_rows,
-        mask_cols,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-        HEAD_DIM: tl.constexpr,
-        HAS_ATTEN_MASK: tl.constexpr,
-        IS_CONTIGUOUS_KV: tl.constexpr,
-        USE_MXFP4_P: tl.constexpr,
+    acc,
+    l_i,
+    m_i,
+    q,
+    K_base,
+    V_base,
+    block_tables_ptr,
+    BLOCK_SIZE: tl.constexpr,
+    stride_k_blk,
+    stride_k_slot,
+    stride_k_flat: tl.constexpr,
+    stride_v_blk,
+    stride_v_slot,
+    stride_v_flat: tl.constexpr,
+    qk_scale,
+    kv_head_idx,
+    kv_start,
+    q_abs_pos,
+    q_mask,
+    kv_seq_len,
+    context_len,
+    atten_mask_ptr,
+    stride_mask_q,
+    stride_mask_k,
+    mask_rows,
+    mask_cols,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    HAS_ATTEN_MASK: tl.constexpr,
+    IS_CONTIGUOUS_KV: tl.constexpr,
+    USE_MXFP4_P: tl.constexpr,
+    USE_HIF4_P: tl.constexpr,
 ):
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, HEAD_DIM)
@@ -155,11 +241,7 @@ def _paged_attn_fwd_inner(
         seq_offset = j * BLOCK_N + offs_n
         if IS_CONTIGUOUS_KV:
             k_token = kv_start + seq_offset
-            k_offset = (
-                k_token[None, :] * stride_k_blk
-                + kv_head_idx * stride_k_slot
-                + offs_d[:, None] * stride_k_flat
-            )
+            k_offset = k_token[:, None] * stride_k_blk + kv_head_idx * stride_k_slot + offs_d[None, :] * stride_k_flat
         else:
             slot_in_block = seq_offset % BLOCK_SIZE
             logical_block = seq_offset // BLOCK_SIZE
@@ -172,27 +254,22 @@ def _paged_attn_fwd_inner(
 
             flat_head_offset = kv_head_idx * HEAD_DIM
             k_offset = (
-                phys_block[None, :] * stride_k_blk
-                + slot_in_block[None, :] * stride_k_slot
-                + (flat_head_offset + offs_d[:, None]) * stride_k_flat
+                phys_block[:, None] * stride_k_blk
+                + slot_in_block[:, None] * stride_k_slot
+                + (flat_head_offset + offs_d[None, :]) * stride_k_flat
             )
         k = tl.load(
             K_base + k_offset,
-            mask=seq_offset[None, :] < kv_seq_len,
+            mask=seq_offset[:, None] < kv_seq_len,
             other=0.0,
         )
 
-        qk = tl.dot(q, k) * qk_scale
+        qk = tl.dot(q, tl.trans(k)) * qk_scale
         causal_mask = seq_offset[None, :] <= q_abs_pos[:, None]
         if HAS_ATTEN_MASK:
             mask_k = seq_offset[None, :] - context_len
             mask_q = q_abs_pos[:, None] - context_len
-            mask_index_valid = (
-                (mask_q >= 0)
-                & (mask_q < mask_rows)
-                & (mask_k >= 0)
-                & (mask_k < mask_cols)
-            )
+            mask_index_valid = (mask_q >= 0) & (mask_q < mask_rows) & (mask_k >= 0) & (mask_k < mask_cols)
             safe_mask_q = tl.where(mask_index_valid, mask_q, 0)
             safe_mask_k = tl.where(mask_index_valid, mask_k, 0)
             mask_offsets = safe_mask_q * stride_mask_q + safe_mask_k * stride_mask_k
@@ -212,6 +289,8 @@ def _paged_attn_fwd_inner(
         p = tl.where(attn_valid, p, 0.0)
         if USE_MXFP4_P:
             p = to_mxfp4c7(p, BLOCK_M, BLOCK_N).to(p.dtype)
+        if USE_HIF4_P:
+            p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
         l_ij = tl.sum(p, axis=1)
         alpha = tl.exp(m_i - m_ij)
         l_i = l_i * alpha + l_ij
@@ -219,11 +298,7 @@ def _paged_attn_fwd_inner(
 
         if IS_CONTIGUOUS_KV:
             v_token = kv_start + seq_offset
-            v_offset = (
-                v_token[:, None] * stride_v_blk
-                + kv_head_idx * stride_v_slot
-                + offs_d[None, :] * stride_v_flat
-            )
+            v_offset = v_token[:, None] * stride_v_blk + kv_head_idx * stride_v_slot + offs_d[None, :] * stride_v_flat
         else:
             v_offset = (
                 phys_block[:, None] * stride_v_blk
@@ -243,30 +318,48 @@ def _paged_attn_fwd_inner(
 
 @triton.jit
 def _paged_attn_fwd(
-        Q, K_cache, V_cache, Out, block_table_ptr, atten_mask_ptr,
-        cu_q_lens_ptr, cu_k_lens_ptr, q_block_seq_ptr, q_block_local_ptr,
-        kv_lens_ptr, sink_ptr,
-        stride_q_tok, stride_q_head, stride_q_dim: tl.constexpr,
-        stride_k_blk, stride_k_slot, stride_k_flat: tl.constexpr,
-        stride_v_blk, stride_v_slot, stride_v_flat: tl.constexpr,
-        stride_o_tok, stride_o_head, stride_o_dim: tl.constexpr,
-        stride_mask_q,
-        stride_mask_k,
-        block_table_stride: tl.int64,
-        BLOCK_SIZE: tl.constexpr,
-        HEAD_DIM: tl.constexpr,
-        num_q_heads: tl.constexpr,
-        num_kv_groups: tl.constexpr,
-        qk_scale,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-        mask_rows,
-        mask_cols,
-        HAS_SINKS: tl.constexpr,
-        HAS_ATTEN_MASK: tl.constexpr,
-        IS_CONTIGUOUS_KV: tl.constexpr,
-        USE_MXFP4_P: tl.constexpr,
-        IS_DECODE_ONLY: tl.constexpr,
+    Q,
+    K_cache,
+    V_cache,
+    Out,
+    block_table_ptr,
+    atten_mask_ptr,
+    cu_q_lens_ptr,
+    cu_k_lens_ptr,
+    q_block_seq_ptr,
+    q_block_local_ptr,
+    kv_lens_ptr,
+    sink_ptr,
+    stride_q_tok,
+    stride_q_head,
+    stride_q_dim: tl.constexpr,
+    stride_k_blk,
+    stride_k_slot,
+    stride_k_flat: tl.constexpr,
+    stride_v_blk,
+    stride_v_slot,
+    stride_v_flat: tl.constexpr,
+    stride_o_tok,
+    stride_o_head,
+    stride_o_dim: tl.constexpr,
+    stride_mask_q,
+    stride_mask_k,
+    block_table_stride: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    num_q_heads: tl.constexpr,
+    num_kv_groups: tl.constexpr,
+    qk_scale,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    mask_rows,
+    mask_cols,
+    HAS_SINKS: tl.constexpr,
+    HAS_ATTEN_MASK: tl.constexpr,
+    IS_CONTIGUOUS_KV: tl.constexpr,
+    USE_MXFP4_P: tl.constexpr,
+    USE_HIF4_P: tl.constexpr,
+    IS_DECODE_ONLY: tl.constexpr,
 ):
     q_block_idx = tl.program_id(0)
     q_head_idx = tl.program_id(1)
@@ -299,11 +392,7 @@ def _paged_attn_fwd(
     q_abs_pos = context_len + q_local
 
     offs_d = tl.arange(0, HEAD_DIM)
-    q_offsets = (
-        q_idx_safe[:, None] * stride_q_tok
-        + q_head_idx * stride_q_head
-        + offs_d[None, :] * stride_q_dim
-    )
+    q_offsets = q_idx_safe[:, None] * stride_q_tok + q_head_idx * stride_q_head + offs_d[None, :] * stride_q_dim
     q = tl.load(Q + q_offsets, mask=q_mask[:, None], other=0.0)
 
     if HAS_SINKS:
@@ -318,8 +407,12 @@ def _paged_attn_fwd(
 
     seq_block_table = block_table_ptr + seq * block_table_stride
     acc, l_i, m_i = _paged_attn_fwd_inner(
-        acc, l_i, m_i, q,
-        K_base=K_cache, V_base=V_cache,
+        acc,
+        l_i,
+        m_i,
+        q,
+        K_base=K_cache,
+        V_base=V_cache,
         block_tables_ptr=seq_block_table,
         BLOCK_SIZE=BLOCK_SIZE,
         stride_k_blk=stride_k_blk,
@@ -346,18 +439,347 @@ def _paged_attn_fwd(
         HAS_ATTEN_MASK=HAS_ATTEN_MASK,
         IS_CONTIGUOUS_KV=IS_CONTIGUOUS_KV,
         USE_MXFP4_P=USE_MXFP4_P,
+        USE_HIF4_P=USE_HIF4_P,
     )
     empty_row = l_i == 0.0
     safe_l_i = tl.where(empty_row, 1.0, l_i)
     acc = acc / safe_l_i[:, None]
     # acc = acc / l_i[:, None]
-    o_offsets = (
-        q_idx_safe[:, None] * stride_o_tok
-        + q_head_idx * stride_o_head
-        + offs_d[None, :] * stride_o_dim
+    o_offsets = q_idx_safe[:, None] * stride_o_tok + q_head_idx * stride_o_head + offs_d[None, :] * stride_o_dim
+    tl.store(Out + o_offsets, acc.to(Out.type.element_ty), mask=q_mask[:, None])
+
+
+@triton.jit
+def _paged_attn_decode_fwd(
+    Q,
+    K_cache,
+    V_cache,
+    Out,
+    block_table_ptr,
+    kv_lens_ptr,
+    stride_q_tok,
+    stride_q_head,
+    stride_q_dim: tl.constexpr,
+    stride_k_blk,
+    stride_k_slot,
+    stride_k_dim: tl.constexpr,
+    stride_v_blk,
+    stride_v_slot,
+    stride_v_dim: tl.constexpr,
+    stride_o_tok,
+    stride_o_head,
+    stride_o_dim: tl.constexpr,
+    block_table_stride: tl.int64,
+    qk_scale,
+    HEADS_PER_PROGRAM: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    USE_MXFP4_P: tl.constexpr,
+    USE_HIF4_P: tl.constexpr,
+):
+    """Compute ordinary single-token paged decode for one Q-head group."""
+    seq_idx = tl.program_id(0).to(tl.int64)
+    head_group_idx = tl.program_id(1).to(tl.int64)
+
+    offs_m = tl.arange(0, BLOCK_M)
+    head_valid = offs_m < HEADS_PER_PROGRAM
+    offs_h = head_group_idx * HEADS_PER_PROGRAM + offs_m
+    offs_d = tl.arange(0, HEAD_DIM)
+    q_offsets = seq_idx * stride_q_tok + offs_h[:, None] * stride_q_head + offs_d[None, :] * stride_q_dim
+    q = tl.load(
+        Q + q_offsets,
+        mask=head_valid[:, None],
+        other=0.0,
     )
-    tl.store(Out + o_offsets, acc.to(Out.type.element_ty),
-             mask=q_mask[:, None])
+
+    kv_len = tl.load(kv_lens_ptr + seq_idx).to(tl.int64)
+    num_logical_blocks = (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    seq_block_table = block_table_ptr + seq_idx * block_table_stride
+
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+
+    offs_n = tl.arange(0, BLOCK_N)
+    for logical_block in range(num_logical_blocks):
+        physical_block = tl.load(seq_block_table + logical_block).to(tl.int64)
+        for tile_in_block in tl.static_range(0, BLOCK_SIZE // BLOCK_N):
+            slot_base = tile_in_block * BLOCK_N
+            slots = slot_base + offs_n
+            logical_tokens = logical_block * BLOCK_SIZE + slots
+            token_valid = logical_tokens < kv_len
+
+            # K cache is slot-major, so load complete token rows contiguously
+            # from GM and transpose the UB-local tile for QK.
+            k_offsets = physical_block * stride_k_blk + slots[:, None] * stride_k_slot + offs_d[None, :] * stride_k_dim
+            k = tl.load(
+                K_cache + k_offsets,
+                mask=token_valid[:, None],
+                other=0.0,
+            )
+
+            qk = tl.dot(q, tl.trans(k)) * qk_scale
+            attn_valid = head_valid[:, None] & token_valid[None, :]
+            qk_for_max = tl.where(attn_valid, qk, -1.0e20)
+            m_ij = tl.maximum(m_i, tl.max(qk_for_max, axis=1))
+            p = tl.exp(
+                tl.where(
+                    attn_valid,
+                    qk - m_ij[:, None],
+                    -80.0,
+                )
+            )
+            p = tl.where(attn_valid, p, 0.0)
+            if USE_MXFP4_P:
+                p = to_mxfp4c7(p, BLOCK_M, BLOCK_N).to(p.dtype)
+            if USE_HIF4_P:
+                p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
+
+            l_ij = tl.sum(p, axis=1)
+            alpha = tl.exp(m_i - m_ij)
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha[:, None]
+
+            v_offsets = physical_block * stride_v_blk + slots[:, None] * stride_v_slot + offs_d[None, :] * stride_v_dim
+            v = tl.load(
+                V_cache + v_offsets,
+                mask=token_valid[:, None],
+                other=0.0,
+            )
+            acc += tl.dot(p.to(v.dtype), v)
+            m_i = m_ij
+
+    empty_row = l_i == 0.0
+    safe_l_i = tl.where(empty_row, 1.0, l_i)
+    output_value = tl.where(empty_row[:, None], 0.0, acc / safe_l_i[:, None])
+    o_offsets = seq_idx * stride_o_tok + offs_h[:, None] * stride_o_head + offs_d[None, :] * stride_o_dim
+    tl.store(
+        Out + o_offsets,
+        output_value.to(Out.type.element_ty),
+        mask=head_valid[:, None],
+    )
+
+
+@triton.jit
+def _paged_attn_decode_split_kv_fwd(
+    Q,
+    K_cache,
+    V_cache,
+    Out,
+    PartialOut,
+    PartialLse,
+    WorkDesc,
+    SeqDesc,
+    block_table_ptr,
+    kv_lens_ptr,
+    stride_q_tok,
+    stride_q_head,
+    stride_q_dim: tl.constexpr,
+    stride_k_blk,
+    stride_k_slot,
+    stride_k_dim: tl.constexpr,
+    stride_v_blk,
+    stride_v_slot,
+    stride_v_dim: tl.constexpr,
+    stride_o_tok,
+    stride_o_head,
+    stride_o_dim: tl.constexpr,
+    block_table_stride: tl.int64,
+    qk_scale,
+    NUM_Q_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    USE_MXFP4_P: tl.constexpr,
+    USE_HIF4_P: tl.constexpr,
+):
+    """Compute CPU-assigned logical-block ranges with a fixed program pool."""
+    work_idx = tl.program_id(0).to(tl.int64)
+    descriptor_offset = work_idx * 3
+    descriptor_seq_idx = tl.load(WorkDesc + descriptor_offset).to(tl.int64)
+    descriptor_block_start = tl.load(WorkDesc + descriptor_offset + 1).to(tl.int64)
+    descriptor_block_end = tl.load(WorkDesc + descriptor_offset + 2).to(tl.int64)
+    work_valid = descriptor_seq_idx >= 0
+    seq_idx = tl.where(work_valid, descriptor_seq_idx, 0)
+    split_block_start = tl.where(work_valid, descriptor_block_start, 0)
+    split_block_end = tl.where(work_valid, descriptor_block_end, 0)
+    seq_num_splits = tl.load(
+        SeqDesc + seq_idx * 2 + 1,
+        mask=work_valid,
+        other=0,
+    ).to(tl.int64)
+
+    offs_m = tl.arange(0, BLOCK_M)
+    head_valid = offs_m < NUM_Q_HEADS
+    offs_d = tl.arange(0, HEAD_DIM)
+    q_offsets = seq_idx * stride_q_tok + offs_m[:, None] * stride_q_head + offs_d[None, :] * stride_q_dim
+    q = tl.load(
+        Q + q_offsets,
+        mask=work_valid & head_valid[:, None],
+        other=0.0,
+    )
+
+    kv_len = tl.load(kv_lens_ptr + seq_idx).to(tl.int64)
+    kv_len = tl.where(work_valid, kv_len, 0)
+    num_split_blocks = split_block_end - split_block_start
+    seq_block_table = block_table_ptr + seq_idx * block_table_stride
+
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+
+    offs_n = tl.arange(0, BLOCK_N)
+    for block_offset in range(num_split_blocks):
+        logical_block = split_block_start + block_offset
+        physical_block = tl.load(seq_block_table + logical_block).to(tl.int64)
+        for tile_in_block in tl.static_range(0, BLOCK_SIZE // BLOCK_N):
+            slot_base = tile_in_block * BLOCK_N
+            slots = slot_base + offs_n
+            logical_tokens = logical_block * BLOCK_SIZE + slots
+            token_valid = logical_tokens < kv_len
+
+            # K cache is slot-major, so load complete token rows contiguously
+            # from GM and transpose the UB-local tile for QK.
+            k_offsets = physical_block * stride_k_blk + slots[:, None] * stride_k_slot + offs_d[None, :] * stride_k_dim
+            k = tl.load(
+                K_cache + k_offsets,
+                mask=token_valid[:, None],
+                other=0.0,
+            )
+
+            qk = tl.dot(q, tl.trans(k)) * qk_scale
+            attn_valid = work_valid & head_valid[:, None] & token_valid[None, :]
+            qk_for_max = tl.where(attn_valid, qk, -1.0e20)
+            m_ij = tl.maximum(m_i, tl.max(qk_for_max, axis=1))
+            p = tl.exp(
+                tl.where(
+                    attn_valid,
+                    qk - m_ij[:, None],
+                    -80.0,
+                )
+            )
+            p = tl.where(attn_valid, p, 0.0)
+            if USE_MXFP4_P:
+                p = to_mxfp4c7(p, BLOCK_M, BLOCK_N).to(p.dtype)
+            if USE_HIF4_P:
+                p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
+
+            l_ij = tl.sum(p, axis=1)
+            alpha = tl.exp(m_i - m_ij)
+            l_i = l_i * alpha + l_ij
+            acc = acc * alpha[:, None]
+
+            v_offsets = physical_block * stride_v_blk + slots[:, None] * stride_v_slot + offs_d[None, :] * stride_v_dim
+            v = tl.load(
+                V_cache + v_offsets,
+                mask=token_valid[:, None],
+                other=0.0,
+            )
+            acc += tl.dot(p.to(v.dtype), v)
+            m_i = m_ij
+
+    empty_row = l_i == 0.0
+    safe_l_i = tl.where(empty_row, 1.0, l_i)
+    partial_output = tl.where(empty_row[:, None], 0.0, acc / safe_l_i[:, None])
+    partial_lse = tl.where(empty_row, float("-inf"), m_i + tl.log(safe_l_i))
+
+    partial_row = work_idx * NUM_Q_HEADS + offs_m
+    partial_mask = work_valid & (seq_num_splits > 1) & head_valid
+    tl.store(
+        PartialOut + partial_row[:, None] * HEAD_DIM + offs_d[None, :],
+        partial_output,
+        mask=partial_mask[:, None],
+    )
+    tl.store(PartialLse + partial_row, partial_lse, mask=partial_mask)
+
+    direct_output_mask = work_valid & (seq_num_splits == 1) & head_valid
+    o_offsets = seq_idx * stride_o_tok + offs_m[:, None] * stride_o_head + offs_d[None, :] * stride_o_dim
+    tl.store(
+        Out + o_offsets,
+        partial_output.to(Out.type.element_ty),
+        mask=direct_output_mask[:, None],
+    )
+
+
+@triton.jit
+def _paged_attn_decode_split_kv_reduce(
+    PartialOut,
+    PartialLse,
+    Out,
+    SeqDesc,
+    stride_o_tok,
+    stride_o_head,
+    stride_o_dim: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    """Reduce only sequences assigned to more than one Split-KV range."""
+    seq_idx = tl.program_id(0).to(tl.int64)
+
+    offs_m = tl.arange(0, BLOCK_M)
+    head_valid = offs_m < NUM_Q_HEADS
+    offs_d = tl.arange(0, HEAD_DIM)
+
+    descriptor_offset = seq_idx * 2
+    work_start = tl.load(SeqDesc + descriptor_offset).to(tl.int64)
+    num_splits = tl.load(SeqDesc + descriptor_offset + 1).to(tl.int64)
+    num_reduce_splits = tl.where(num_splits > 1, num_splits, 0)
+
+    global_lse_max = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    for split_idx in range(num_reduce_splits):
+        partial_row = (work_start + split_idx) * NUM_Q_HEADS + offs_m
+        partial_lse = tl.load(
+            PartialLse + partial_row,
+            mask=head_valid,
+            other=float("-inf"),
+        )
+        global_lse_max = tl.maximum(global_lse_max, partial_lse)
+
+    denominator = tl.zeros([BLOCK_M], dtype=tl.float32)
+    output_acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+    for split_idx in range(num_reduce_splits):
+        partial_row = (work_start + split_idx) * NUM_Q_HEADS + offs_m
+        partial_lse = tl.load(
+            PartialLse + partial_row,
+            mask=head_valid,
+            other=float("-inf"),
+        )
+        split_valid = head_valid & (partial_lse != float("-inf"))
+        safe_delta = tl.where(split_valid, partial_lse - global_lse_max, 0.0)
+        weight = tl.where(split_valid, tl.exp(safe_delta), 0.0)
+        partial_output = tl.load(
+            PartialOut + partial_row[:, None] * HEAD_DIM + offs_d[None, :],
+            mask=head_valid[:, None],
+            other=0.0,
+        )
+        denominator += weight
+        output_acc += weight[:, None] * partial_output
+
+    needs_reduction = num_splits > 1
+    empty_row = denominator == 0.0
+    safe_denominator = tl.where(empty_row, 1.0, denominator)
+    output_value = tl.where(
+        empty_row[:, None],
+        0.0,
+        output_acc / safe_denominator[:, None],
+    )
+    o_offsets = seq_idx * stride_o_tok + offs_m[:, None] * stride_o_head + offs_d[None, :] * stride_o_dim
+    tl.store(
+        Out + o_offsets,
+        output_value.to(Out.type.element_ty),
+        mask=needs_reduction & head_valid[:, None],
+    )
+
+    padding_mask = (num_splits == 0) & head_valid
+    tl.store(
+        Out + o_offsets,
+        tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32).to(Out.type.element_ty),
+        mask=padding_mask[:, None],
+    )
 
 
 def _normalize_kv_cache(cache, block_size, num_kv_heads, head_dim):
@@ -371,15 +793,13 @@ def _normalize_kv_cache(cache, block_size, num_kv_heads, head_dim):
         if cache.shape[1] == block_size:
             assert cache.shape[2] == num_kv_heads
             assert cache.shape[3] == head_dim
-            return cache.reshape(cache.shape[0], block_size,
-                                 num_kv_heads * head_dim)
+            return cache.reshape(cache.shape[0], block_size, num_kv_heads * head_dim)
 
         if cache.shape[1] == num_kv_heads:
             assert cache.shape[2] == block_size
             assert cache.shape[3] == head_dim
             cache = cache.permute(0, 2, 1, 3).contiguous()
-            return cache.reshape(cache.shape[0], block_size,
-                                 num_kv_heads * head_dim)
+            return cache.reshape(cache.shape[0], block_size, num_kv_heads * head_dim)
 
     raise AssertionError(
         "KV cache must be shaped as (blocks, block_size, Hkv * D), "
@@ -399,23 +819,44 @@ def _normalize_contiguous_kv(cache, num_kv_heads, head_dim):
         return cache.view(cache.shape[0], num_kv_heads, head_dim)
 
     raise AssertionError(
-        "Contiguous KV must be shaped as (tokens, Hkv, D) or "
-        "(tokens, Hkv * D) when block_table is None"
+        "Contiguous KV must be shaped as (tokens, Hkv, D) or (tokens, Hkv * D) when block_table is None"
     )
 
 
 class _paged_attention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k_cache, v_cache, block_table,
-                cu_q_lens, kv_lens,
-                num_q_heads, num_kv_heads,
-                sm_scale, block_size, BLOCK_M=16, BLOCK_N=64, sinks=None,
-                atten_mask=None, use_mxfp4_p=False):
+    def forward(
+        ctx,
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        cu_q_lens,
+        kv_lens,
+        num_q_heads,
+        num_kv_heads,
+        sm_scale,
+        block_size,
+        BLOCK_M=16,
+        BLOCK_N=64,
+        sinks=None,
+        atten_mask=None,
+        use_mxfp4_p=False,
+        use_hif4_p=False,
+    ):
         del ctx
         head_dim = q.shape[-1]
         assert q.dim() == 3
         assert q.shape[1] == num_q_heads
         assert num_q_heads % num_kv_heads == 0
+        # HIF4 fake-quant requires the channel (BLOCK_N) axis to be a multiple
+        # of 64 (one 8*2*4 group).  MXFP4 and HIF4 are mutually exclusive.
+        assert BLOCK_N % 64 == 0, (
+            f"HIF4/MXFP4 P fake-quant needs BLOCK_N % 64 == 0, got {BLOCK_N}"
+        )
+        assert not (use_mxfp4_p and use_hif4_p), (
+            "USE_MXFP4_P and USE_HIF4_P are mutually exclusive"
+        )
         # assert BLOCK_M in {16, 32, 64}
         # assert BLOCK_N in {32, 64, 128, 256}
         assert cu_q_lens.dtype == torch.int64
@@ -429,28 +870,26 @@ class _paged_attention(torch.autograd.Function):
             assert atten_mask.dim() == 2
 
         if is_contiguous_kv:
-            k_cache = _normalize_contiguous_kv(k_cache, num_kv_heads,
-                                               head_dim)
-            v_cache = _normalize_contiguous_kv(v_cache, num_kv_heads,
-                                               head_dim)
+            k_cache = _normalize_contiguous_kv(k_cache, num_kv_heads, head_dim)
+            v_cache = _normalize_contiguous_kv(v_cache, num_kv_heads, head_dim)
         else:
-            k_cache = _normalize_kv_cache(k_cache, block_size, num_kv_heads,
-                                          head_dim)
-            v_cache = _normalize_kv_cache(v_cache, block_size, num_kv_heads,
-                                          head_dim)
+            k_cache = _normalize_kv_cache(k_cache, block_size, num_kv_heads, head_dim)
+            v_cache = _normalize_kv_cache(v_cache, block_size, num_kv_heads, head_dim)
 
         num_seqs = kv_lens.shape[0]
         if cu_q_lens.shape[0] == num_seqs:
             cu_q_lens = torch.cat([cu_q_lens.new_zeros((1,)), cu_q_lens])
         if is_contiguous_kv:
-            cu_k_lens = torch.cat([
-                kv_lens.new_zeros((1,)),
-                torch.cumsum(kv_lens, dim=0, dtype=torch.int64),
-            ])
+            cu_k_lens = torch.cat(
+                [
+                    kv_lens.new_zeros((1,)),
+                    torch.cumsum(kv_lens, dim=0, dtype=torch.int64),
+                ]
+            )
         else:
             cu_k_lens = cu_q_lens
         # 每个 sequence 的 query 长度 & block 数
-        seq_q_lens = cu_q_lens[1:] - cu_q_lens[:-1]          # [num_seqs]
+        seq_q_lens = cu_q_lens[1:] - cu_q_lens[:-1]  # [num_seqs]
         seq_q_blocks = (seq_q_lens + BLOCK_M - 1) // BLOCK_M  # [num_seqs], ceil 除法
         # q_block_seq：把 seq_idx 按 block 数 repeat
         q_block_seq = torch.repeat_interleave(
@@ -462,18 +901,18 @@ class _paged_attention(torch.autograd.Function):
 
         # q_block_local：每个 seq 内 0, 1, 2, ..., seq_q_blocks[i]-1
         # 构造 prefix starts：每个 seq 在展平数组里的起始位置
-        cum_blocks = torch.cumsum(seq_q_blocks, dim=0)        # [num_seqs]
-        seq_starts = torch.cat([
-            torch.zeros(1, dtype=torch.int64, device=q.device),
-            cum_blocks[:-1],
-        ])  # [num_seqs]，例如 seq_q_blocks=[3,2,4] → [0,3,5]
+        cum_blocks = torch.cumsum(seq_q_blocks, dim=0)  # [num_seqs]
+        seq_starts = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int64, device=q.device),
+                cum_blocks[:-1],
+            ]
+        )  # [num_seqs]，例如 seq_q_blocks=[3,2,4] → [0,3,5]
         seq_starts_expanded = torch.repeat_interleave(
-            seq_starts, seq_q_blocks.to(torch.int64),
+            seq_starts,
+            seq_q_blocks.to(torch.int64),
         )  # [total_q_blocks]
-        q_block_local = (
-            torch.arange(total_q_blocks, dtype=torch.int64, device=q.device)
-            - seq_starts_expanded
-        )
+        q_block_local = torch.arange(total_q_blocks, dtype=torch.int64, device=q.device) - seq_starts_expanded
 
         qk_scale = sm_scale
         num_kv_groups = num_q_heads // num_kv_heads
@@ -500,7 +939,10 @@ class _paged_attention(torch.autograd.Function):
         )
 
         _paged_attn_fwd[grid](
-            Q=q, K_cache=k_cache, V_cache=v_cache, Out=out,
+            Q=q,
+            K_cache=k_cache,
+            V_cache=v_cache,
+            Out=out,
             block_table_ptr=block_table if block_table is not None else q,
             atten_mask_ptr=atten_mask_ptr,
             cu_q_lens_ptr=cu_q_lens,
@@ -537,10 +979,12 @@ class _paged_attention(torch.autograd.Function):
             HAS_ATTEN_MASK=atten_mask is not None,
             IS_CONTIGUOUS_KV=is_contiguous_kv,
             USE_MXFP4_P=use_mxfp4_p,
+            USE_HIF4_P=use_hif4_p,
             IS_DECODE_ONLY=False,
             num_warps=(4 if head_dim == 64 else 8),
         )
         return out
+
 
 def paged_attention(
     query,
@@ -557,7 +1001,8 @@ def paged_attention(
     block_n=64,
     sinks=None,
     atten_mask=None,
-    use_mxfp4_p=False
+    use_mxfp4_p=False,
+    use_hif4_p=False,
 ):
     return _paged_attention.apply(
         query,
@@ -574,7 +1019,8 @@ def paged_attention(
         block_n,
         sinks,
         atten_mask,
-        use_mxfp4_p
+        use_mxfp4_p,
+        use_hif4_p,
     )
 
 
@@ -594,83 +1040,176 @@ def paged_attention_decode_out(
     block_n=64,
     atten_mask=None,
     use_mxfp4_p=False,
+    use_hif4_p=False,
+    heads_per_program_override=None,
+    split_kv_num_programs=1,
+    split_kv_workspace=None,
+    split_kv_descriptors=None,
 ):
-    """Launch single-token paged decode into a caller-owned output tensor."""
-    head_dim = query.shape[-1]
-    assert query.dim() == 3
-    assert query.shape == output.shape
-    assert query.shape[1] == num_q_heads
-    assert num_q_heads % num_kv_heads == 0
-    assert block_table is not None and block_table.dtype == torch.int32
-    assert actual_seq_kvlen.dtype in (torch.int32, torch.int64)
-    assert actual_seq_kvlen.shape[0] >= query.shape[0]
-    assert block_table.shape[0] >= query.shape[0]
-    if atten_mask is not None:
-        assert atten_mask.dim() == 2
+    """Launch specialized single-token decode into caller-owned output.
 
-    key_cache = _normalize_kv_cache(key_cache, block_size, num_kv_heads, head_dim)
-    value_cache = _normalize_kv_cache(value_cache, block_size, num_kv_heads, head_dim)
-    grid = (query.shape[0], num_q_heads)
-    num_programs = grid[0] * grid[1]
-    assert num_programs <= 65535, (
-        f"Ascend coreDim overflow: {num_programs} > 65535, "
-        f"batch_size={query.shape[0]}, num_q_heads={num_q_heads}"
+    The fixed Split-KV path consumes CPU-built block-range descriptors and
+    launches exactly 32 partial programs.
+    """
+    assert query.shape == output.shape
+    assert output.dtype == query.dtype
+    assert num_q_heads in (8, 16)
+    assert num_kv_heads == 1
+    assert DECODE_BLOCK_N % 64 == 0
+    assert not (use_mxfp4_p and use_hif4_p), (
+        "USE_MXFP4_P and USE_HIF4_P are mutually exclusive"
     )
 
-    mask_rows = 0
-    mask_cols = 0
-    stride_mask_q = 0
-    stride_mask_k = 0
-    atten_mask_ptr = query
-    if atten_mask is not None:
-        atten_mask_ptr = atten_mask
-        mask_rows = atten_mask.shape[0]
-        mask_cols = atten_mask.shape[1]
-        stride_mask_q = atten_mask.stride(0)
-        stride_mask_k = atten_mask.stride(1)
+    key_cache = _normalize_kv_cache(key_cache, DECODE_BLOCK_SIZE, 1, DECODE_HEAD_DIM)
+    value_cache = _normalize_kv_cache(value_cache, DECODE_BLOCK_SIZE, 1, DECODE_HEAD_DIM)
 
-    _paged_attn_fwd[grid](
+    if heads_per_program_override is None:
+        heads_per_program = select_decode_heads_per_program(
+            batch_size=query.shape[0],
+            num_q_heads=num_q_heads,
+            num_aicore=NUM_AI_CORES,
+        )
+    else:
+        heads_per_program = heads_per_program_override
+        assert heads_per_program in (1, 2, 4, 8, 16)
+        assert num_q_heads % heads_per_program == 0
+
+    assert split_kv_num_programs in (1, DECODE_SPLIT_KV_NUM_PROGRAMS)
+    num_head_groups = num_q_heads // heads_per_program
+    num_programs = query.shape[0] * num_head_groups
+    if split_kv_num_programs > 1:
+        assert query.shape[0] in (1, 2, 4)
+        num_programs = DECODE_SPLIT_KV_NUM_PROGRAMS
+    assert num_programs <= 65535, (
+        f"Ascend coreDim overflow: {num_programs} > 65535, "
+        f"batch_size={query.shape[0]}, "
+        f"num_head_groups={num_head_groups}, "
+        f"split_kv_num_programs={split_kv_num_programs}"
+    )
+
+    if split_kv_num_programs == 1:
+        grid = (query.shape[0], num_head_groups)
+        _paged_attn_decode_fwd[grid](
+            Q=query,
+            K_cache=key_cache,
+            V_cache=value_cache,
+            Out=output,
+            block_table_ptr=block_table,
+            kv_lens_ptr=actual_seq_kvlen,
+            stride_q_tok=query.stride(0),
+            stride_q_head=query.stride(1),
+            stride_q_dim=query.stride(2),
+            stride_k_blk=key_cache.stride(0),
+            stride_k_slot=key_cache.stride(1),
+            stride_k_dim=key_cache.stride(2),
+            stride_v_blk=value_cache.stride(0),
+            stride_v_slot=value_cache.stride(1),
+            stride_v_dim=value_cache.stride(2),
+            stride_o_tok=output.stride(0),
+            stride_o_head=output.stride(1),
+            stride_o_dim=output.stride(2),
+            block_table_stride=block_table.stride(0),
+            qk_scale=softmax_scale,
+            HEADS_PER_PROGRAM=heads_per_program,
+            HEAD_DIM=DECODE_HEAD_DIM,
+            BLOCK_SIZE=DECODE_BLOCK_SIZE,
+            BLOCK_M=DECODE_BLOCK_M,
+            BLOCK_N=DECODE_BLOCK_N,
+            USE_MXFP4_P=use_mxfp4_p,
+            USE_HIF4_P=use_hif4_p,
+            multibuffer=True,
+            num_warps=8,
+        )
+        return output
+
+    partial_output_shape = (
+        DECODE_SPLIT_KV_NUM_PROGRAMS,
+        num_q_heads,
+        DECODE_HEAD_DIM,
+    )
+    partial_lse_shape = partial_output_shape[:-1]
+    if split_kv_workspace is None:
+        partial_output = torch.empty(
+            partial_output_shape,
+            dtype=torch.float32,
+            device=query.device,
+        )
+        partial_lse = torch.empty(
+            partial_lse_shape,
+            dtype=torch.float32,
+            device=query.device,
+        )
+    else:
+        partial_output, partial_lse = split_kv_workspace
+        assert partial_output.shape == partial_output_shape
+        assert partial_lse.shape == partial_lse_shape
+        assert partial_output.dtype == torch.float32
+        assert partial_lse.dtype == torch.float32
+        assert partial_output.device == query.device
+        assert partial_lse.device == query.device
+        assert partial_output.is_contiguous()
+        assert partial_lse.is_contiguous()
+
+    assert split_kv_descriptors is not None
+    work_desc, seq_desc = split_kv_descriptors
+    assert work_desc.shape == (DECODE_SPLIT_KV_NUM_PROGRAMS, 3)
+    assert seq_desc.shape == (query.shape[0], 2)
+    assert work_desc.dtype == torch.int32
+    assert seq_desc.dtype == torch.int32
+    assert work_desc.device == query.device
+    assert seq_desc.device == query.device
+    assert work_desc.is_contiguous()
+    assert seq_desc.is_contiguous()
+
+    split_grid = (DECODE_SPLIT_KV_NUM_PROGRAMS,)
+    _paged_attn_decode_split_kv_fwd[split_grid](
         Q=query,
         K_cache=key_cache,
         V_cache=value_cache,
         Out=output,
+        PartialOut=partial_output,
+        PartialLse=partial_lse,
+        WorkDesc=work_desc,
+        SeqDesc=seq_desc,
         block_table_ptr=block_table,
-        atten_mask_ptr=atten_mask_ptr,
-        cu_q_lens_ptr=query,
-        cu_k_lens_ptr=query,
-        q_block_seq_ptr=query,
-        q_block_local_ptr=query,
         kv_lens_ptr=actual_seq_kvlen,
-        sink_ptr=query,
         stride_q_tok=query.stride(0),
         stride_q_head=query.stride(1),
         stride_q_dim=query.stride(2),
         stride_k_blk=key_cache.stride(0),
         stride_k_slot=key_cache.stride(1),
-        stride_k_flat=key_cache.stride(2),
+        stride_k_dim=key_cache.stride(2),
         stride_v_blk=value_cache.stride(0),
         stride_v_slot=value_cache.stride(1),
-        stride_v_flat=value_cache.stride(2),
+        stride_v_dim=value_cache.stride(2),
         stride_o_tok=output.stride(0),
         stride_o_head=output.stride(1),
         stride_o_dim=output.stride(2),
-        stride_mask_q=stride_mask_q,
-        stride_mask_k=stride_mask_k,
         block_table_stride=block_table.stride(0),
-        BLOCK_SIZE=block_size,
-        HEAD_DIM=head_dim,
-        num_q_heads=num_q_heads,
-        num_kv_groups=num_q_heads // num_kv_heads,
         qk_scale=softmax_scale,
-        BLOCK_M=block_m,
-        BLOCK_N=block_n,
-        mask_rows=mask_rows,
-        mask_cols=mask_cols,
-        HAS_SINKS=False,
-        HAS_ATTEN_MASK=atten_mask is not None,
-        IS_CONTIGUOUS_KV=False,
+        NUM_Q_HEADS=num_q_heads,
+        HEAD_DIM=DECODE_HEAD_DIM,
+        BLOCK_SIZE=DECODE_BLOCK_SIZE,
+        BLOCK_M=DECODE_BLOCK_M,
+        BLOCK_N=DECODE_BLOCK_N,
         USE_MXFP4_P=use_mxfp4_p,
-        IS_DECODE_ONLY=True,
-        num_warps=(4 if head_dim == 64 else 8),
+        USE_HIF4_P=use_hif4_p,
+        multibuffer=True,
+        num_warps=8,
+    )
+
+    reduce_grid = (query.shape[0],)
+    _paged_attn_decode_split_kv_reduce[reduce_grid](
+        PartialOut=partial_output,
+        PartialLse=partial_lse,
+        Out=output,
+        SeqDesc=seq_desc,
+        stride_o_tok=output.stride(0),
+        stride_o_head=output.stride(1),
+        stride_o_dim=output.stride(2),
+        NUM_Q_HEADS=num_q_heads,
+        HEAD_DIM=DECODE_HEAD_DIM,
+        BLOCK_M=DECODE_BLOCK_M,
+        num_warps=8,
     )
     return output

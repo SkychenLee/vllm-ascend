@@ -118,6 +118,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # the Triton PagedAttention kernel. Only takes effect when
     # VLLM_ASCEND_USE_PAGED_ATTENTION is enabled.
     "VLLM_ASCEND_PAGED_ATTN_USE_MXFP4_P": lambda: bool(int(os.getenv("VLLM_ASCEND_PAGED_ATTN_USE_MXFP4_P", "0"))),
+    # Whether to apply HIF4 fake quantization to the softmax-P matrix inside
+    # the Triton PagedAttention kernel. Mutually exclusive with the MXFP4
+    # variant above. Only takes effect when VLLM_ASCEND_USE_PAGED_ATTENTION
+    # is enabled.
+    "VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P": lambda: bool(int(os.getenv("VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P", "0"))),
 }
 
 # end-env-vars-definition
