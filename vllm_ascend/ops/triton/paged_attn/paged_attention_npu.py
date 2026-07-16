@@ -33,6 +33,8 @@ from .decode_utils import (
     select_decode_heads_per_program,
 )
 
+import vllm_ascend.envs as envs_ascend
+
 DEVICE = "npu"
 
 DECODE_BLOCK_SIZE = 128
@@ -41,6 +43,8 @@ DECODE_BLOCK_N = 64
 DECODE_HEAD_DIM = 128
 
 NUM_AI_CORES = 32
+
+USE_HIF4_ONCE = envs_ascend.VLLM_ASCEND_USE_HIF4_ONCE
 
 @triton.jit
 def clip(x, min_val, max_val):
@@ -196,6 +200,72 @@ def to_hif4(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
     out = sign * mant * scale_lv2 * scale_lv3 * scale_factor
     return tl.reshape(out, (BLOCK_M, BLOCK_N))
 
+@triton.jit
+def to_hif4_once(p, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    """Fake-quantize the softmax probability matrix ``p`` to a single-scale HIF4.
+
+    Simplified variant of :func:`to_hif4`: only the **first-level** scale is
+    computed, taken over each whole 64-channel group (one ``scale_factor`` per
+    64 channels).  The two finer levels (size-16 and size-4 sub-block scales)
+    are fixed to 1.0, so they contribute nothing to the reconstruction.
+
+    The mantissa quantization (3-bit, mbits=3, values in
+    {0, 0.25, 0.5, ..., 1.75}) and the e6m2 rounding of ``scale_factor`` are
+    otherwise identical to :func:`to_hif4`.
+
+    ``p`` is the ``[BLOCK_M, BLOCK_N]`` softmax output tile.  ``BLOCK_N`` must
+    be a multiple of 64 (each 64-channel group carries a single scale).
+    """
+    # G: number of 64-channel groups along BLOCK_N.  The inner [8, 2, 4] split
+    # is kept only so the tile shape is explicit; the max is taken over the
+    # whole 64-channel group (axes -3, -2, -1 together).
+    G: tl.constexpr = BLOCK_N // 64
+    # x = tl.reshape(p, (BLOCK_M, G, 8, 2, 4))
+    x = tl.reshape(p, (BLOCK_M, G, 64))
+    
+
+    # sign(x); reuse the same buffer for abs to minimize live 5D tensors.
+    sign = tl.where(x > 0, 1.0, -1.0)
+    sign = tl.where(x == 0.0, 0.0, sign)
+    x = tl.abs(x)
+
+    # First-level max only: one value per 64-channel group (reduce over the
+    # size-8, size-2 and size-4 axes).  The two finer sub-block scales are no
+    # longer computed and are fixed to 1.0 below.
+    # max_lv1 = tl.max(x, axis=(-3, -2, -1), keep_dims=True)
+    max_lv1 = tl.max(x, axis=-1, keep_dims=True)
+
+    # Base scale (1/7 keeps sub-block headroom), then rounded to e6m2
+    # (2 mantissa bits).  The reference also rounds scale_factor to bf16 first;
+    # we skip that bf16 cast because the Ascend hfusion backend rejects the
+    # explicit fp32<->bf16 cast round-trip (arith::ExtFOp).  The e6m2 rounding
+    # below already snaps scale_factor to a coarse grid, so the residual bf16
+    # rounding is negligible relative to the quantization step.
+    #
+    # NOTE: the log2 guard must be an fp32 constexpr (not a Python `1e-38`
+    # float).  ``tl.maximum(tensor, <fp64 scalar>)`` makes the Ascend hfusion
+    # backend raise ``unsupported datatype for arith::ExtFOp``; a tl.constexpr
+    # fp32 value is folded at compile time and avoids the promotion.
+    LOG2_EPS: tl.constexpr = 1.1754943508222875e-38
+    scale_factor = max_lv1 / 7.0
+    e_sf = tl.floor(tl.log2(tl.maximum(scale_factor, LOG2_EPS)))
+    scale_factor = tl.floor(scale_factor * tl.exp2(2.0 - e_sf) + 0.5) * tl.exp2(e_sf - 2.0)
+
+    # Guard against all-zero groups (e.g. padded/fully-masked P rows in
+    # prefill): scale_factor would be 0 and 1/scale_factor -> inf/nan that
+    # propagates.  Use a safe denominator; the final output is still 0 there
+    # because ``sign`` is 0 wherever the input is 0.
+    scale_factor = tl.where(scale_factor > 0.0, scale_factor, 1.0)
+    rec_sf = 1.0 / scale_factor
+
+    # The two finer sub-block scales (size-16 and size-4) are intentionally
+    # fixed to 1.0: only the first-level (64-channel) scale is used.
+    # 3-bit mantissa quantization, clamped to the max representable 1.75.
+    mant = x * rec_sf
+    mant = tl.floor(mant * 4.0 + 0.5) * 0.25
+    mant = tl.minimum(mant, 1.75)
+    out = sign * mant * scale_factor
+    return tl.reshape(out, (BLOCK_M, BLOCK_N))
 
 @triton.jit
 def _paged_attn_fwd_inner(
@@ -290,7 +360,11 @@ def _paged_attn_fwd_inner(
         if USE_MXFP4_P:
             p = to_mxfp4c7(p, BLOCK_M, BLOCK_N).to(p.dtype)
         if USE_HIF4_P:
-            p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
+            if USE_HIF4_ONCE:
+                p = to_hif4_once(p, BLOCK_M, BLOCK_N).to(p.dtype)
+            else:
+                p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
+
         l_ij = tl.sum(p, axis=1)
         alpha = tl.exp(m_i - m_ij)
         l_i = l_i * alpha + l_ij
@@ -535,7 +609,10 @@ def _paged_attn_decode_fwd(
             if USE_MXFP4_P:
                 p = to_mxfp4c7(p, BLOCK_M, BLOCK_N).to(p.dtype)
             if USE_HIF4_P:
-                p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
+                if USE_HIF4_ONCE:
+                    p = to_hif4_once(p, BLOCK_M, BLOCK_N).to(p.dtype)
+                else:
+                    p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
 
             l_ij = tl.sum(p, axis=1)
             alpha = tl.exp(m_i - m_ij)
@@ -665,7 +742,10 @@ def _paged_attn_decode_split_kv_fwd(
             if USE_MXFP4_P:
                 p = to_mxfp4c7(p, BLOCK_M, BLOCK_N).to(p.dtype)
             if USE_HIF4_P:
-                p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
+                if USE_HIF4_ONCE:
+                    p = to_hif4_once(p, BLOCK_M, BLOCK_N).to(p.dtype)
+                else:
+                    p = to_hif4(p, BLOCK_M, BLOCK_N).to(p.dtype)
 
             l_ij = tl.sum(p, axis=1)
             alpha = tl.exp(m_i - m_ij)

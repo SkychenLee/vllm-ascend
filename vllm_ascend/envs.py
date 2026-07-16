@@ -126,6 +126,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     
     "VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4": lambda: bool(int(os.getenv("VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4", "0"))),
     "VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4": lambda: bool(int(os.getenv("VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4", "0"))),
+    "VLLM_ASCEND_USE_HIF4_ONCE": lambda: bool(int(os.getenv("VLLM_ASCEND_USE_HIF4_ONCE", "0"))),
     
     "VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE": lambda: os.getenv("VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE", 128),
     "VLLM_ASCEND_ATTENTION_SINK_SIZE": lambda: os.getenv("VLLM_ASCEND_ATTENTION_SINK_SIZE", 128),
