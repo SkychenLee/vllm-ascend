@@ -11,11 +11,14 @@ from tests.ut.quantization.conftest_quantization import FAKQUANT_CONFIG, W8A8_CO
 from vllm_ascend.quantization import AscendCompressedTensorsConfig
 from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME, AscendModelSlimConfig
 from vllm_ascend.quantization.utils import (
+    MXFP4_BLOCK_SIZE,
     detect_quantization_method,
     enable_fa_quant,
     enable_hif4_qkv_quant,
     maybe_auto_detect_quantization,
     quant_dequant_hif4,
+    quant_dequant_mxfp4,
+    quant_dequant_mxfp4_grouped,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
@@ -194,6 +197,82 @@ class TestEnableFaQuant(TestBase):
         self.assertTrue(result)
         result = enable_fa_quant(vllm_config, layer_name="test_layer")
         self.assertFalse(result)
+
+
+class TestMXFP4PseudoQuant(TestBase):
+    @staticmethod
+    def _reference_mxfp4(x: torch.Tensor) -> torch.Tensor:
+        original_shape = x.shape
+        blocks = x.unflatten(-1, (-1, MXFP4_BLOCK_SIZE))
+        max_values = torch.amax(blocks.abs(), -1, keepdim=True)
+        shared_exponents = torch.ceil(torch.log2(max_values.clamp(min=1.17e-38) / 7)).clamp(-127, 127)
+        scaled_blocks = blocks * torch.exp2(-shared_exponents)
+        private_exponents = torch.floor(torch.log2(scaled_blocks.abs().clamp(min=1.17e-38))).clamp(min=0)
+        mantissas = scaled_blocks * torch.exp2(-private_exponents) * 2
+        mantissas = torch.sign(mantissas) * torch.floor(mantissas.abs() + 0.5)
+        quantized = (mantissas * 0.5 * torch.exp2(private_exponents)).clamp(-6, 6)
+        return (quantized * torch.exp2(shared_exponents)).reshape(original_shape)
+
+    @staticmethod
+    def _reference_mxfp4_grouped(x: torch.Tensor) -> torch.Tensor:
+        max_values = torch.amax(x.abs(), 1, keepdim=True)
+        shared_exponents = torch.ceil(torch.log2(max_values.clamp(min=1.17e-38) / 7)).clamp(-127, 127)
+        scaled_blocks = x * torch.exp2(-shared_exponents)
+        private_exponents = torch.floor(torch.log2(scaled_blocks.abs().clamp(min=1.17e-38))).clamp(min=0)
+        mantissas = scaled_blocks * torch.exp2(-private_exponents) * 2
+        mantissas = torch.sign(mantissas) * torch.floor(mantissas.abs() + 0.5)
+        quantized = (mantissas * 0.5 * torch.exp2(private_exponents)).clamp(-6, 6)
+        return quantized * torch.exp2(shared_exponents)
+
+    def test_zero_blocks_stay_finite_and_zero(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype):
+                x = torch.zeros(2, 3, 64, dtype=dtype)
+
+                output = quant_dequant_mxfp4(x, -1)
+
+                self.assertEqual(MXFP4_BLOCK_SIZE, 32)
+                self.assertEqual(output.shape, x.shape)
+                self.assertEqual(output.dtype, x.dtype)
+                self.assertTrue(torch.isfinite(output).all())
+                self.assertTrue(torch.equal(output, x))
+
+    def test_quantization_dimension_must_be_divisible_by_32(self):
+        x = torch.randn(2, 3, 35, dtype=torch.float32)
+
+        with self.assertRaises(RuntimeError):
+            quant_dequant_mxfp4(x, -1)
+
+    def test_bfloat16_matches_attention_reference_math(self):
+        x = torch.randn(4, 64, dtype=torch.bfloat16)
+
+        output = quant_dequant_mxfp4(x, -1)
+        expected = self._reference_mxfp4(x)
+
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_grouped_bfloat16_matches_attention_reference_math(self):
+        x = torch.randn(4, MXFP4_BLOCK_SIZE, 2, 8, dtype=torch.bfloat16)
+
+        output = quant_dequant_mxfp4_grouped(x)
+        expected = self._reference_mxfp4_grouped(x)
+
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_each_32_value_block_has_an_independent_shared_scale(self):
+        first_block = torch.linspace(-1, 1, MXFP4_BLOCK_SIZE)
+        baseline = torch.cat((first_block, torch.zeros(MXFP4_BLOCK_SIZE)))
+        large_second_block = torch.cat((first_block, torch.full((MXFP4_BLOCK_SIZE,), 1024.0)))
+
+        baseline_output = quant_dequant_mxfp4(baseline, -1)
+        large_output = quant_dequant_mxfp4(large_second_block, -1)
+
+        torch.testing.assert_close(
+            baseline_output[:MXFP4_BLOCK_SIZE],
+            large_output[:MXFP4_BLOCK_SIZE],
+            rtol=0,
+            atol=0,
+        )
 
 
 class TestHiF4PseudoQuant(TestBase):

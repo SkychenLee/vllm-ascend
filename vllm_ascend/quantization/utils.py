@@ -31,6 +31,12 @@ from vllm_ascend.utils import (
 )
 
 HIF4_QUANT_TYPE = "W4A4_HIFP4"
+MXFP4_BLOCK_SIZE = 32
+_MXFP4_EPSILON = 1.17e-38
+_MXFP4_MAX_NORM = 6.0
+_MXFP4_MIN_EXP = 0.0
+_MXFP4_SCALE_FACTOR = 2.0
+_MXFP4_INV_SCALE_FACTOR = 0.5
 _HIF4_BLOCK_SIZE = 64
 _HIF4_SCALE_MIN_EXP = -48
 _HIF4_SEPARATE_QKV_WEIGHT_SUFFIXES = (
@@ -262,6 +268,57 @@ def enable_hif4_qkv_quant(vllm_config) -> bool:
         for suffix in _HIF4_SEPARATE_QKV_WEIGHT_SUFFIXES
     ]
     return bool(set.intersection(*qkv_prefixes))
+
+
+def quant_dequant_mxfp4(
+    tensor: torch.Tensor,
+    qdim: int,
+    blocksize: int = MXFP4_BLOCK_SIZE,
+    stochastic_rounding: bool = False,
+) -> torch.Tensor:
+    """MXFP4 pseudo-quantization copied from the attention reference."""
+    orig_shape = tensor.shape
+    tensor = tensor.unflatten(qdim, (-1, blocksize))
+
+    max_val = torch.amax(tensor.abs(), qdim, keepdim=True)
+    inv_constant = 1 / 7
+    shared_exp = torch.ceil(torch.log2(max_val.clamp(min=_MXFP4_EPSILON) * inv_constant))
+    shared_exp = shared_exp.clamp(-127, 127)
+
+    tensor = tensor * torch.exp2(-shared_exp)
+
+    private_exp = torch.floor(torch.log2(tensor.abs().clamp(min=_MXFP4_EPSILON))).clamp(min=_MXFP4_MIN_EXP)
+    tensor = tensor * torch.exp2(-private_exp) * _MXFP4_SCALE_FACTOR
+
+    tensor_sign = torch.sign(tensor)
+    tensor = tensor_sign * torch.floor_(tensor.abs() + 0.5)
+
+    tensor = (tensor * _MXFP4_INV_SCALE_FACTOR * torch.exp2(private_exp)).clamp(-_MXFP4_MAX_NORM, _MXFP4_MAX_NORM)
+
+    recovered_tensor = tensor * torch.exp2(shared_exp)
+    return recovered_tensor.reshape(orig_shape)
+
+
+def quant_dequant_mxfp4_grouped(tensor: torch.Tensor) -> torch.Tensor:
+    """MXFP4 pseudo-quantization for ``[groups, 32, heads, size]``."""
+    orig_shape = tensor.shape
+    max_val = torch.amax(tensor.abs(), 1, keepdim=True)
+    inv_constant = 1 / 7
+    shared_exp = torch.ceil(torch.log2(max_val.clamp(min=_MXFP4_EPSILON) * inv_constant))
+    shared_exp = shared_exp.clamp(-127, 127)
+
+    tensor = tensor * torch.exp2(-shared_exp)
+
+    private_exp = torch.floor(torch.log2(tensor.abs().clamp(min=_MXFP4_EPSILON))).clamp(min=_MXFP4_MIN_EXP)
+    tensor = tensor * torch.exp2(-private_exp) * _MXFP4_SCALE_FACTOR
+
+    tensor_sign = torch.sign(tensor)
+    tensor = tensor_sign * torch.floor_(tensor.abs() + 0.5)
+
+    tensor = (tensor * _MXFP4_INV_SCALE_FACTOR * torch.exp2(private_exp)).clamp(-_MXFP4_MAX_NORM, _MXFP4_MAX_NORM)
+
+    recovered_tensor = tensor * torch.exp2(shared_exp)
+    return recovered_tensor.reshape(orig_shape)
 
 
 def quant_dequant_hif4(x: torch.Tensor, quant_type: str = "hifx4", axe: int = -1) -> torch.Tensor:
