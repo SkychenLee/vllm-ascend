@@ -302,6 +302,7 @@ def _paged_attn_fwd_inner(
     IS_CONTIGUOUS_KV: tl.constexpr,
     USE_MXFP4_P: tl.constexpr,
     USE_HIF4_P: tl.constexpr,
+    USE_HIF4_ONCE: tl.constexpr,
 ):
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, HEAD_DIM)
@@ -433,6 +434,7 @@ def _paged_attn_fwd(
     IS_CONTIGUOUS_KV: tl.constexpr,
     USE_MXFP4_P: tl.constexpr,
     USE_HIF4_P: tl.constexpr,
+    USE_HIF4_ONCE: tl.constexpr,
     IS_DECODE_ONLY: tl.constexpr,
 ):
     q_block_idx = tl.program_id(0)
@@ -514,6 +516,7 @@ def _paged_attn_fwd(
         IS_CONTIGUOUS_KV=IS_CONTIGUOUS_KV,
         USE_MXFP4_P=USE_MXFP4_P,
         USE_HIF4_P=USE_HIF4_P,
+        USE_HIF4_ONCE=USE_HIF4_ONCE,
     )
     empty_row = l_i == 0.0
     safe_l_i = tl.where(empty_row, 1.0, l_i)
@@ -552,6 +555,7 @@ def _paged_attn_decode_fwd(
     BLOCK_N: tl.constexpr,
     USE_MXFP4_P: tl.constexpr,
     USE_HIF4_P: tl.constexpr,
+    USE_HIF4_ONCE: tl.constexpr,
 ):
     """Compute ordinary single-token paged decode for one Q-head group."""
     seq_idx = tl.program_id(0).to(tl.int64)
@@ -672,6 +676,7 @@ def _paged_attn_decode_split_kv_fwd(
     BLOCK_N: tl.constexpr,
     USE_MXFP4_P: tl.constexpr,
     USE_HIF4_P: tl.constexpr,
+    USE_HIF4_ONCE: tl.constexpr,
 ):
     """Compute CPU-assigned logical-block ranges with a fixed program pool."""
     work_idx = tl.program_id(0).to(tl.int64)
@@ -1060,6 +1065,7 @@ class _paged_attention(torch.autograd.Function):
             IS_CONTIGUOUS_KV=is_contiguous_kv,
             USE_MXFP4_P=use_mxfp4_p,
             USE_HIF4_P=use_hif4_p,
+            USE_HIF4_ONCE=USE_HIF4_ONCE,
             IS_DECODE_ONLY=False,
             num_warps=(4 if head_dim == 64 else 8),
         )
@@ -1197,6 +1203,7 @@ def paged_attention_decode_out(
             BLOCK_N=DECODE_BLOCK_N,
             USE_MXFP4_P=use_mxfp4_p,
             USE_HIF4_P=use_hif4_p,
+            USE_HIF4_ONCE=USE_HIF4_ONCE,
             multibuffer=True,
             num_warps=8,
         )
@@ -1274,6 +1281,7 @@ def paged_attention_decode_out(
         BLOCK_N=DECODE_BLOCK_N,
         USE_MXFP4_P=use_mxfp4_p,
         USE_HIF4_P=use_hif4_p,
+        USE_HIF4_ONCE=USE_HIF4_ONCE,
         multibuffer=True,
         num_warps=8,
     )
