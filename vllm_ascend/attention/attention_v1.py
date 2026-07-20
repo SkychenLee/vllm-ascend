@@ -74,6 +74,7 @@ from vllm_ascend.ops.triton.paged_attn.decode_utils import (
 )
 from vllm_ascend.quantization.utils import (
     MXFP4_BLOCK_SIZE,
+    _HIF4_BLOCK_SIZE,
     quant_dequant_hif4,
     quant_dequant_mxfp4,
     quant_dequant_mxfp4_grouped,
@@ -95,9 +96,9 @@ ENABLE_KV_WINDOW_QUANT = envs_ascend.VLLM_ASCEND_ENABLE_KV_WINDOW_QUANT
 ENABLE_QK_ROTATION = envs_ascend.VLLM_ASCEND_ENABLE_QK_ROTATION
 
 HIF4_ATTENTION_SINK_SIZE = envs_ascend.VLLM_ASCEND_ATTENTION_SINK_SIZE
-HIF4_KV_QUANT_BLOCK_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
+KV_QUANT_WINDOW_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
 MXFP4_ATTENTION_SINK_SIZE = envs_ascend.VLLM_ASCEND_ATTENTION_SINK_SIZE
-MXFP4_KV_QUANT_WINDOW_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
+KV_QUANT_WINDOW_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
 
 _ROT_H_PATH = envs_ascend.VLLM_ASCEND_ROT_H_PATH
 
@@ -212,9 +213,12 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
-    # Prompt lengths anchor HiF4 decode windows so they never include prefill
-    # tokens (including the attention sink).
-    num_prompt_tokens_tensor: torch.Tensor = None
+    # Per-request prompt token count (fixed prefill length / decode starting
+    # point). Used by windowed KV quantization to anchor the high-precision
+    # window on the decode region instead of the absolute sequence origin.
+    num_prompt_tokens_list: list[int] = None  # type: ignore
+    # CPU tensor 形式的 num_prompt_tokens，供图模式 update_graph_params 刷新 _prefill_len_buffer。
+    num_prompt_tokens_tensor: torch.Tensor = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
     query_start_loc: torch.Tensor = None
@@ -340,17 +344,21 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
-        num_prompt_tokens_cpu = getattr(common_attn_metadata, "num_prompt_tokens_cpu", None)
-        if isinstance(num_prompt_tokens_cpu, torch.Tensor):
-            num_prompt_tokens_cpu = num_prompt_tokens_cpu[:num_reqs]
-        else:
-            num_prompt_tokens_cpu = None
-
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+
+        # Per-request prefill length (decode starting point), used to anchor
+        # windowed KV quantization on the decode region. Defensive: may be None
+        # under async_spec_decode (model_runner sets it None there).
+        npt_cpu = common_attn_metadata.num_prompt_tokens_cpu
+        num_prompt_tokens_list = (
+            npt_cpu[:num_reqs].tolist() if npt_cpu is not None else None
+        )
+        # CPU tensor 形式，供图模式 update_graph_params 刷新 _prefill_len_buffer。
+        num_prompt_tokens_tensor = npt_cpu[:num_reqs] if npt_cpu is not None else None
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -360,7 +368,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens.tolist(),
-            num_prompt_tokens_tensor=num_prompt_tokens_cpu,
+            num_prompt_tokens_list=num_prompt_tokens_list,
+            num_prompt_tokens_tensor=num_prompt_tokens_tensor,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
@@ -504,7 +513,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         prefill_lens_buffer.copy_(seq_lens_buffer, non_blocking=True)
         prompt_lens = getattr(attn_metadata, "num_prompt_tokens_tensor", None)
+        logger.info_once(f"prompt_lens: {prompt_lens}")
         if prompt_lens is not None:
+            logger.info_once(f"num_prompt_tokens_tensor:{prompt_lens.shape}")
             prefill_lens_buffer[: prompt_lens.numel()].copy_(prompt_lens, non_blocking=True)
 
     @staticmethod
@@ -770,6 +781,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         latest_cpu_seq_lens = attn_metadata[key].seq_lens
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        latest_npt = attn_metadata[key].num_prompt_tokens_tensor
                         latest_cpu_seq_qlens = torch.tensor(actual_seq_lengths_q)
                         latest_cpu_prefill_lens = getattr(attn_metadata[key], "num_prompt_tokens_tensor", None)
                         # NOTE:
@@ -789,14 +801,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     if seq_qlens_buffer is not None and latest_cpu_seq_qlens is not None:
                         num_reqs = latest_cpu_seq_qlens.numel()
                         seq_qlens_buffer[:num_reqs].copy_(latest_cpu_seq_qlens, non_blocking=True)
-                    if prefill_lens_buffer is not None and latest_cpu_seq_lens is not None:
-                        # Missing prompt lengths (for example in an unsupported
-                        # scheduler path) disable window quantization safely by
-                        # making decode_len zero.
-                        prefill_lens_buffer.copy_(seq_lens_buffer, non_blocking=True)
-                        if latest_cpu_prefill_lens is not None:
-                            num_reqs = latest_cpu_prefill_lens.numel()
-                            prefill_lens_buffer[:num_reqs].copy_(latest_cpu_prefill_lens, non_blocking=True)
+                    
+                    if prefill_lens_buffer is not None and latest_npt is not None:
+                        npt_reqs = latest_npt.numel()
+                        prefill_lens_buffer[:npt_reqs].copy_(latest_npt.to(torch.int32), non_blocking=True)
+
+                    # logger.info_once(f"seq_qlens_buffer:{seq_qlens_buffer}  ,prefill_lens_buffer: {prefill_lens_buffer}, num_reqs:{num_reqs}, latest_cpu_seq_qlens:{latest_cpu_seq_qlens}")
 
                     split_kv_workspace = None
                     split_kv_descriptors = None
@@ -1081,7 +1091,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     self._split_kv_seq_desc_buffer[:num_tokens],
                 )
                 split_kv_num_programs = DECODE_SPLIT_KV_NUM_PROGRAMS
-
+            # _seq_qlens_buffer 在 fia_triton_decode_out 算子里实际上没有使用
             fia_triton_decode_out(
                 query=query,
                 key_cache=key,
@@ -1674,7 +1684,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return actual_output
         return torch.cat((actual_output, tensor[num_actual_tokens:]), dim=0)
 
-    def _quantize_qkv_mxfp4(
+    def prefill_quantize_qkv_mxfp4_with_sink(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -1789,6 +1799,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.block_tables is None:
             return None
         num_decode_tokens = attn_metadata.num_decode_tokens
+        logger.info_once(f"num_decode_tokens:{num_decode_tokens}, num_decodes:{attn_metadata.num_decodes}")
         if num_decode_tokens <= 0:
             return None
 
@@ -1859,7 +1870,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             seq_lens,
             query_lens,
             window_start_lens,
-            HIF4_KV_QUANT_BLOCK_SIZE,
+            KV_QUANT_WINDOW_SIZE,
         )
         if block_data is None:
             return
@@ -1891,7 +1902,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             seq_lens,
             query_lens,
             window_start_lens,
-            HIF4_KV_QUANT_BLOCK_SIZE,
+            KV_QUANT_WINDOW_SIZE,
         )
         if block_data is None:
             return
@@ -1977,7 +1988,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             seq_lens,
             query_lens,
             window_start_lens,
-            MXFP4_KV_QUANT_WINDOW_SIZE,
+            KV_QUANT_WINDOW_SIZE,
         )
         if block_data is None:
             return
@@ -2009,7 +2020,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             seq_lens,
             query_lens,
             window_start_lens,
-            MXFP4_KV_QUANT_WINDOW_SIZE,
+            KV_QUANT_WINDOW_SIZE,
         )
         if block_data is None:
             logger.info_once(f"block_data is None  _quantize_mxfp4_v_window ")
@@ -2027,7 +2038,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             write_mask,
         )
 
-    def _quantize_mxfp4_kv_windows(
+    def decode_quantize_kv_mxfp4_with_tailwindows(
         self,
         attn_metadata: AscendMetadata,
         device: torch.device,
@@ -2038,7 +2049,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if decode_lengths is None:
             logger.info_once(f"is_capturing: {is_capturing}")
             return
-        logger.info_once(f"is_capturing: {is_capturing} _quantize_mxfp4_kv_windows ")
+        logger.info_once(f"is_capturing: {is_capturing} decode_quantize_kv_mxfp4_with_tailwindows ")
         seq_lens, query_lens, prompt_lens = decode_lengths
         self._quantize_mxfp4_k_window(attn_metadata, seq_lens, query_lens, prompt_lens)
         self._quantize_mxfp4_v_window(attn_metadata, seq_lens, query_lens, prompt_lens)
@@ -2130,7 +2141,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
 
                 if is_decode and ENABLE_KV_WINDOW_QUANT:
-                    self._quantize_hif4_kv_windows(attn_metadata, query.device, is_capturing)
+                    if is_capturing:
+                        # 图模式：走纯 tensor 的整窗 HiF4 路线（K 沿 D、V 沿 S），
+                        # seq_lens / prefill 由 update_graph_params 刷新进预分配
+                        # buffer，(num_decodes, W) 为静态形状，可被 ACLGraph 捕获。
+                        self.decode_quantize_window_kv_slots_graph_hif4(
+                            attn_metadata, attn_metadata.num_decodes
+                        )
+                    else:
+                        # Eager 模式：保留原增量滑动 + sink 保护路线。
+                        self._quantize_hif4_kv_windows(attn_metadata, query.device, is_capturing)
             else:
                 if ENABLE_QK_ROTATION:
                     logger.info_once(f"is_decode: {is_decode} , run in rot_h")
@@ -2141,7 +2161,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query = quant_dequant_mxfp4(query, -1)
                 else:
                     logger.info_once(f"is_decode : {is_decode} quant QKV")
-                    query, key, value = self._quantize_qkv_mxfp4(query, key, value, attn_metadata)
+                    query, key, value = self.prefill_quantize_qkv_mxfp4_with_sink(query, key, value, attn_metadata)
 
                 query, key, value, output_padded = self.reshape_and_cache(
                     query, key, value, kv_cache, attn_metadata, output
@@ -2149,19 +2169,813 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                 if is_decode and ENABLE_KV_WINDOW_QUANT:
                     logger.info_once(f"is_decode : {is_decode} quant KV ENABLE_KV_WINDOW_QUANT")
-                    self._quantize_mxfp4_kv_windows(attn_metadata, query.device, is_capturing)
+                    if is_capturing:
+                        # 图模式：走纯 tensor 的动态 MXFP4 路线（K 沿 D、V 沿 S），
+                        # seq_lens / prefill 由 update_graph_params 刷新进预分配
+                        # buffer，(num_decodes, W) 为静态形状，可被 ACLGraph 捕获。
+                        self.decode_quantize_window_kv_slots_graph_mxfp4(
+                            attn_metadata, attn_metadata.num_decodes
+                        )
+                    else:
+                        # Eager 模式：保留原动态路线（其 _get_decode_window_lengths
+                        # 非 capturing 分支依赖 .tolist()，无法进图）。
+                        self.decode_quantize_kv_mxfp4_with_tailwindows(
+                            attn_metadata, query.device, is_capturing
+                        )
 
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
+
         if output_padded is not None:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
+
+    def _prepare_c4_scales(self, layer: AttentionLayer, device: torch.device) -> None:
+        """Shard per-channel C8 scales/offsets to this TP rank and pre-compute
+        BF16 BNSD antiquant tensors for FIA V1 decode fast path.
+        """
+        if hasattr(layer, "_c4_scales_prepared"):
+            return
+
+        def _shard_and_reshape(raw: torch.Tensor) -> torch.Tensor:
+            if raw.numel() == 1:
+                return raw.to(device=device)
+            expected = self.num_kv_heads * self.head_size
+            if raw.numel() != expected:
+                total_kv_heads = raw.numel() // self.head_size
+                tp_rank = get_tensor_model_parallel_rank()
+                tp_size = get_tensor_model_parallel_world_size()
+                kv_head_start = tp_rank * total_kv_heads // tp_size
+                raw = raw.view(total_kv_heads, self.head_size)[
+                    kv_head_start : kv_head_start + self.num_kv_heads
+                ].contiguous()
+            return raw.view(1, self.num_kv_heads, self.head_size).to(device=device)
+
+        layer._c4_k_scale = _shard_and_reshape(layer.k_cache_scale.data)
+        # layer._c4_k_offset = _shard_and_reshape(layer.k_cache_offset.data)
+        layer._c4_v_scale = _shard_and_reshape(layer.v_cache_scale.data)
+        # layer._c4_v_offset = _shard_and_reshape(layer.v_cache_offset.data)
+
+        bnsd = (1, self.num_kv_heads, 1, self.head_size)
+        layer._c4_k_aq_scale = layer._c4_k_scale.to(torch.bfloat16).view(bnsd).contiguous()
+        # layer._c4_k_aq_offset = layer._c4_k_offset.to(torch.bfloat16).view(bnsd).contiguous()
+        layer._c4_v_aq_scale = layer._c4_v_scale.to(torch.bfloat16).view(bnsd).contiguous()
+        # layer._c4_v_aq_offset = layer._c4_v_offset.to(torch.bfloat16).view(bnsd).contiguous()
+
+        layer._c4_k_inv_scale_bf16 = (1.0 / layer._c4_k_scale).to(torch.bfloat16)
+        # layer._c4_k_offset_bf16 = layer._c4_k_offset.to(torch.bfloat16)
+        layer._c4_v_inv_scale_bf16 = (1.0 / layer._c4_v_scale).to(torch.bfloat16)
+        # layer._c4_v_offset_bf16 = layer._c4_v_offset.to(torch.bfloat16)
+
+        layer._c4_scales_prepared = True
+
+    def _quantize_kv_to_fp4_sink(
+            self,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            layer: AttentionLayer,
+            num_actual_tokens: int,
+            query_start_loc: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pseudo-quantize K/V, keeping the first `sink_size` tokens of each sequence unquantized."""
+        self._prepare_c4_scales(layer, key.device)
+        dtype = key.dtype
+        sink_size = ATTENTION_SINK_SIZE
+        # 1. 截取当前真正有效的 KV
+        actual_key = key[:num_actual_tokens]
+        actual_value = value[:num_actual_tokens]
+        
+        # 2. 构造每个 token 在其所属序列内部的相对索引 (relative index)
+        # query_start_loc 形状为 [num_seqs + 1]
+        # 我们需要为 actual_key 的 [num_actual_tokens] 维度上的每个位置计算它属于当前序列的第几个 token
+        
+        # 快速生成全序列索引：[0, 1, 2, ..., num_actual_tokens - 1]
+        global_idx = torch.arange(num_actual_tokens, device=key.device)
+        
+        # 利用 bucketize 找到每个全局 token 属于哪一个序列
+        # query_start_loc[1:] 保证边界正确，right=True
+        seq_ids = torch.bucketize(global_idx, query_start_loc[1:], right=True)
+        # logger.info_once(f"actual_value.shape : {actual_value.shape}, query_start_loc: {query_start_loc}")
+        logger.info_once(f"seq_ids: {seq_ids}, query_start_loc:{query_start_loc}, global_idx: {global_idx}, actual_value.shape : {actual_value.shape}")
+        # 计算每个 token 在自己序列内的相对位置 = 全局位置 - 序列开始位置
+        seq_start_locs = query_start_loc[seq_ids]
+        relative_idx = global_idx - seq_start_locs # 形状: [num_actual_tokens]
+        
+        # 3. 创建量化掩码：只有相对位置 >= sink_size 的 token 才需要被量化
+        # 形状扩展为 [num_actual_tokens, 1, 1] 方便广播
+        quant_mask = (relative_idx >= sink_size).view(-1, 1, 1)
+        # logger.info_once(f"relative_idx:{relative_idx}")
+        
+        
+        logger.info_once(f"quant_mask: {quant_mask}, relative_idx:{relative_idx}, seq_start_locs: {seq_start_locs}, relative_idx.shape : {relative_idx.shape}")
+        
+        # 4. 执行伪量化计算
+        k_qdq_all = (torch.clamp(
+            torch.round(actual_key * layer._c4_k_inv_scale_bf16),
+            -6,
+            6,
+        ) / layer._c4_k_inv_scale_bf16).to(dtype)
+        
+        v_qdq_all = (torch.clamp(
+            torch.round(actual_value * layer._c4_v_inv_scale_bf16),
+            -6,
+            6,
+        ) / layer._c4_v_inv_scale_bf16).to(dtype)
+        
+        # 5. 根据掩码组合：需要量化的用量化后值，前 sink_size 个保留原值
+        k_qdq = torch.where(quant_mask, k_qdq_all, actual_key)
+        v_qdq = torch.where(quant_mask, v_qdq_all, actual_value)
+        
+        return k_qdq, v_qdq
+
+    def _quantize_evicted_kv_slots(
+        self,
+        layer: AttentionLayer,
+        attn_metadata: AscendMetadata,
+        _seq_lens_buffer: torch.Tensor,
+    ) -> None:
+        if self.key_cache is None or self.value_cache is None:
+            return
+
+        num_decodes = attn_metadata.num_decodes
+        if num_decodes <= 0:
+            return
+
+        # kv_cache shape: [2, num_blocks, block_size, num_kv_heads, head_size]
+        block_tables = attn_metadata.block_tables  # (batch_size, max_blocks_per_seq)
+        block_size = self.key_cache.shape[1]
+        device = self.key_cache.device
+
+        m = ATTENTION_SINK_SIZE
+        n = KV_QUANT_WINDOW_SIZE
+
+        active_blocks = block_tables[:num_decodes]
+        approx_seq_lens = _seq_lens_buffer[:num_decodes]
+
+        # 被踢出窗口的逻辑 Token 位置：seq_len - 1 - n
+        evicted_pos = approx_seq_lens - 1 - n  # (num_decodes,)
+        valid_evict_mask = (evicted_pos >= 0) & (evicted_pos >= m)  # (num_decodes,)
+
+        # clamp 收束负数/越界位置防止索引越界，写回时再用 mask 屏蔽
+        safe_evicted_pos = torch.clamp(evicted_pos, min=0)
+        target_block_indices = safe_evicted_pos // block_size  # (num_decodes,)
+        offset_in_blocks = safe_evicted_pos % block_size       # (num_decodes,)
+
+        # 从 block_table 捞出物理块号 (纯 NPU Tensor 静态索引，极其高效)
+        row_indices = torch.arange(num_decodes, device=device)
+        phys_blocks = active_blocks[row_indices, target_block_indices]  # (num_decodes,)
+
+        # 计算出在展平后的 KV Cache 中的最终一维物理 Slot 地址
+        evicted_slots = phys_blocks * block_size + offset_in_blocks  # (num_decodes,)
+
+        # 如果 phys_blocks 是 -1（即该位置尚未分配），将其映射到安全的 0 位置
+        safe_slots_mask = valid_evict_mask & (phys_blocks >= 0)
+        final_slots = torch.where(safe_slots_mask, evicted_slots, torch.zeros_like(evicted_slots))
+
+        # 对 num_decodes 个位置进行原地伪量化
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+
+        # 仅取出滑出位置的 KV 值，形状为 (num_decodes, num_kv_heads, head_size)
+        k_evicted = flat_key[final_slots]
+        v_evicted = flat_value[final_slots]
+
+        k_quantized = (torch.clamp(
+            torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6
+        ) / layer._c4_k_inv_scale_bf16).to(k_evicted.dtype)
+
+        v_quantized = (torch.clamp(
+            torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6
+        ) / layer._c4_v_inv_scale_bf16).to(v_evicted.dtype)
+
+
+        write_mask = safe_slots_mask.unsqueeze(-1).unsqueeze(-1)  # (num_decodes, 1, 1)
+
+        k_final = torch.where(write_mask, k_quantized, k_evicted)
+        v_final = torch.where(write_mask, v_quantized, v_evicted)
+
+        # Scatter 原地回写
+        flat_key[final_slots] = k_final
+        flat_value[final_slots] = v_final
+    
+    def _quantize_evicted_kv_slots_eager(
+        self,
+        layer: AttentionLayer,
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        """纯 Eager 模式：不引入 Attention Sink。
+        准确地对刚滑出高精窗口（KV_QUANT_WINDOW_SIZE）的单个旧 KV 槽位进行原地伪量化。
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+
+        seq_lens_list = attn_metadata.seq_lens_list
+        if not seq_lens_list:
+            return
+
+        num_decodes = attn_metadata.num_decodes
+        if num_decodes <= 0:
+            return
+
+        block_tables = attn_metadata.block_tables
+        if block_tables is None:
+            return
+
+        block_size = self.key_cache.shape[1]
+        n = KV_QUANT_WINDOW_SIZE
+
+        evicted_slots = []
+        for req_idx in range(num_decodes):
+            seq_len = seq_lens_list[req_idx]
+            # 刚滑出窗口的逻辑 Token 位置
+            evicted_pos = seq_len - 1 - n
+            
+            # Eager 模式下直接通过 if 过滤，不满足条件的不处理
+            if evicted_pos < 0:
+                continue
+
+            block_idx = evicted_pos // block_size
+            offset_in_block = evicted_pos % block_size
+            
+            # 安全取出物理块号
+            phys_block = block_tables[req_idx, block_idx].item()
+            if phys_block >= 0:  # 确保块已被分配
+                flat_slot = phys_block * block_size + offset_in_block
+                evicted_slots.append(flat_slot)
+
+        # 如果当前 batch 没有任何请求需要释放高精槽位，直接返回
+        if not evicted_slots:
+            return
+        device = self.key_cache.device
+        evicted_indices = torch.tensor(evicted_slots, dtype=torch.long, device=device)
+
+        # 展平 View（无 Copy 风险，方便一维索引）
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+
+        # 仅取出需要量化的 KV
+        k_evicted = flat_key[evicted_indices]
+        v_evicted = flat_value[evicted_indices]
+
+        # 原地量化 & 反量化
+        k_quantized = (torch.clamp(
+            torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6
+        ) / layer._c4_k_inv_scale_bf16).to(k_evicted.dtype)
+
+        v_quantized = (torch.clamp(
+            torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6
+        ) / layer._c4_v_inv_scale_bf16).to(v_evicted.dtype)
+
+        # Scatter 回写
+        flat_key[evicted_indices] = k_quantized
+        flat_value[evicted_indices] = v_quantized
+
+    def _get_prefill_len(self, attn_metadata: AscendMetadata, req_idx: int) -> int:
+        """返回第 ``req_idx`` 条 decode 请求的 prefill 长度（decode 起点）。
+
+        高精度窗口的基准必须定在 **decode 起点**（= prefill_len），而不是序列的绝对
+        起点，否则窗口边界会切到 prefill 已经全量 FP4 化的历史区上，造成二次量化
+        误差。该固定锚点取自 :attr:`AscendMetadata.num_prompt_tokens_list` —— 由
+        model_runner 从 ``input_batch.num_prompt_tokens`` 透传而来，请求加入 batch
+        时写死、之后不变，正是 vLLM 内部界定 prefill/decode 边界所用的同一个量。
+
+        Fallback: async_spec_decode 模式下 ``num_prompt_tokens_list`` 可能为 None
+        （model_runner 那条路径未填充），此时退回占位 ``0``（等价于"整序列均由 decode
+        产生"假设），窗口逻辑仍自洽但会窗口错位。
+        """
+        npt = attn_metadata.num_prompt_tokens_list
+        if npt is None:
+            return 0
+        return int(npt[req_idx])
+
+    def _quantize_window_kv_slots_eager(
+        self,
+        layer: AttentionLayer,
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        """纯 Eager 模式：批量窗口量化（仿照 _quantize_evicted_kv_slots_eager 的逐请求循环风格）。
+
+        与一进一出（1-in/1-out）路径不同：每当某个 decode 请求在 **decode 区** 内
+        累积满一整窗 W 个 token（即 ``decode_len % W == 0``），就把这一窗 W 个连续
+        KV 槽位一次性原地伪量化；下一个窗口随后开始累积。
+        每 W 步触发一次、每次量化 W 个 token，而不是每步量化 1 个滑出 token。
+
+        正确性核心（区别于一进一出 + 旧版绝对网格）：
+          - prefill 阶段已对全部历史 KV 做了 FP4 全量化；decode 新 token 以 BF16 写入。
+          - 因此高精度窗口的基准必须定在 **decode 起点**（``prefill_len``），只看
+            ``decode_len = seq_len - prefill_len``，保证量化窗口 ``[seq_len-W, seq_len-1]``
+            **整窗都落在 decode 区内**（全是 BF16），绝不触碰 prefill 的 FP4 历史，
+            避免二次量化。
+
+        NOTE: per-request 的 ``prefill_len`` 当前由 :meth:`_get_prefill_len` 占位
+        提供（见其 TODO），确定真实数据来源后替换即可，无需改动本方法主逻辑。
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+
+        seq_lens_list = attn_metadata.seq_lens_list
+        if not seq_lens_list:
+            return
+
+        num_decodes = attn_metadata.num_decodes
+        if num_decodes <= 0:
+            return
+
+        block_tables = attn_metadata.block_tables
+        if block_tables is None:
+            return
+
+        block_size = self.key_cache.shape[1]
+        W = KV_QUANT_WINDOW_SIZE
+
+        # 收集本轮"刚填满"窗口内每个 token 在展平 KV cache 中的一维 Slot 地址。
+        # 注意：窗口量化不做 attention-sink 保护，整窗 W 个 token 一起量化
+        # （sink 仅在 prefill 阶段处理，而 prefill 已对全部历史做全量 FP4 量化）。
+        window_slots = []
+        for req_idx in range(num_decodes):
+            # seq_len 为写回后的总长度（与 FIA 的 actual_seq_lengths_kv 一致），
+            # 因此包含刚刚写入的新 token。
+            seq_len = seq_lens_list[req_idx]
+
+            # 解码基准锚点：该请求 prefill 结束时的总长度。高精度窗口只关心 decode
+            # 推进的 token，窗口基准定在这里而非序列绝对起点。
+            prefill_len = self._get_prefill_len(attn_metadata, req_idx)
+            # 纯 decode 推进的 token 数（含当前这步刚写入的）。
+            decode_len = seq_len - prefill_len
+
+            # 触发判定：decode 区累积满一整窗 W 个 token 才触发。窗口基准定在
+            # decode 起点（prefill_len）而非序列绝对起点，避免切到 prefill 的 FP4
+            # 历史区造成二次量化。
+            if decode_len < W or (decode_len % W) != 0:
+                continue
+
+            # 本轮刚填满的窗口 == 最近 W 个 token：[seq_len - W, seq_len - 1]。
+            # 由于 decode_len % W == 0，该窗口必然整窗落在 decode 区 [prefill_len,
+            # seq_len-1] 内，全部为 BF16，量化安全。
+            start_pos = seq_len - W
+            end_pos = seq_len  # exclusive
+
+            for pos in range(start_pos, end_pos):
+                block_idx = pos // block_size
+                offset_in_block = pos % block_size
+
+                phys_block = block_tables[req_idx, block_idx].item()
+                if phys_block >= 0:  # 确保块已被分配
+                    flat_slot = phys_block * block_size + offset_in_block
+                    window_slots.append(flat_slot)
+
+        # 若本轮 batch 没有任何请求的窗口恰好填满，直接返回。
+        if not window_slots:
+            return
+
+        device = self.key_cache.device
+        window_indices = torch.tensor(window_slots, dtype=torch.long, device=device)
+
+        # 展平 View（无 Copy），方便一维索引。
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+
+        # 仅取出需要量化的整个窗口的 KV。
+        k_win = flat_key[window_indices]
+        v_win = flat_value[window_indices]
+
+        # 与 _quantize_kv_to_fp4 / _quantize_evicted_kv_slots_eager 相同的 FP4 伪量化。
+        k_quantized = (torch.clamp(
+            torch.round(k_win * layer._c4_k_inv_scale_bf16), -6, 6
+        ) / layer._c4_k_inv_scale_bf16).to(k_win.dtype)
+        v_quantized = (torch.clamp(
+            torch.round(v_win * layer._c4_v_inv_scale_bf16), -6, 6
+        ) / layer._c4_v_inv_scale_bf16).to(v_win.dtype)
+
+        # Scatter 原地回写。
+        flat_key[window_indices] = k_quantized
+        flat_value[window_indices] = v_quantized
+
+    def _quantize_window_kv_slots_graph(
+        self,
+        layer: AttentionLayer,
+        attn_metadata: AscendMetadata,
+        num_decodes: int,
+    ) -> None:
+        """图模式兼容的批量窗口量化：纯 tensor、无 .item()、无数据相关控制流、
+        固定形状 (num_decodes, W)，可被 trace 进 ACLGraph。
+
+        只处理前 ``num_decodes`` 行（真实 decode 请求，block_table 合法无 -1），
+        因此 invalid 行（未触发）写回各自窗口 slot 的原值天然自洽：不同请求物理
+        block 互斥分配，窗口 slot 互不重叠，无争抢竞态、无需 scratch、无污染。
+        ``num_decodes`` 是每次 capture 分桶内的固定 Python int，所以
+        ``(num_decodes, W)`` 是静态形状——图 capture 的关键前提。
+
+        seq_lens / prefill_len 取自预分配 buffer（``_seq_lens_buffer`` /
+        ``_prefill_lens_buffer``），由 :meth:`update_graph_params` 在 replay 前原位
+        ``copy_`` 刷新。
+
+        注意：
+          - 触发判定基于 **decode_len = seq_len - prefill_len**（不是 seq_len），
+            窗口基准定在 decode 起点，避免切到 prefill 的 FP4 历史造成二次量化。
+          - 不做 attention-sink 保护：整窗 W 个 token 一起量化（sink 仅在
+            prefill 处理，而 prefill 已对全部历史做全量 FP4 量化）。
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+        if num_decodes <= 0:
+            return
+
+        # 1. 图模式下 seq_lens / prefill_len 必须取自预分配 buffer（replay 时由
+        #    update_graph_params 原位刷新）。block_tables 是 model_runner 每步
+        #    复用的同一 buffer 对象，capture 时固化对象、replay 时内容已更新。
+        seq_lens_t = self._seq_lens_buffer[:num_decodes]    # (num_decodes,)
+        prefill_t = self._prefill_lens_buffer[:num_decodes]  # (num_decodes,)
+        block_tables_t = attn_metadata.block_tables         # (max_num_seqs, max_blocks)
+
+        W = KV_QUANT_WINDOW_SIZE                      # 64
+        block_size = self.key_cache.shape[1]
+        device = self.key_cache.device
+
+        # 2. 触发判定：decode 区累积满一整窗 W 才触发。基于 decode_len 而非 seq_len，
+        #    保证窗口 [seq_len-W, seq_len-1] 整窗落在 decode 区（全是 BF16）。
+        decode_len = seq_lens_t - prefill_t                              # (num_decodes,)
+        window_filled_mask = (decode_len >= W) & ((decode_len % W) == 0)  # (num_decodes,)
+
+        # 3. 构造静态相对位置网格 [-W, -W+1, ..., -1]，广播出每请求窗口内 W 个
+        #    token 的绝对逻辑位置 [seq_len-W, seq_len-1]。shape (num_decodes, W)。
+        rel_positions = torch.arange(-W, 0, device=device)               # (W,)
+        positions = seq_lens_t.unsqueeze(1) + rel_positions.unsqueeze(0) # (num_decodes, W)
+
+        # 4. 逻辑位置 → 物理块索引 / 块内偏移。
+        #    未触发或 seq_len < W 的请求 positions 可能为负，clamp 到 >= 0 以免
+        #    负索引 gather 取到末尾错误 slot（写回时由 mask 屏蔽，不影响结果）。
+        safe_positions = torch.clamp(positions, min=0)
+        block_idx = (safe_positions // block_size).long()               # (num_decodes, W)
+        offset_in_block = (safe_positions % block_size).long()          # (num_decodes, W)
+
+        # 5. 批量查表（高级索引）：从 block_tables 取每请求窗口的物理块号。
+        row_indices = torch.arange(num_decodes, device=device).unsqueeze(1).expand(-1, W)
+        phys_blocks = block_tables_t[row_indices, block_idx]            # (num_decodes, W)
+
+        # 6. 扁平化槽位索引 + 未分配块（-1）保护。
+        all_slots_grid = (phys_blocks * block_size + offset_in_block).long()   # (num_decodes, W)
+        slot_mask = window_filled_mask.unsqueeze(1) & (phys_blocks >= 0)       # (num_decodes, W)
+
+        flat_slots = all_slots_grid.flatten()                            # (num_decodes*W,)
+        flat_write_mask = slot_mask.flatten()                            # (num_decodes*W,)
+
+        # 7. 读取 K/V 并批量 FP4 伪量化（纯 tensor 运算，图模式天然支持）。
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+        k_win = flat_key[flat_slots]                                     # (num_decodes*W, H, D)
+        v_win = flat_value[flat_slots]
+
+        k_quantized = (torch.clamp(
+            torch.round(k_win * layer._c4_k_inv_scale_bf16), -6, 6
+        ) / layer._c4_k_inv_scale_bf16).to(k_win.dtype)
+        v_quantized = (torch.clamp(
+            torch.round(v_win * layer._c4_v_inv_scale_bf16), -6, 6
+        ) / layer._c4_v_inv_scale_bf16).to(v_win.dtype)
+
+        # 8. 条件写回：触发位置写量化值；未触发位置写回各自窗口 slot 的原值（no-op）。
+        #    不同请求物理 block 互斥 → 窗口 slot 互不重叠 → 无争抢竞态。
+        write_mask = flat_write_mask.unsqueeze(-1).unsqueeze(-1)         # (num_decodes*W, 1, 1)
+        updated_k = torch.where(write_mask, k_quantized, k_win)
+        updated_v = torch.where(write_mask, v_quantized, v_win)
+
+        # 9. 原位写回 cache。
+        flat_key[flat_slots] = updated_k
+        flat_value[flat_slots] = updated_v
+
+    def decode_quantize_window_kv_slots_graph_mxfp4(
+        self,
+        attn_metadata: AscendMetadata,
+        num_decodes: int,
+    ) -> None:
+        """图模式兼容的动态 MXFP4 窗口量化。
+
+        与 :meth:`_quantize_window_kv_slots_graph` 共用同一套图模式骨架
+        （纯 tensor、固定形状 ``(num_decodes, W)``、从预分配 buffer 取
+        ``seq_lens`` / ``prefill``、条件写回），仅在量化段不同：改用动态
+        MXFP4，且 **K 沿 D 轴、V 沿 S(token) 轴** 量化 —— 与
+        :meth:`decode_quantize_kv_mxfp4_with_tailwindows` 路线语义一致，但
+        全程无 ``.item()`` / 无数据相关控制流，可被 ACLGraph 捕获。
+
+        约束（由下方 assert 显式校验）：
+          - ``KV_QUANT_WINDOW_SIZE`` 必须是 ``MXFP4_BLOCK_SIZE`` 的整数
+            倍，否则 V 的 S 轴无法按 32 token 分组。
+          - ``head_size`` 必须是 ``MXFP4_BLOCK_SIZE`` 的整数倍，否则 K 的 D
+            轴 ``unflatten`` 失败。
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+        if num_decodes <= 0:
+            return
+
+        assert KV_QUANT_WINDOW_SIZE % MXFP4_BLOCK_SIZE == 0, (
+            "KV_QUANT_WINDOW_SIZE must be a multiple of "
+            f"MXFP4_BLOCK_SIZE({MXFP4_BLOCK_SIZE}) for S-axis MXFP4 grouping, "
+            f"got {KV_QUANT_WINDOW_SIZE}"
+        )
+        assert self.head_size % MXFP4_BLOCK_SIZE == 0, (
+            "head_size must be a multiple of "
+            f"MXFP4_BLOCK_SIZE({MXFP4_BLOCK_SIZE}) for D-axis MXFP4 grouping, "
+            f"got {self.head_size}"
+        )
+
+        seq_lens_t = self._seq_lens_buffer[:num_decodes]    # (num_decodes,)
+        prefill_t = self._prefill_lens_buffer[:num_decodes]  # (num_decodes,)
+        block_tables_t = attn_metadata.block_tables         # (max_num_seqs, max_blocks)
+
+        W = KV_QUANT_WINDOW_SIZE                      # 64
+        block_size = self.key_cache.shape[1]
+        device = self.key_cache.device
+
+        decode_len = seq_lens_t - prefill_t                              # (num_decodes,)
+        window_filled_mask = (decode_len >= W) & ((decode_len % W) == 0)  # (num_decodes,)
+
+        rel_positions = torch.arange(-W, 0, device=device)               # (W,)
+        positions = seq_lens_t.unsqueeze(1) + rel_positions.unsqueeze(0) # (num_decodes, W)
+
+        safe_positions = torch.clamp(positions, min=0)
+        block_idx = (safe_positions // block_size).long()               # (num_decodes, W)
+        offset_in_block = (safe_positions % block_size).long()          # (num_decodes, W)
+
+        row_indices = torch.arange(num_decodes, device=device).unsqueeze(1).expand(-1, W)
+        phys_blocks = block_tables_t[row_indices, block_idx]            # (num_decodes, W)
+
+        all_slots_grid = (phys_blocks * block_size + offset_in_block).long()   # (num_decodes, W)
+        slot_mask = window_filled_mask.unsqueeze(1) & (phys_blocks >= 0)       # (num_decodes, W)
+
+        flat_slots = all_slots_grid.flatten()                            # (num_decodes*W,)
+        flat_write_mask = slot_mask.flatten()                            # (num_decodes*W,)
+
+        #    读取 K/V 并批量动态 MXFP4 伪量化（纯 tensor 运算，图模式天然支持）。
+        #    K 沿 D 轴：每 32 个 head_size 元素一组算 shared_exp（与
+        #    _quantize_mxfp4_k_window 的 quant_dequant_mxfp4(blocks, -1) 一致）。
+        #    V 沿 S(token) 轴：把窗口 W 个 token 按 MXFP4_BLOCK_SIZE 分组，重排成
+        #    quant_dequant_mxfp4_grouped 要求的 [groups, 32, H, D]（与
+        #    _quantize_mxfp4_v_window 的 token_axis_blocks 分组一致）。
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+        k_win = flat_key[flat_slots]                                     # (num_decodes*W, H, D)
+        v_win = flat_value[flat_slots]                                   # (num_decodes*W, H, D)
+
+        k_quantized = quant_dequant_mxfp4(k_win, -1)
+
+        W_GROUPS = W // MXFP4_BLOCK_SIZE                                 # 64 // 32 = 2
+        v_grouped = v_win.view(
+            num_decodes,
+            W_GROUPS,
+            MXFP4_BLOCK_SIZE,
+            self.num_kv_heads,
+            self.head_size,
+        )
+        v_quantized = quant_dequant_mxfp4_grouped(v_grouped).view_as(v_win)
+
+        write_mask = flat_write_mask.unsqueeze(-1).unsqueeze(-1)         # (num_decodes*W, 1, 1)
+        updated_k = torch.where(write_mask, k_quantized, k_win)
+        updated_v = torch.where(write_mask, v_quantized, v_win)
+
+        flat_key[flat_slots] = updated_k
+        flat_value[flat_slots] = updated_v
+
+    def decode_quantize_window_kv_slots_graph_hif4(
+        self,
+        attn_metadata: AscendMetadata,
+        num_decodes: int,
+    ) -> None:
+        """图模式兼容的 HiF4 窗口量化（整窗触发、无 sink）。
+
+        与 :meth:`decode_quantize_window_kv_slots_graph_mxfp4` 共用同一套图模式
+        骨架（纯 tensor、固定形状 ``(num_decodes, W)``、从预分配 buffer 取
+        ``seq_lens`` / ``prefill``、整窗 ``[seq_len-W, seq_len-1]`` 触发、条件
+        写回），区别仅在量化段：改用 HiF4，且 **K 沿 D 轴、V 沿 S(token) 轴**
+        量化 —— 与原 :meth:`_quantize_hif4_k_window` / :meth:`_quantize_hif4_v_window`
+        的轴语义一致，但抛弃了基于 ``_get_completed_quant_blocks`` 的"增量滑动 +
+        sink 保护"触发逻辑，改为整窗触发（与 mxfp4 图路线对齐）。
+
+        约束：
+          - ``KV_QUANT_WINDOW_SIZE`` 建议是 ``_HIF4_BLOCK_SIZE(64)`` 的整数倍。
+            ``quant_dequant_haf4`` 内部自带 padding，非整除也能跑，但整除时窗口
+            恰好对齐一个 HiF4 块、无 padding 开销，故此处加一条提示性 assert。
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+        if num_decodes <= 0:
+            return
+
+        assert KV_QUANT_WINDOW_SIZE % _HIF4_BLOCK_SIZE == 0, (
+            "KV_QUANT_WINDOW_SIZE should be a multiple of "
+            f"_HIF4_BLOCK_SIZE({_HIF4_BLOCK_SIZE}) for S-axis HiF4 grouping, "
+            f"got {KV_QUANT_WINDOW_SIZE}"
+        )
+
+        seq_lens_t = self._seq_lens_buffer[:num_decodes]    # (num_decodes,)
+        prefill_t = self._prefill_lens_buffer[:num_decodes]  # (num_decodes,)
+        block_tables_t = attn_metadata.block_tables         # (max_num_seqs, max_blocks)
+
+        W = KV_QUANT_WINDOW_SIZE                      # 64
+        block_size = self.key_cache.shape[1]
+        device = self.key_cache.device
+
+        decode_len = seq_lens_t - prefill_t                              # (num_decodes,)
+        window_filled_mask = (decode_len >= W) & ((decode_len % W) == 0)  # (num_decodes,)
+
+        rel_positions = torch.arange(-W, 0, device=device)               # (W,)
+        positions = seq_lens_t.unsqueeze(1) + rel_positions.unsqueeze(0) # (num_decodes, W)
+
+        safe_positions = torch.clamp(positions, min=0)
+        block_idx = (safe_positions // block_size).long()               # (num_decodes, W)
+        offset_in_block = (safe_positions % block_size).long()          # (num_decodes, W)
+
+        row_indices = torch.arange(num_decodes, device=device).unsqueeze(1).expand(-1, W)
+        phys_blocks = block_tables_t[row_indices, block_idx]            # (num_decodes, W)
+
+        all_slots_grid = (phys_blocks * block_size + offset_in_block).long()   # (num_decodes, W)
+        slot_mask = window_filled_mask.unsqueeze(1) & (phys_blocks >= 0)       # (num_decodes, W)
+
+        flat_slots = all_slots_grid.flatten()                            # (num_decodes*W,)
+        flat_write_mask = slot_mask.flatten()                            # (num_decodes*W,)
+
+        # 读取 K/V 并批量 HiF4 伪量化（纯 tensor 运算，图模式天然支持）。
+        #   K 沿 D 轴：quant_dequant_hif4(., axe=-1)，与 _quantize_hif4_k_window 一致。
+        #   V 沿 S(token) 轴：把 token 维 W permute 到最后再 axe=-1，量化后还原，
+        #     与 _quantize_hif4_v_window 的 permute(0,1,3,4,2)→axe=-1→permute 回 一致。
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+        k_win = flat_key[flat_slots]                                     # (num_decodes*W, H, D)
+        v_win = flat_value[flat_slots]                                   # (num_decodes*W, H, D)
+
+        k_quantized = quant_dequant_hif4(k_win, axe=-1)
+
+        v_win_5d = v_win.view(num_decodes, W, self.num_kv_heads, self.head_size)
+        v_token_last = v_win_5d.permute(0, 2, 3, 1).contiguous()         # (num_decodes, H, D, W)
+        v_quantized_token_last = quant_dequant_hif4(v_token_last, axe=-1)
+        v_quantized = v_quantized_token_last.permute(0, 3, 1, 2).reshape_as(v_win)
+
+        write_mask = flat_write_mask.unsqueeze(-1).unsqueeze(-1)         # (num_decodes*W, 1, 1)
+        updated_k = torch.where(write_mask, k_quantized, k_win)
+        updated_v = torch.where(write_mask, v_quantized, v_win)
+
+        flat_key[flat_slots] = updated_k
+        flat_value[flat_slots] = updated_v
+
+    def _quantize_evicted_kv_slots_with_sink(
+        self,
+        layer: AttentionLayer,
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        """纯 Eager 模式：叠加 Attention Sink 保护。
+        前 ATTENTION_SINK_SIZE 个 Token 永远保持高精度，不参与伪量化。
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+
+        seq_lens_list = attn_metadata.seq_lens_list
+        if not seq_lens_list:
+            return
+
+        num_decodes = attn_metadata.num_decodes
+        if num_decodes <= 0:
+            return
+
+        block_tables = attn_metadata.block_tables
+        if block_tables is None:
+            return
+
+        block_size = self.key_cache.shape[1]
+        m = ATTENTION_SINK_SIZE             # 例如 4
+        n = KV_QUANT_WINDOW_SIZE      # 例如 1024
+
+        evicted_slots = []
+        for req_idx in range(num_decodes):
+            seq_len = seq_lens_list[req_idx]
+            # 刚滑出高精窗口的逻辑 Token 位置
+            evicted_pos = seq_len - 1 - n
+            
+            # 核心变更：如果还没有滑出高精窗，或者该位置属于前 m 个 Sink Token，则跳过不量化
+            if evicted_pos < 0 or evicted_pos < m:
+                continue
+
+            block_idx = evicted_pos // block_size
+            offset_in_block = evicted_pos % block_size
+            
+            phys_block = block_tables[req_idx, block_idx].item()
+            if phys_block >= 0:
+                flat_slot = phys_block * block_size + offset_in_block
+                evicted_slots.append(flat_slot)
+
+        if not evicted_slots:
+            return
+
+        # 转换为 Tensor 进行回写
+        device = self.key_cache.device
+        evicted_indices = torch.tensor(evicted_slots, dtype=torch.long, device=device)
+
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+
+        k_evicted = flat_key[evicted_indices]
+        v_evicted = flat_value[evicted_indices]
+
+        k_quantized = (torch.clamp(
+            torch.round(k_evicted * layer._c4_k_inv_scale_bf16), -6, 6
+        ) / layer._c4_k_inv_scale_bf16).to(k_evicted.dtype)
+
+        v_quantized = (torch.clamp(
+            torch.round(v_evicted * layer._c4_v_inv_scale_bf16), -6, 6
+        ) / layer._c4_v_inv_scale_bf16).to(v_evicted.dtype)
+
+        flat_key[evicted_indices] = k_quantized
+        flat_value[evicted_indices] = v_quantized
+
+        logger.info_once(f"Eager evict with sink (size={m}) executed successfully.")
+
+    def _quantize_window_kv_slots(
+        self,
+        layer: AttentionLayer,
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        """Scheme A (batched): when a decode request's high-precision window
+        fills (KV_QUANT_WINDOW_SIZE tokens), bulk in-place pseudo-quantize
+        the WHOLE window ``[seq_len-W, seq_len-1]`` at once; the next window
+        then starts accumulating. Unlike the 1-in/1-out ``_quantize_evicted_*``
+        paths, this quantizes W contiguous tokens every W steps.
+
+        SKELETON: the batched-quantize mechanics are implemented, but the
+        window-fill *trigger* is a PLACEHOLDER (stateless 64-grid). Per scheme
+        (b) it must become per-request persistent phase — see TODO below.
+        """
+        if self.key_cache is None or self.value_cache is None:
+            return
+
+        num_decodes = attn_metadata.num_decodes
+        if num_decodes <= 0:
+            return
+
+        seq_lens_list = attn_metadata.seq_lens_list
+        if not seq_lens_list:
+            return
+
+        block_tables = attn_metadata.block_tables
+        if block_tables is None:
+            return
+
+        W = KV_QUANT_WINDOW_SIZE          # 64
+        block_size = self.key_cache.shape[1]
+        device = self.key_cache.device
+
+        # Collect flat slot indices of every token in every window that just
+        # filled this step, then pseudo-quantize them in one batched scatter.
+        window_slots = []
+        for req_idx in range(num_decodes):
+            seq_len = seq_lens_list[req_idx]
+
+            # TODO(scheme-b phase): replace this stateless 64-grid trigger with
+            # per-request persistent phase. req_index is unstable across steps
+            # (batch reorder / preemption), so phase must be keyed by request_id.
+            # request_id is NOT currently in AscendCommonAttentionMetadata and
+            # must be threaded in (builder / _build_attn_state), or the
+            # decode-start position P tracked per request. Until then this falls
+            # back to absolute-64-grid (scheme a) semantics: the first window
+            # may be partial if prefill length is not a multiple of 64.
+            if seq_len < W or (seq_len % W) != 0:
+                continue
+
+            # The window that just filled == the most recent W tokens
+            # (seq_len here is the post-write length, same tensor FIA uses as
+            # actual_seq_lengths_kv, so it includes the just-written token).
+            positions = torch.arange(seq_len - W, seq_len, device=device)   # (W,)
+            block_idx = positions // block_size
+            offset_in_block = positions % block_size
+            phys_blocks = block_tables[req_idx][block_idx]                 # (W,)
+            # A filled window lies entirely within the allocated range, so
+            # phys_blocks >= 0 here by construction (no need to guard).
+            window_slots.append(phys_blocks * block_size + offset_in_block)
+
+        if not window_slots:
+            return
+
+        all_slots = torch.cat(window_slots, dim=0)                         # (K*W,)
+        flat_key = self.key_cache.view(-1, self.num_kv_heads, self.head_size)
+        flat_value = self.value_cache.view(-1, self.num_kv_heads, self.head_size)
+
+        k_win = flat_key[all_slots]
+        v_win = flat_value[all_slots]
+
+        # Same FP4 pseudo-quant as _quantize_kv_to_fp4 / _quantize_evicted_kv_slots_eager.
+        k_quantized = (torch.clamp(
+            torch.round(k_win * layer._c4_k_inv_scale_bf16), -6, 6
+        ) / layer._c4_k_inv_scale_bf16).to(k_win.dtype)
+        v_quantized = (torch.clamp(
+            torch.round(v_win * layer._c4_v_inv_scale_bf16), -6, 6
+        ) / layer._c4_v_inv_scale_bf16).to(v_win.dtype)
+
+        flat_key[all_slots] = k_quantized
+        flat_value[all_slots] = v_quantized
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
