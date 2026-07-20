@@ -27,6 +27,9 @@ export VLLM_ASCEND_ATTENTION_SINK_SIZE=128
 export VLLM_ASCEND_ENABLE_QK_ROTATION=1
 export VLLM_ASCEND_ROT_H_PATH="./block_rht_matrix.pt"
 
+# 开启 HIF4 量化
+export VLLM_ASCEND_ENABLE_HIF4=0
+
 
 vllm serve /PATH \
        --host 0.0.0.0 \
