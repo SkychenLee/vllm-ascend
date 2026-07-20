@@ -44,7 +44,7 @@ DECODE_HEAD_DIM = 128
 
 NUM_AI_CORES = 32
 
-USE_HIF4_ONCE = envs_ascend.VLLM_ASCEND_USE_HIF4_ONCE
+USE_HIF4_ONCE = envs_ascend.VLLM_ASCEND_PAGED_ATTN_USE_HIF4_ONCE_P
 
 @triton.jit
 def clip(x, min_val, max_val):

@@ -85,18 +85,21 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 # Hardcoded pseudo-quantization switches. Edit these booleans before startup.
+
 # True selects HiF4, False selects MXFP4.
-ENABLE_HIF4 = True
+ENABLE_HIF4 = envs_ascend.VLLM_ASCEND_ENABLE_HIF4
 # Sink and KV-window switches apply to both formats. Q/K rotation applies to
 # the MXFP4 path.
-ENABLE_ATTENTION_SINK = True
-ENABLE_KV_WINDOW_QUANT = True
-ENABLE_QK_ROTATION = True
-HIF4_ATTENTION_SINK_SIZE = 128
-HIF4_KV_QUANT_BLOCK_SIZE = 128
-MXFP4_ATTENTION_SINK_SIZE = 128
-MXFP4_KV_QUANT_WINDOW_SIZE = 128
-_MXFP4_ROT_H_PATH = "/home/z00909726/block_rht_matrix.pt"
+ENABLE_ATTENTION_SINK = envs_ascend.VLLM_ASCEND_ENABLE_ATTENTION_SINK
+ENABLE_KV_WINDOW_QUANT = envs_ascend.VLLM_ASCEND_ENABLE_KV_WINDOW_QUANT
+ENABLE_QK_ROTATION = envs_ascend.VLLM_ASCEND_ENABLE_QK_ROTATION
+
+HIF4_ATTENTION_SINK_SIZE = envs_ascend.VLLM_ASCEND_ATTENTION_SINK_SIZE
+HIF4_KV_QUANT_BLOCK_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
+MXFP4_ATTENTION_SINK_SIZE = envs_ascend.VLLM_ASCEND_ATTENTION_SINK_SIZE
+MXFP4_KV_QUANT_WINDOW_SIZE = envs_ascend.VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE
+
+_ROT_H_PATH = envs_ascend.VLLM_ASCEND_ROT_H_PATH
 
 
 
@@ -899,7 +902,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
             flashcomm2_oshard_manager.post_process_after_loading()
         if not ENABLE_HIF4 and ENABLE_QK_ROTATION and not hasattr(self, "rot_h"):
-            self.rot_h = torch.load(_MXFP4_ROT_H_PATH).to(device="npu", dtype=act_dtype)
+            self.rot_h = torch.load(_ROT_H_PATH).to(device="npu", dtype=act_dtype)
 
     def full_graph_fia(
         self,
@@ -1654,6 +1657,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sequence_ids = torch.bucketize(token_indices, query_start_loc[1:], right=True)
             relative_positions = token_indices - query_start_loc[sequence_ids]
         sink_size = MXFP4_ATTENTION_SINK_SIZE if ENABLE_ATTENTION_SINK else 0
+        logger.info_once(f"_get_mxfp4_quant_mask sink_size {sink_size}")
         return relative_positions >= sink_size
 
     @staticmethod
@@ -1679,6 +1683,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Pseudo-quantize Prefill Q/K/V with optional sink protection."""
         quant_mask = self._get_mxfp4_quant_mask(attn_metadata, query.device)
+        # logger.info_once(f" prefill QKV quant_mask: {quant_mask}")
         num_actual_tokens = attn_metadata.num_actual_tokens
         return (
             self._apply_mxfp4_quant_mask(
@@ -1713,6 +1718,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return None
 
         if is_capturing:
+            logger.info_once(f"is_capturing: {is_capturing} true")
             seq_lens = self._seq_lens_buffer[:num_decodes]
             cumulative_query_lens = self._seq_qlens_buffer[:num_decodes]
             query_lens = torch.cat(
@@ -1731,6 +1737,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query_start_loc = query_start_loc[: num_decodes + 1].to(device=device, non_blocking=True)
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             prompt_lens = prompt_lens[:num_decodes].to(device=device, non_blocking=True)
+
+        logger.info_once(f"seq_lens: {seq_lens.shape} prompt_lens: {prompt_lens.shape}")
 
         return seq_lens.long(), query_lens.long(), prompt_lens.long()
 
@@ -1808,6 +1816,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         if slot_data is None:
             return None
+        logger.info_once(f"slot_data is not None")
         slots, write_mask = slot_data
         num_decodes = seq_lens.shape[0]
         flat_cache = cache.view(-1, self.num_kv_heads, self.head_size)
@@ -1854,6 +1863,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         if block_data is None:
             return
+        logger.info_once(f"block_data is not None")
         slots, key_blocks, write_mask = block_data
 
         quantized_blocks = quant_dequant_hif4(key_blocks, axe=-1)
@@ -1972,6 +1982,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if block_data is None:
             return
         slots, key_blocks, write_mask = block_data
+        logger.info_once(f"block_data is not None  _quantize_mxfp4_k_window write_mask: {write_mask.shape}")
 
         quantized_blocks = quant_dequant_mxfp4(key_blocks, -1)
         self._write_completed_quant_blocks(
@@ -2001,9 +2012,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             MXFP4_KV_QUANT_WINDOW_SIZE,
         )
         if block_data is None:
+            logger.info_once(f"block_data is None  _quantize_mxfp4_v_window ")
             return
         slots, value_blocks, write_mask = block_data
-
+        logger.info_once(f"block_data is not None  _quantize_mxfp4_v_window write_mask: {write_mask.shape}")
         block_shape = value_blocks.shape
         token_axis_blocks = value_blocks.reshape(-1, MXFP4_BLOCK_SIZE, self.num_kv_heads, self.head_size)
         quantized_blocks = quant_dequant_mxfp4_grouped(token_axis_blocks).reshape(block_shape)
@@ -2024,7 +2036,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         """Apply 32-value MXFP4 groups to completed K/V decode windows."""
         decode_lengths = self._get_decode_window_lengths(attn_metadata, device, is_capturing)
         if decode_lengths is None:
+            logger.info_once(f"is_capturing: {is_capturing}")
             return
+        logger.info_once(f"is_capturing: {is_capturing} _quantize_mxfp4_kv_windows ")
         seq_lens, query_lens, prompt_lens = decode_lengths
         self._quantize_mxfp4_k_window(attn_metadata, seq_lens, query_lens, prompt_lens)
         self._quantize_mxfp4_v_window(attn_metadata, seq_lens, query_lens, prompt_lens)
@@ -2105,6 +2119,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if key is not None and value is not None:
             output_padded = output
             if ENABLE_HIF4:
+                logger.info_once(f"run in hif4")
                 if is_decode:
                     query = quant_dequant_hif4(query, axe=-1)
                 else:
@@ -2118,11 +2133,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     self._quantize_hif4_kv_windows(attn_metadata, query.device, is_capturing)
             else:
                 if ENABLE_QK_ROTATION:
+                    logger.info_once(f"is_decode: {is_decode} , run in rot_h")
                     query = torch.matmul(query, self.rot_h)
                     key = torch.matmul(key, self.rot_h)
                 if is_decode:
+                    logger.info_once(f"is_decode : {is_decode} quant Q")
                     query = quant_dequant_mxfp4(query, -1)
                 else:
+                    logger.info_once(f"is_decode : {is_decode} quant QKV")
                     query, key, value = self._quantize_qkv_mxfp4(query, key, value, attn_metadata)
 
                 query, key, value, output_padded = self.reshape_and_cache(
@@ -2130,6 +2148,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
 
                 if is_decode and ENABLE_KV_WINDOW_QUANT:
+                    logger.info_once(f"is_decode : {is_decode} quant KV ENABLE_KV_WINDOW_QUANT")
                     self._quantize_mxfp4_kv_windows(attn_metadata, query.device, is_capturing)
 
         # pooling model branch

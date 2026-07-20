@@ -123,13 +123,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # variant above. Only takes effect when VLLM_ASCEND_USE_PAGED_ATTENTION
     # is enabled.
     "VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P": lambda: bool(int(os.getenv("VLLM_ASCEND_PAGED_ATTN_USE_HIF4_P", "0"))),
+    "VLLM_ASCEND_PAGED_ATTN_USE_HIF4_ONCE_P": lambda: bool(int(os.getenv("VLLM_ASCEND_PAGED_ATTN_USE_HIF4_ONCE_P", "0"))),
     
-    "VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4": lambda: bool(int(os.getenv("VLLM_ASCEND_PREFILL_KVQUANT_TO_MXFP4", "0"))),
-    "VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4": lambda: bool(int(os.getenv("VLLM_ASCEND_DECODE_KVQUANT_TO_MXFP4", "0"))),
-    "VLLM_ASCEND_USE_HIF4_ONCE": lambda: bool(int(os.getenv("VLLM_ASCEND_USE_HIF4_ONCE", "0"))),
+    "VLLM_ASCEND_ENABLE_ATTENTION_SINK": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_ATTENTION_SINK", "1"))),
+    "VLLM_ASCEND_ENABLE_KV_WINDOW_QUANT": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_KV_WINDOW_QUANT", "1"))),
+    "VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE": lambda: int(os.getenv("VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE", 128)),
+    "VLLM_ASCEND_ATTENTION_SINK_SIZE": lambda: int(os.getenv("VLLM_ASCEND_ATTENTION_SINK_SIZE", 128)),
     
-    "VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE": lambda: os.getenv("VLLM_ASCEND_HIGH_PRECISION_WINDOW_SIZE", 128),
-    "VLLM_ASCEND_ATTENTION_SINK_SIZE": lambda: os.getenv("VLLM_ASCEND_ATTENTION_SINK_SIZE", 128),
+    "VLLM_ASCEND_ENABLE_QK_ROTATION": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_QK_ROTATION", "1"))),
+    "VLLM_ASCEND_ROT_H_PATH": lambda: os.getenv("VLLM_ASCEND_ROT_H_PATH", "../block_rht_matrix.pt"),
+    
+    "VLLM_ASCEND_ENABLE_HIF4": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_HIF4", "0"))),
 }
 
 # end-env-vars-definition
