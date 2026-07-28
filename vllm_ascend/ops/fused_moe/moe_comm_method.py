@@ -150,6 +150,12 @@ class MoECommMethod(ABC):
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
 
+        # Keep dispatch batch-aware even on vLLM revisions whose versioned
+        # MoE runner does not call sync_lora_context before fused_experts.
+        # Without this, an active W8A8 LoRA batch is quantized during routing
+        # and the BF16 input required by the LoRA A projection is lost.
+        self.set_lora_context(fused_experts_input.lora_context)
+
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
