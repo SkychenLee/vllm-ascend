@@ -54,6 +54,8 @@ from vllm_ascend.utils import (
     shared_experts_calculation_stream,
 )
 
+_W4A8_MXFP = getattr(QuantType, "W4A8MXFP", None)
+
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     global_indices = torch.where(expert_map != -1)[0]
@@ -767,7 +769,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     bias=None,
                     output_dtype=original_dtype,
                 )
-            elif has_quantized_shared and not shared_lora_active and self.quant_type == QuantType.W4A8MXFP:
+            elif (
+                has_quantized_shared
+                and not shared_lora_active
+                and _W4A8_MXFP is not None
+                and self.quant_type == _W4A8_MXFP
+            ):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)

@@ -58,6 +58,14 @@ from vllm_ascend.utils import (
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
 
+_W8A8_MXFP = getattr(QuantType, "W8A8MXFP", None)
+_W4A4_MXFP = getattr(QuantType, "W4A4MXFP", None)
+_W8A8_FP = getattr(QuantType, "W8A8FP", None)
+
+
+def _is_optional_quant_type(value: QuantType, expected: QuantType | None) -> bool:
+    return expected is not None and value == expected
+
 
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
     # grouped_matmul_swiglu_quant_v2 consumes per-expert counts; existing
@@ -293,7 +301,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # - A5 MXFP communication uses quant_mode=4 only for W8A8MXFP currently.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
-        elif quant_type == QuantType.W8A8MXFP:
+        elif _is_optional_quant_type(quant_type, _W8A8_MXFP):
             quant_mode = 4
         else:
             quant_mode = 0
@@ -370,10 +378,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         quant_type = token_dispatch_input.quant.quant_type
         dynamic_scale = token_dispatch_input.routing.pertoken_scale
         hidden_states = token_dispatch_input.hidden_states
-        unquantized_mxfp4_dispatch = quant_type == QuantType.W4A4MXFP and dynamic_scale is None
+        unquantized_mxfp4_dispatch = _is_optional_quant_type(quant_type, _W4A4_MXFP) and dynamic_scale is None
         # Without prepare-stage scales, MXFP4 stays unquantized in dispatch and
         # is quantized again inside the MLP path.
-        with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
+        with_quant = token_dispatch_input.quant.dispatch_with_quant and not _is_optional_quant_type(
+            quant_type, _W8A8_FP
+        )
         with_quant = with_quant and not unquantized_mxfp4_dispatch
         lora_active = is_moe_lora_active(self.lora_context)
         if lora_active and quant_type == QuantType.W8A8:
@@ -401,7 +411,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
-            if quant_type == QuantType.W4A4MXFP:
+            if _is_optional_quant_type(quant_type, _W4A4_MXFP):
                 quant_mode = 9
             else:
                 quant_mode = 3 if is_mxfp else 1
