@@ -20,6 +20,44 @@ from vllm_ascend.lora.punica_npu import (
 )
 
 
+def test_ascend_fused_moe_lora_defines_version_independent_moe_properties() -> None:
+    parallel_config = SimpleNamespace(
+        tp_size=8,
+        tp_rank=3,
+        ep_rank=0,
+        use_ep=False,
+    )
+    moe_config = SimpleNamespace(
+        hidden_dim=4096,
+        num_local_experts=256,
+        num_experts=256,
+        intermediate_size_per_partition=256,
+        moe_parallel_config=parallel_config,
+        is_act_and_mul=True,
+    )
+    base_layer = SimpleNamespace(
+        moe_config=moe_config,
+        dynamic_eplb=False,
+        _shared_experts=None,
+    )
+
+    with patch(
+        "vllm_ascend.lora.fused_moe._get_lora_device",
+        return_value=torch.device("cpu"),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(base_layer)
+
+    assert wrapper.hidden_size == 4096
+    assert wrapper.local_num_experts == 256
+    assert wrapper.global_num_experts == 256
+    assert wrapper.intermediate_size_per_partition == 256
+    assert wrapper.tp_size == 8
+    assert wrapper.tp_rank == 3
+    assert wrapper.ep_rank == 0
+    assert wrapper.use_ep is False
+    assert wrapper.n_slices == 256 * 3
+
+
 @pytest.mark.parametrize("shared_experts", [None, object()])
 def test_shared_experts_select_compatible_expand_slice(shared_experts) -> None:
     base_layer = SimpleNamespace(

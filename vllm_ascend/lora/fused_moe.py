@@ -356,6 +356,42 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     monkey-patch of ``comm._apply_mlp``.
     """
 
+    # Keep these accessors local instead of relying on the exact vLLM
+    # FusedMoEWithLoRA API. Some supported vLLM revisions expose the values
+    # only through moe_config, while newer revisions add matching properties
+    # on their LoRA wrapper.
+    @property
+    def hidden_size(self) -> int:
+        return self.moe_config.hidden_dim
+
+    @property
+    def local_num_experts(self) -> int:
+        return self.moe_config.num_local_experts
+
+    @property
+    def global_num_experts(self) -> int:
+        return self.moe_config.num_experts
+
+    @property
+    def ep_rank(self) -> int:
+        return self.moe_config.moe_parallel_config.ep_rank
+
+    @property
+    def use_ep(self) -> bool:
+        return self.moe_config.moe_parallel_config.use_ep
+
+    @property
+    def intermediate_size_per_partition(self) -> int:
+        return self.moe_config.intermediate_size_per_partition
+
+    @property
+    def _w13_a_num_experts(self) -> int:
+        return 1 if self.enable_moe_shared_loras else self.local_num_experts
+
+    @property
+    def _w2_b_num_experts(self) -> int:
+        return 1 if self.enable_moe_shared_loras else self.local_num_experts
+
     def __init__(self, base_layer: nn.Module) -> None:
         # Skip FusedMoEWithLoRA.__init__: it immediately asserts Triton
         # internals and calls _inject_lora_into_fused_moe which is GPU-only.
@@ -372,6 +408,9 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
         self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self._lora_stream = None
+        self._events = None
+        self.enable_moe_shared_loras = False
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
