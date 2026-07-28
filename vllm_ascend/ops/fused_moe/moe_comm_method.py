@@ -87,6 +87,14 @@ class FusedExpertsResult:
     swiglu_limit: float = 0.0
 
 
+def _set_lora_context_compat(target, lora_context) -> None:
+    setter = getattr(target, "set_lora_context", None)
+    if callable(setter):
+        setter(lora_context)
+    else:
+        target.lora_context = lora_context
+
+
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
@@ -154,7 +162,15 @@ class MoECommMethod(ABC):
         # MoE runner does not call sync_lora_context before fused_experts.
         # Without this, an active W8A8 LoRA batch is quantized during routing
         # and the BF16 input required by the LoRA A projection is lost.
-        self.set_lora_context(fused_experts_input.lora_context)
+        self.lora_context = fused_experts_input.lora_context
+        _set_lora_context_compat(
+            self.prepare_finalize,
+            fused_experts_input.lora_context,
+        )
+        _set_lora_context_compat(
+            self.token_dispatcher,
+            fused_experts_input.lora_context,
+        )
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,

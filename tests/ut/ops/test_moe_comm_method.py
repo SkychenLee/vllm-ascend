@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -8,6 +9,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
     MC2CommImpl,
+    _set_lora_context_compat,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -53,6 +55,14 @@ class TestMoECommMethod(TestBase):
     def tearDown(self):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
+
+    def test_set_lora_context_compat_supports_legacy_target(self):
+        target = SimpleNamespace()
+        context = object()
+
+        _set_lora_context_compat(target, context)
+
+        self.assertIs(target.lora_context, context)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
