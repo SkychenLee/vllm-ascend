@@ -31,11 +31,10 @@ Design (see plan in conversation history):
     every forward would stack all layers' LoRA deltas. We bracket the swap
     inside `apply_wrapper` so only the active layer is in effect.
 
-  - v1 deliberately limits scope to: unquant + AllGather + TP-only +
-    no shared experts + no FusedMC2 + no dynamic EPLB. These are the exact
-    conditions under which `Qwen3-30B-A3B-Thinking-2507` runs cleanly with
-    TP=4 EP=1 on 4×64GB. Other paths assert early so users get a clear
-    error rather than silently wrong outputs.
+  - Quantized v1 deliberately limits scope to W8A8_DYNAMIC + AllGather +
+    TP-only + no FusedMC2 + no dynamic EPLB. Shared experts stay on their
+    dense LoRA wrappers while routed experts use this MoE path. Other
+    combinations fail early rather than silently producing wrong outputs.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 from vllm import envs
+from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
@@ -56,6 +56,33 @@ _MOE_LORA_INDEX_FIELDS = (
     "permuted_lora_indices",
     "exchanged_lora_indices",
 )
+
+
+def _moe_lora_projection_enabled(
+    lora_b: list[torch.Tensor],
+    w13_num_slices: int,
+) -> tuple[bool, bool]:
+    """Return whether routed w13 and w2 contain a non-zero LoRA B."""
+    if len(lora_b) == 2:
+        w13_lora_b, w2_lora_b = lora_b
+        return (
+            bool(torch.count_nonzero(w13_lora_b).item()),
+            bool(torch.count_nonzero(w2_lora_b).item()),
+        )
+
+    if len(lora_b) != 3:
+        raise ValueError(f"Expected 2 or 3 routed-expert LoRA B tensors, got {len(lora_b)}")
+
+    w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+    w13_enabled = bool(torch.count_nonzero(w1_lora_b).item())
+    if w13_num_slices == 2:
+        w13_enabled = w13_enabled or bool(torch.count_nonzero(w3_lora_b).item())
+    return w13_enabled, bool(torch.count_nonzero(w2_lora_b).item())
+
+
+def is_moe_lora_active(lora_context) -> bool:
+    """Return whether the current batch contains at least one LoRA token."""
+    return lora_context is not None and not lora_context.punica_wrapper.no_lora
 
 
 def reset_lora_indices(lora_context) -> None:
@@ -185,11 +212,10 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:
-        raise AssertionError(
-            "Ascend MoE LoRA does not wrap the shared_experts path "
-            "(it runs outside quant_method.apply). The target model "
-            "Qwen3-30B-A3B-Thinking-2507 has no shared experts; models "
-            "like DeepSeek-V3 are not yet supported."
+        logger.warning_once(
+            "Ascend MoE LoRA: shared_experts detected. Routed-expert LoRA "
+            "uses the MoE path; shared-expert LoRA uses dense wrappers with "
+            "the compatible NPU expand-slice implementation."
         )
 
 
@@ -278,7 +304,11 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         lora_a_stacked=lora_context.w13_lora_a_stacked,
         lora_b_stacked=lora_context.w13_lora_b_stacked,
         expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
+        adapter_enabled=getattr(
+            lora_context,
+            "w13_adapter_enabled",
+            lora_context.adapter_enabled,
+        ),
         token_lora_mapping=lora_per_row,
     )
 
@@ -300,7 +330,11 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         lora_a_stacked=lora_context.w2_lora_a_stacked,
         lora_b_stacked=lora_context.w2_lora_b_stacked,
         expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
+        adapter_enabled=getattr(
+            lora_context,
+            "w2_adapter_enabled",
+            lora_context.adapter_enabled,
+        ),
         token_lora_mapping=lora_per_row,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
@@ -343,6 +377,46 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
         self.n_slices = self.local_num_experts * (self._w13_slices + 1)
+        shared_experts = getattr(base_layer, "_shared_experts", None)
+        if shared_experts is not None:
+            self._shared_experts = shared_experts
+
+    def create_lora_weights(
+        self,
+        max_loras,
+        lora_config,
+        model_config=None,
+    ) -> None:
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        self.w13_adapter_enabled = torch.zeros_like(self.adapter_enabled)
+        self.w2_adapter_enabled = torch.zeros_like(self.adapter_enabled)
+
+    def reset_lora(self, index: int) -> None:
+        super().reset_lora(index)
+        self.w13_adapter_enabled[index] = 0
+        self.w2_adapter_enabled[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ) -> None:
+        assert isinstance(lora_b, list)
+        w13_enabled, w2_enabled = _moe_lora_projection_enabled(
+            lora_b,
+            self._w13_slices,
+        )
+        super().set_lora(index, lora_a, lora_b)
+        self.w13_adapter_enabled[index] = int(w13_enabled)
+        self.w2_adapter_enabled[index] = int(w2_enabled)
+
+    def _build_lora_context(self):
+        lora_context = super()._build_lora_context()
+        lora_context.w13_adapter_enabled = self.w13_adapter_enabled
+        lora_context.w2_adapter_enabled = self.w2_adapter_enabled
+        lora_context.use_ep = self.use_ep
+        return lora_context
 
     # ------------------------------------------------------------------
     # Mapping
@@ -359,6 +433,8 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # publish it through the Ascend MoE runner. The runner stores it on
         # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
+        if getattr(self.base_layer, "_shared_experts", None) is not None:
+            punica_wrapper.enable_compatible_lora_bmm_expand_slice()
         self.base_layer.set_lora_context(self._build_lora_context())
 
 

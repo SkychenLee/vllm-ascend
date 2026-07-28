@@ -16,6 +16,7 @@ from vllm_ascend.ops.fused_moe.moe_mlp import (
     quant_apply_mlp,
     unified_apply_mlp,
     unquant_apply_mlp,
+    w8a8_dynamic_lora_apply_mlp,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -195,6 +196,98 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 self.assertFalse(quant_kwargs["use_bf16"])
                 mock_unquant.assert_not_called()
 
+    def test_active_w8a8_lora_uses_dedicated_path(self):
+        expected = torch.randn(2, 8)
+        lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=False),
+        )
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.randn(2, 8),
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.randn(1, 16, 8)],
+                w2=[torch.randn(1, 8, 8)],
+                w1_scale=[torch.randn(1, 16)],
+                w2_scale=[torch.randn(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            expanded_row_idx=torch.tensor([0, 1], dtype=torch.int32),
+            topk_ids=torch.tensor([[0], [0]], dtype=torch.int32),
+            lora_context=lora_context,
+        )
+
+        with (
+            patch(
+                f"{MOE_MLP}.w8a8_dynamic_lora_apply_mlp",
+                return_value=expected,
+            ) as mock_lora,
+            patch(f"{MOE_MLP}.quant_apply_mlp") as mock_quant,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_lora.assert_called_once()
+        mock_quant.assert_not_called()
+
+    def test_base_only_w8a8_keeps_existing_path(self):
+        expected = torch.randn(2, 8)
+        lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=True),
+        )
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.randn(2, 8),
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=torch.randn(2),
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.randn(1, 16, 8)],
+                w2=[torch.randn(1, 8, 8)],
+                w1_scale=[torch.randn(1, 16)],
+                w2_scale=[torch.randn(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W8A8),
+            fusion=True,
+            lora_context=lora_context,
+        )
+
+        with (
+            patch(f"{MOE_MLP}.quant_apply_mlp", return_value=expected) as mock_quant,
+            patch(f"{MOE_MLP}.w8a8_dynamic_lora_apply_mlp") as mock_lora,
+        ):
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+        self.assertIs(output, expected)
+        mock_quant.assert_called_once()
+        mock_lora.assert_not_called()
+
+    def test_active_non_w8a8_lora_is_rejected(self):
+        mlp_compute_input = MoEMlpComputeInput(
+            hidden_states=torch.randn(2, 8),
+            group_list=torch.tensor([2], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MoEWeights(
+                w1=[torch.randn(1, 16, 8)],
+                w2=[torch.randn(1, 8, 8)],
+                w1_scale=[torch.randn(1, 16)],
+                w2_scale=[torch.randn(1, 8)],
+            ),
+            quant=MoEQuantParams(quant_type=QuantType.W4A8),
+            fusion=True,
+            lora_context=SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False),
+            ),
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "only W8A8_DYNAMIC"):
+            unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
     def test_request_quant_path_passes_w4a8_per_channel_flag(self):
         hidden_states = torch.randn(2, 8)
         expected = torch.randn(2, 8)
@@ -297,6 +390,163 @@ def _patch_npu_stream():
     stream = MagicMock(name="npu_stream")
     stream.record_event.return_value = evt
     return patch("torch.npu.current_stream", return_value=stream), evt
+
+
+class TestW8A8DynamicLoraApplyMlp(unittest.TestCase):
+    @staticmethod
+    def _minimal_kwargs(**overrides):
+        kwargs = {
+            "hidden_states": torch.randn(1, 4, dtype=torch.bfloat16),
+            "w1": [torch.ones(1, 4, 8, dtype=torch.int8)],
+            "w1_scale": [torch.ones(1, 8)],
+            "w2": [torch.ones(1, 4, 4, dtype=torch.int8)],
+            "w2_scale": [torch.ones(1, 4)],
+            "group_list": torch.tensor([1]),
+            "group_list_type": 1,
+            "activation": "silu",
+            "swiglu_limit": 0.0,
+            "lora_context": SimpleNamespace(use_ep=False),
+            "expanded_row_idx": torch.tensor([0]),
+            "topk_ids": torch.tensor([[0]]),
+            "dynamic_scale": None,
+            "dynamic_eplb": False,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_injects_lora_at_bf16_boundaries(self):
+        hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+        quantized_input = torch.ones(2, 4, dtype=torch.int8)
+        input_scale = torch.ones(2, dtype=torch.float32)
+        gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+        activated = torch.randn(2, 3, dtype=torch.bfloat16)
+        quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+        activated_scale = torch.ones(2, dtype=torch.float32)
+        down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+        lora_context = SimpleNamespace(use_ep=False)
+        routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+        stream_patch, event = _patch_npu_stream()
+
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            stream_patch,
+            patch.object(
+                DeviceOperator,
+                "npu_dynamic_quant",
+                side_effect=[
+                    (quantized_input, input_scale),
+                    (quantized_activated, activated_scale),
+                ],
+            ) as mock_quant,
+            patch(
+                "torch_npu.npu_grouped_matmul",
+                return_value=[gate_up_out],
+                create=True,
+            ) as mock_gmm1,
+            patch(
+                "torch_npu.npu_swiglu",
+                return_value=activated,
+                create=True,
+            ),
+            patch.object(
+                DeviceOperator,
+                "npu_grouped_matmul_gmm2",
+                return_value=down_out,
+            ) as mock_gmm2,
+            patch(
+                "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather",
+                return_value=routing,
+            ),
+            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w13") as mock_w13,
+            patch("vllm_ascend.lora.fused_moe.moe_lora_apply_w2") as mock_w2,
+        ):
+            mock_ctx.moe_comm_type = MoECommType.ALLGATHER
+            output, output_event = w8a8_dynamic_lora_apply_mlp(
+                hidden_states=hidden_states,
+                w1=[torch.ones(1, 4, 6, dtype=torch.int8)],
+                w1_scale=[torch.ones(1, 6)],
+                w2=[torch.ones(1, 3, 4, dtype=torch.int8)],
+                w2_scale=[torch.ones(1, 4, dtype=torch.bfloat16)],
+                group_list=torch.tensor([1, 1]),
+                group_list_type=1,
+                activation="silu",
+                swiglu_limit=0.0,
+                lora_context=lora_context,
+                expanded_row_idx=torch.tensor([0, 1], dtype=torch.int32),
+                topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+                dynamic_scale=None,
+                dynamic_eplb=False,
+            )
+
+        self.assertIs(output, down_out)
+        self.assertIs(output_event, event)
+        self.assertEqual(mock_quant.call_count, 2)
+        self.assertIs(
+            mock_quant.call_args_list[0].kwargs["hidden_states"],
+            hidden_states,
+        )
+        self.assertIs(
+            mock_quant.call_args_list[1].kwargs["hidden_states"],
+            activated,
+        )
+        self.assertIs(mock_gmm1.call_args.kwargs["x"][0], quantized_input)
+        self.assertIs(
+            mock_gmm2.call_args.kwargs["hidden_states"],
+            quantized_activated,
+        )
+        mock_w13.assert_called_once_with(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            lora_routing=routing,
+        )
+        mock_w2.assert_called_once_with(
+            lora_context,
+            down_out=down_out,
+            silu_out=activated,
+            lora_routing=routing,
+        )
+
+    def test_rejects_ep(self):
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            self.assertRaisesRegex(NotImplementedError, "TP-only"),
+        ):
+            mock_ctx.moe_comm_type = MoECommType.ALLGATHER
+            w8a8_dynamic_lora_apply_mlp(
+                **self._minimal_kwargs(lora_context=SimpleNamespace(use_ep=True)),
+            )
+
+    def test_rejects_fused_mc2(self):
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            self.assertRaisesRegex(NotImplementedError, "FusedMC2"),
+        ):
+            mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+            w8a8_dynamic_lora_apply_mlp(**self._minimal_kwargs())
+
+    def test_rejects_dynamic_eplb(self):
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            self.assertRaisesRegex(NotImplementedError, "dynamic EPLB"),
+        ):
+            mock_ctx.moe_comm_type = MoECommType.ALLGATHER
+            w8a8_dynamic_lora_apply_mlp(
+                **self._minimal_kwargs(dynamic_eplb=True),
+            )
+
+    def test_rejects_dispatch_quantized_input(self):
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
+            self.assertRaisesRegex(AssertionError, "Dispatch-side quantization"),
+        ):
+            mock_ctx.moe_comm_type = MoECommType.ALLGATHER
+            w8a8_dynamic_lora_apply_mlp(
+                **self._minimal_kwargs(
+                    hidden_states=torch.ones(1, 4, dtype=torch.int8),
+                    dynamic_scale=torch.ones(1),
+                ),
+            )
 
 
 @contextmanager

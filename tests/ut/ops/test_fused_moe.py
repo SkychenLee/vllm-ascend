@@ -11,6 +11,7 @@ from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendMoERunner,
     AscendUnquantizedFusedMoEMethod,
+    FusedMoEEvents,
     make_eplb_placement_config,
     use_multistage_eplb_load,
 )
@@ -206,6 +207,49 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
+
+
+def test_quantized_shared_experts_use_dense_wrappers_for_lora(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    gate_up_proj = _Projection()
+    down_proj = _Projection()
+    gate_up_proj.weight_scale = object()
+    down_proj.weight_scale = object()
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        act_fn=nn.Identity(),
+        down_proj=down_proj,
+        expert_gate=None,
+    )
+    runner.routed_experts = SimpleNamespace(
+        _ascend_moe_lora_context=SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=False),
+        )
+    )
+    runner.quant_type = QuantType.W8A8
+    runner.multistream_overlap_shared_expert = False
+    hidden_states = torch.randn(2, 4)
+    current_stream = MagicMock()
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(
+        fused_moe_module.torch_npu,
+        "npu_quant_matmul",
+        MagicMock(side_effect=AssertionError("must use dense LoRA wrappers")),
+    )
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+
+    output = runner._forward_shared_experts(
+        hidden_states,
+        FusedMoEEvents(before_routed_experts=MagicMock()),
+    )
+
+    torch.testing.assert_close(output, (hidden_states * 2.0 + 1.0) * 2.0 + 1.0)
 
 
 @pytest.mark.parametrize("has_shared_experts", [False, True])
