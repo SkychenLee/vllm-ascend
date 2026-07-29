@@ -85,6 +85,22 @@ def is_moe_lora_active(lora_context) -> bool:
     return lora_context is not None and not lora_context.punica_wrapper.no_lora
 
 
+def get_moe_lora_context(layer):
+    """Resolve the Ascend MoE LoRA context across vLLM runner layouts."""
+    context = getattr(layer, "_ascend_moe_lora_context", None)
+    if context is not None:
+        return context
+
+    routed_experts = getattr(layer, "routed_experts", None)
+    if routed_experts is not None:
+        context = getattr(routed_experts, "_ascend_moe_lora_context", None)
+        if context is not None:
+            return context
+
+    quant_method = getattr(layer, "quant_method", None)
+    return getattr(quant_method, "lora_context", None)
+
+
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         if hasattr(lora_context, field):

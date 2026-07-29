@@ -10,6 +10,7 @@ from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
     _moe_lora_projection_enabled,
     _recover_moe_lora_routing_allgather,
+    get_moe_lora_context,
     is_moe_lora_active,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
@@ -225,6 +226,36 @@ def test_moe_lora_active_follows_batch_metadata() -> None:
     assert not is_moe_lora_active(None)
     assert not is_moe_lora_active(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)))
     assert is_moe_lora_active(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
+
+
+@pytest.mark.parametrize(
+    ("layer", "expected"),
+    [
+        (
+            SimpleNamespace(_ascend_moe_lora_context="legacy"),
+            "legacy",
+        ),
+        (
+            SimpleNamespace(
+                routed_experts=SimpleNamespace(
+                    _ascend_moe_lora_context="current",
+                )
+            ),
+            "current",
+        ),
+        (
+            SimpleNamespace(
+                quant_method=SimpleNamespace(lora_context="quant-method"),
+            ),
+            "quant-method",
+        ),
+    ],
+)
+def test_get_moe_lora_context_supports_runner_layouts(
+    layer,
+    expected,
+) -> None:
+    assert get_moe_lora_context(layer) == expected
 
 
 @pytest.mark.parametrize(

@@ -40,7 +40,11 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.lora.fused_moe import is_moe_lora_active, sync_lora_context
+from vllm_ascend.lora.fused_moe import (
+    get_moe_lora_context,
+    is_moe_lora_active,
+    sync_lora_context,
+)
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -725,7 +729,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
                 self._shared_experts.down_proj, "weight_scale"
             )
-            shared_lora_active = is_moe_lora_active(getattr(self.routed_experts, "_ascend_moe_lora_context", None))
+            shared_lora_active = is_moe_lora_active(get_moe_lora_context(self))
             if has_quantized_shared and not shared_lora_active and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
