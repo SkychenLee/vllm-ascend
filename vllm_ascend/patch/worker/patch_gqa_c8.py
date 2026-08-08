@@ -23,10 +23,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_moe import Glm4MoeForCausalLM
 from vllm.model_executor.models.minimax_m2 import MiniMaxM2ForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 logger = logging.getLogger(__name__)
 
 _orig_qwen3_causal_lm_load_weights = Qwen3ForCausalLM.load_weights
+_orig_qwen3_moe_causal_lm_load_weights = Qwen3MoeForCausalLM.load_weights
 _orig_Glm4_causal_lm_load_weights = Glm4MoeForCausalLM.load_weights
 _orig_Minimax_m2_causal_lm_load_weights = MiniMaxM2ForCausalLM.load_weights
 
@@ -69,6 +71,9 @@ def _patched_causal_lm_load_weights(
 
 Qwen3ForCausalLM.load_weights = lambda self, weights: _patched_causal_lm_load_weights(
     self, weights, _orig_qwen3_causal_lm_load_weights
+)
+Qwen3MoeForCausalLM.load_weights = lambda self, weights: _patched_causal_lm_load_weights(
+    self, weights, _orig_qwen3_moe_causal_lm_load_weights
 )
 Glm4MoeForCausalLM.load_weights = lambda self, weights: _patched_causal_lm_load_weights(
     self, weights, _orig_Glm4_causal_lm_load_weights

@@ -47,7 +47,7 @@ from .methods import get_scheme_class
 
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
-SUPPORT_CACHE_QUANT_TYPE = ["C8", "C8_FP", "C4_FP"]
+SUPPORT_CACHE_QUANT_TYPE = ["C8", "C8_FP", "C4_FP", "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"]
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
@@ -582,6 +582,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             from .methods.kv_c4 import AscendC4KVCacheAttentionMethod
 
             return AscendKVCacheMethod(AscendC4KVCacheAttentionMethod(self.quant_description, prefix))
+        elif isinstance(layer, AttentionLayerBase) and self.enable_mxfp_c8_quant:
+            from .methods.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
+            return AscendKVCacheMethod(AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix))
         
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
@@ -665,6 +668,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         return False
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        if self.enable_mxfp_c8_quant:
+            return torch.float8_e4m3fn, torch.float8_e4m3fn
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
             quant_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
@@ -849,6 +854,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        self.enable_mxfp_c8_quant = kv_quant_type == "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"
+        if self.enable_mxfp_c8_quant:
+            logger.info_once("[quantization] Enable C8 MXFP8 quantization!")
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
         if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
