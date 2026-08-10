@@ -4930,6 +4930,14 @@ class NPUModelRunner(GPUModelRunner):
                     layer.impl.key_cache = None
                 if hasattr(layer.impl, "value_cache"):
                     layer.impl.value_cache = None
+                # C8 MXFP initializes the static V-scale cache once per KV
+                # cache allocation. Graph-memory profiling uses temporary KV
+                # caches and sets this flag, so reset it together with those
+                # cache references. Otherwise the real cache allocated after
+                # profiling keeps an uninitialized V-scale cache and the very
+                # first FULL graph decode produces invalid attention output.
+                if hasattr(layer.impl, "save_v_scale_flag"):
+                    layer.impl.save_v_scale_flag = False
 
         gc.collect()
         torch.accelerator.empty_cache()

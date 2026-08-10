@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +8,49 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestNPUModelRunnerGraphProfileCleanup(unittest.TestCase):
+    def test_profile_resets_c8_mxfp_v_scale_initialization(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        c8_mxfp_impl = SimpleNamespace(
+            key_cache=object(),
+            value_cache=object(),
+            save_v_scale_flag=True,
+        )
+        runner.compilation_config = SimpleNamespace(
+            static_forward_context={
+                "layers.0.attn": SimpleNamespace(impl=c8_mxfp_impl),
+            }
+        )
+
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1._get_gpu_model_runner_module_name",
+                return_value="vllm.v1.worker.gpu_model_runner",
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1._torch_cuda_wrapper",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1._replace_gpu_model_runner_function_wrapper",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.GPUModelRunner.profile_cudagraph_memory",
+                return_value=123,
+            ),
+            patch("vllm_ascend.worker.model_runner_v1.reset_graph_params"),
+            patch("vllm_ascend.worker.model_runner_v1.gc.collect"),
+            patch("torch.accelerator.empty_cache"),
+        ):
+            result = runner.profile_cudagraph_memory()
+
+        self.assertEqual(result, 123)
+        self.assertIsNone(c8_mxfp_impl.key_cache)
+        self.assertIsNone(c8_mxfp_impl.value_cache)
+        self.assertFalse(c8_mxfp_impl.save_v_scale_flag)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
