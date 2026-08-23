@@ -102,6 +102,7 @@ def render_markdown(results: list[dict]) -> str:
             f"2. expert-sorted 快速路径覆盖 {len(grouped)} 例，mixed/alternating fallback 覆盖 {len(fallback)} 例。",
             "3. 非 32B 对齐 H/O、slice offset、负/零 scale、全 -1 index 和最大合法 index 均纳入验证。",
             "4. 每个用例同时检查返回 alias 和 slice 外逐元素不变，避免只验证数值而漏掉 in-place 语义。",
+            "5. DeepSeek-V4-Flash 的 TP8 4096->256、256->4096 和完整 4096->2048、2048->4096 形状均已覆盖。",
             "",
         ]
     )

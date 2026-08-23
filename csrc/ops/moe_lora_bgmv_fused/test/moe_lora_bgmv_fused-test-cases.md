@@ -82,6 +82,10 @@ GENERAL_SHAPES = [
     ("Large", "1024-row W2", (1024, 512, 2048, 2048, 0, "int32", "expert_sorted", 1.0)),
     ("Large", "4096-row W13", (4096, 2048, 1024, 1024, 0, "int32", "expert_sorted", 1.0)),
     ("Large", "8192-row W2", (8192, 512, 2048, 2048, 0, "int32", "expert_sorted", 1.0)),
+    ("DeepSeekV4", "TP8 W13 slice", (512, 4096, 256, 512, 256, "int32", "expert_sorted", 1.0)),
+    ("DeepSeekV4", "TP8 W2", (512, 256, 4096, 4096, 0, "int64", "expert_sorted", 1.0)),
+    ("DeepSeekV4", "TP1 W13 slice", (512, 4096, 2048, 4096, 2048, "int64", "expert_sorted", 1.0)),
+    ("DeepSeekV4", "TP1 W2", (512, 2048, 4096, 4096, 0, "int32", "expert_sorted", 1.0)),
 ]
 
 BOUNDARY_VALUES = [
@@ -99,9 +103,9 @@ BOUNDARY_VALUES = [
 | 类别 | Shape 数量 | 边界值数量 | dtype 数量 | 总用例数 |
 |---|---:|---:|---:|---:|
 | 常规形状 | 8 | 0 | 2 | 16 |
-| 泛化形状 | 8 | 0 | 2 | 16 |
+| 泛化形状 | 12 | 0 | 2 | 24 |
 | 边界值 | 0 | 6 | 2 | 12 |
-| **合计** | **16** | **6** | **2** | **44** |
+| **合计** | **20** | **6** | **2** | **52** |
 
 ---
 
@@ -131,7 +135,11 @@ def build_indices(rows: int, pattern: str, dtype: torch.dtype) -> torch.Tensor:
 
 1. 每个 shape 同时覆盖 FP16 和 BF16；index dtype 按 shape 配置，并在边界回归中
    交换 int32/int64，确保四种 dtype 组合均被执行。
-2. 精度用例使用较小 `num_weights`，性能用例使用 Qwen3.5-35B-A3B 的 256 experts。
+2. 精度用例使用较小 `num_weights`，性能用例使用 Qwen3.5-35B-A3B 的 256 experts；
+   DeepSeek-V4-Flash 目标 shape 由真实 Qwen 权重按维裁剪或周期重复派生，并明确
+   不把它当作 DeepSeek LoRA adapter 精度数据。
 3. `expert_sorted` 用于命中 8-row 快速路径；`group4_same` 覆盖 4-row fallback；
    `alternating` 和 `mixed_within4` 用于验证 1-row 回退路径。
-4. 大 shape 只用于真实模型和性能评测；常规精度回归不重复构造超大 CPU gather。
+4. `H <= 2048` 覆盖 group8 模板，`2048 < H <= 4096` 覆盖 group4 宽输入模板；
+   `O > 2048 && M < 1024`、超过 4096、rank 非 16、`fully_sharded` 和
+   routed-weight 模式由 Python 通用兜底。

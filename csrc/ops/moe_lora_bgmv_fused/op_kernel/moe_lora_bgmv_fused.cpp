@@ -17,13 +17,17 @@
 #include "kernel_operator.h"
 #include "../../../kernels/types.h"
 
-template <typename scalar_t, typename index_t, bool reuse_fp32_weight>
+template <
+    typename scalar_t,
+    typename index_t,
+    bool reuse_fp32_weight,
+    uint32_t group_rows>
 class MoeLoraBgmvFused {
 public:
     using DataT = scalar_t;
 
     static constexpr uint32_t kRank = 16;
-    static constexpr uint32_t kGroupRows = 8;
+    static constexpr uint32_t kGroupRows = group_rows;
     static constexpr uint32_t kFallbackGroupRows = 4;
     static constexpr uint32_t kOutputTileElements = 512;
     static constexpr uint32_t kWeightTileElements =
@@ -35,6 +39,8 @@ public:
         32 / sizeof(float);
     static constexpr uint32_t kBlocksPerRepeat = 8;
     static constexpr uint32_t kReduceTmpBytes = 256;
+
+    static_assert(kGroupRows == 4 || kGroupRows == 8);
 
     __aicore__ inline explicit MoeLoraBgmvFused(AscendC::TPipe* pipe)
         : pipe_(pipe)
@@ -141,26 +147,28 @@ public:
                     static_cast<int64_t>(indicesLocal.GetValue(2));
                 const int64_t index3 =
                     static_cast<int64_t>(indicesLocal.GetValue(3));
-                if (currentRows == kGroupRows) {
-                    const int64_t index4 =
-                        static_cast<int64_t>(indicesLocal.GetValue(4));
-                    const int64_t index5 =
-                        static_cast<int64_t>(indicesLocal.GetValue(5));
-                    const int64_t index6 =
-                        static_cast<int64_t>(indicesLocal.GetValue(6));
-                    const int64_t index7 =
-                        static_cast<int64_t>(indicesLocal.GetValue(7));
-                    if (index0 == index1 && index0 == index2 &&
-                        index0 == index3 && index0 == index4 &&
-                        index0 == index5 && index0 == index6 &&
-                        index0 == index7) {
-                        indicesQueue_.FreeTensor(indicesLocal);
-                        if (index0 >= 0) {
-                            ProcessGroup<kGroupRows>(
-                                row, static_cast<uint64_t>(index0));
+                if constexpr (kGroupRows == 8) {
+                    if (currentRows == kGroupRows) {
+                        const int64_t index4 =
+                            static_cast<int64_t>(indicesLocal.GetValue(4));
+                        const int64_t index5 =
+                            static_cast<int64_t>(indicesLocal.GetValue(5));
+                        const int64_t index6 =
+                            static_cast<int64_t>(indicesLocal.GetValue(6));
+                        const int64_t index7 =
+                            static_cast<int64_t>(indicesLocal.GetValue(7));
+                        if (index0 == index1 && index0 == index2 &&
+                            index0 == index3 && index0 == index4 &&
+                            index0 == index5 && index0 == index6 &&
+                            index0 == index7) {
+                            indicesQueue_.FreeTensor(indicesLocal);
+                            if (index0 >= 0) {
+                                ProcessGroup<kGroupRows>(
+                                    row, static_cast<uint64_t>(index0));
+                            }
+                            row += kGroupRows;
+                            continue;
                         }
-                        row += kGroupRows;
-                        continue;
                     }
                 }
                 if (index0 == index1 && index0 == index2 &&
@@ -630,31 +638,41 @@ private:
 };
 
 #define MOE_LORA_BGMV_FUSED_DECLARE(                                         \
-    TYPE, INDEX_TYPE, INDEX_SUFFIX, REUSE, REUSE_SUFFIX)                     \
+    TYPE, INDEX_TYPE, INDEX_SUFFIX, REUSE, REUSE_SUFFIX, GROUP_ROWS,         \
+    GROUP_SUFFIX)                                                            \
     extern "C" __global__ __aicore__ void                                   \
-        moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX##_##REUSE_SUFFIX(        \
+        moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX##_##REUSE_SUFFIX##_##    \
+            GROUP_SUFFIX(                                                    \
             GM_ADDR x, GM_ADDR loraA, GM_ADDR loraB, GM_ADDR indices,        \
             GM_ADDR y, uint32_t numRows, uint32_t inputHiddenDim,            \
             uint32_t outputHiddenDim, uint32_t outputFullDim,                \
             uint32_t sliceOffset, uint32_t rowsPerCore, float scale)         \
     {                                                                         \
         AscendC::TPipe pipe;                                                  \
-        MoeLoraBgmvFused<TYPE, INDEX_TYPE, REUSE> op(&pipe);                 \
+        MoeLoraBgmvFused<TYPE, INDEX_TYPE, REUSE, GROUP_ROWS> op(&pipe);     \
         op.Init(x, loraA, loraB, indices, y, numRows, inputHiddenDim,        \
                 outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,    \
                 scale);                                                       \
         op.Process();                                                         \
     }
 
-MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, false, inplace)
-MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, true, reuse)
-MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, false, inplace)
-MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, true, reuse)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, false, inplace, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, true, reuse, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, false, inplace, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, true, reuse, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, false, inplace, 4, group4)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, true, reuse, 4, group4)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, false, inplace, 4, group4)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, true, reuse, 4, group4)
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, false, inplace)
-MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, true, reuse)
-MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, false, inplace)
-MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, true, reuse)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, false, inplace, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, true, reuse, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, false, inplace, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, true, reuse, 8, group8)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, false, inplace, 4, group4)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, true, reuse, 4, group4)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, false, inplace, 4, group4)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, true, reuse, 4, group4)
 #endif
 
 namespace vllm_ascend {
@@ -663,6 +681,7 @@ namespace {
 
 constexpr uint32_t kFp32ReuseMinRows = 2048;
 constexpr uint32_t kInplaceHiddenDim = 2048;
+constexpr uint32_t kWideInputThreshold = 2048;
 
 }  // namespace
 
@@ -687,70 +706,74 @@ extern void moe_lora_bgmv_fused_impl(
         (numRows + rowsPerCore - 1) / rowsPerCore;
     const bool reuseFp32Weight =
         numRows >= kFp32ReuseMinRows ||
-        inputHiddenDim < kInplaceHiddenDim;
+        inputHiddenDim != kInplaceHiddenDim;
+    const bool useWideInputKernel =
+        inputHiddenDim > kWideInputThreshold;
+
+#define MOE_LORA_BGMV_FUSED_LAUNCH(KERNEL)                                  \
+    KERNEL<<<blockDim, nullptr, stream>>>(                                   \
+        x, loraA, loraB, indices, y, numRows, inputHiddenDim,                \
+        outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore, scale)
+
+#define MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(NORMAL_KERNEL, WIDE_KERNEL)      \
+    do {                                                                      \
+        if (useWideInputKernel) {                                             \
+            MOE_LORA_BGMV_FUSED_LAUNCH(WIDE_KERNEL);                         \
+        } else {                                                              \
+            MOE_LORA_BGMV_FUSED_LAUNCH(NORMAL_KERNEL);                       \
+        }                                                                     \
+    } while (0)
+
     if (type == AscendType::FP16) {
         if (indicesIsInt32) {
             if (reuseFp32Weight) {
-                moe_lora_bgmv_fused_half_int32_reuse
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_half_int32_reuse_group8,
+                    moe_lora_bgmv_fused_half_int32_reuse_group4);
             } else {
-                moe_lora_bgmv_fused_half_int32_inplace
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_half_int32_inplace_group8,
+                    moe_lora_bgmv_fused_half_int32_inplace_group4);
             }
         } else {
             if (reuseFp32Weight) {
-                moe_lora_bgmv_fused_half_int64_reuse
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_half_int64_reuse_group8,
+                    moe_lora_bgmv_fused_half_int64_reuse_group4);
             } else {
-                moe_lora_bgmv_fused_half_int64_inplace
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_half_int64_inplace_group8,
+                    moe_lora_bgmv_fused_half_int64_inplace_group4);
             }
         }
     } else if (type == AscendType::BF16) {
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
         if (indicesIsInt32) {
             if (reuseFp32Weight) {
-                moe_lora_bgmv_fused_bfloat16_t_int32_reuse
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_bfloat16_t_int32_reuse_group8,
+                    moe_lora_bgmv_fused_bfloat16_t_int32_reuse_group4);
             } else {
-                moe_lora_bgmv_fused_bfloat16_t_int32_inplace
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_bfloat16_t_int32_inplace_group8,
+                    moe_lora_bgmv_fused_bfloat16_t_int32_inplace_group4);
             }
         } else {
             if (reuseFp32Weight) {
-                moe_lora_bgmv_fused_bfloat16_t_int64_reuse
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_bfloat16_t_int64_reuse_group8,
+                    moe_lora_bgmv_fused_bfloat16_t_int64_reuse_group4);
             } else {
-                moe_lora_bgmv_fused_bfloat16_t_int64_inplace
-                    <<<blockDim, nullptr, stream>>>(
-                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                        outputHiddenDim, outputFullDim, sliceOffset,
-                        rowsPerCore, scale);
+                MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED(
+                    moe_lora_bgmv_fused_bfloat16_t_int64_inplace_group8,
+                    moe_lora_bgmv_fused_bfloat16_t_int64_inplace_group4);
             }
         }
 #endif
     }
+
+#undef MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED
+#undef MOE_LORA_BGMV_FUSED_LAUNCH
 }
 
 }  // namespace vllm_ascend

@@ -31,10 +31,13 @@ namespace vllm_ascend {
 namespace {
 
 constexpr uint32_t kRank = 16;
-constexpr uint32_t kGroupRows = 8;
+constexpr uint32_t kDefaultGroupRows = 8;
+constexpr uint32_t kWideInputGroupRows = 4;
 constexpr uint32_t kOutputTileElements = 512;
 constexpr uint32_t kWeightTileElements = kOutputTileElements * kRank;
-constexpr uint32_t kMaxHiddenDim = 2048;
+constexpr uint32_t kWideInputThreshold = 2048;
+constexpr uint32_t kMaxInputHiddenDim = 4096;
+constexpr uint32_t kMaxOutputHiddenDim = 4096;
 constexpr uint32_t kFp32ReuseMinRows = 2048;
 
 struct BgmvFusedDeviceResources {
@@ -83,21 +86,22 @@ uint64_t CalculateUbBytes(
     uint32_t inputHiddenDim,
     uint32_t indexElementBytes,
     uint32_t dataElementBytes,
-    bool reuseFp32Weight)
+    bool reuseFp32Weight,
+    uint32_t groupRows)
 {
     const uint32_t weightBufferElements = std::max(
         inputHiddenDim, kWeightTileElements);
     uint64_t bytes = 0;
-    bytes += AlignUp32Bytes(kGroupRows * indexElementBytes);
+    bytes += AlignUp32Bytes(groupRows * indexElementBytes);
     bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(kGroupRows) * inputHiddenDim *
+        static_cast<uint64_t>(groupRows) * inputHiddenDim *
         dataElementBytes);
     bytes += AlignUp32Bytes(
         static_cast<uint64_t>(weightBufferElements) * dataElementBytes);
     bytes += 2 * AlignUp32Bytes(
         static_cast<uint64_t>(kOutputTileElements) * dataElementBytes);
     bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(kGroupRows) * inputHiddenDim *
+        static_cast<uint64_t>(groupRows) * inputHiddenDim *
         sizeof(float));
     if (reuseFp32Weight) {
         bytes += AlignUp32Bytes(
@@ -105,7 +109,7 @@ uint64_t CalculateUbBytes(
     }
     bytes += AlignUp32Bytes(
         static_cast<uint64_t>(weightBufferElements) * sizeof(float));
-    bytes += AlignUp32Bytes(kGroupRows * kRank * sizeof(float));
+    bytes += AlignUp32Bytes(groupRows * kRank * sizeof(float));
     bytes += AlignUp32Bytes(256);
     bytes += 2 * AlignUp32Bytes(
         kOutputTileElements * sizeof(float));
@@ -172,11 +176,11 @@ at::Tensor moe_lora_bgmv_fused(
             sliceOffset <= y.size(1) - sliceSize,
         "moe_lora_bgmv_fused: output slice is out of range");
     TORCH_CHECK(
-        x.size(1) > 0 && x.size(1) <= kMaxHiddenDim,
-        "moe_lora_bgmv_fused: input hidden dimension must be in [1, 2048]");
+        x.size(1) > 0 && x.size(1) <= kMaxInputHiddenDim,
+        "moe_lora_bgmv_fused: input hidden dimension must be in [1, 4096]");
     TORCH_CHECK(
-        sliceSize <= kMaxHiddenDim,
-        "moe_lora_bgmv_fused: output hidden dimension must be <= 2048");
+        sliceSize <= kMaxOutputHiddenDim,
+        "moe_lora_bgmv_fused: output hidden dimension must be <= 4096");
     TORCH_CHECK(
         std::isfinite(scale),
         "moe_lora_bgmv_fused: scale must be finite");
@@ -206,12 +210,16 @@ at::Tensor moe_lora_bgmv_fused(
         GetBgmvFusedDeviceResources();
     const uint32_t indexElementBytes =
         indices.scalar_type() == at::kInt ? sizeof(int32_t) : sizeof(int64_t);
+    const uint32_t groupRows =
+        x.size(1) > kWideInputThreshold ?
+        kWideInputGroupRows : kDefaultGroupRows;
     const uint64_t requiredUbBytes = CalculateUbBytes(
         static_cast<uint32_t>(x.size(1)),
         indexElementBytes,
         static_cast<uint32_t>(x.element_size()),
         numRows64 >= kFp32ReuseMinRows ||
-            x.size(1) < kMaxHiddenDim);
+            x.size(1) != kWideInputThreshold,
+        groupRows);
     if (resources.ubBytes != 0) {
         TORCH_CHECK(
             requiredUbBytes <= resources.ubBytes,
@@ -220,14 +228,14 @@ at::Tensor moe_lora_bgmv_fused(
     }
 
     const uint32_t numRows = static_cast<uint32_t>(numRows64);
-    uint32_t desiredCoreNum = (numRows + kGroupRows - 1) / kGroupRows;
+    uint32_t desiredCoreNum = (numRows + groupRows - 1) / groupRows;
     if (desiredCoreNum > resources.vectorCoreNum) {
         desiredCoreNum = resources.vectorCoreNum;
     }
     uint32_t rowsPerCore =
         (numRows + desiredCoreNum - 1) / desiredCoreNum;
     rowsPerCore =
-        (rowsPerCore + kGroupRows - 1) / kGroupRows * kGroupRows;
+        (rowsPerCore + groupRows - 1) / groupRows * groupRows;
 
     void* xPtr = x.data_ptr();
     void* aPtr = loraA.data_ptr();

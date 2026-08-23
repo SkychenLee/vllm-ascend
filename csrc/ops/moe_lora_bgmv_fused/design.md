@@ -14,8 +14,9 @@ y[row, slice] += rank_out[row] @ B[indices[row]].T
 
 当前两个 kernel 会把 FP32 rank 中间结果写入 GM，再由 expand 读回；并且每个
 token 都重新从 GM 搬入相同 expert/adapter 的 A/B 权重。新算子把 rank=16 中间
-结果留在 UB，并在连续 8 行具有相同 index 时优先复用 A/B 权重搬运，
-不足 8 行时保留 4-row 快速路径。
+结果留在 UB，并在连续 8 行具有相同 index 时优先复用 A/B 权重搬运。
+`H <= 2048` 使用 8-row 模板；`2048 < H <= 4096` 使用 4-row 模板，
+把 DeepSeek-V4-Flash 的宽输入控制在 910B 单核 UB 上限内。
 
 PyTorch 和 NumPy 没有同名接口。本算子是 vLLM-Ascend 内部 in-place 自定义算子，
 语义以本设计为准。
@@ -53,9 +54,9 @@ at::Tensor moe_lora_bgmv_fused(
 
 | 参数 | dtype | shape | 约束 |
 |---|---|---|---|
-| `x` | FP16/BF16 | `[M, H]` | contiguous，`0 < H <= 2048` |
+| `x` | FP16/BF16 | `[M, H]` | contiguous，`0 < H <= 4096` |
 | `lora_a` | 与 `x` 相同 | `[L, 16, H]` | contiguous |
-| `lora_b` | 与 `x` 相同 | `[L, O, 16]` | contiguous，`0 < O <= 2048` |
+| `lora_b` | 与 `x` 相同 | `[L, O, 16]` | contiguous，`0 < O <= 4096` |
 | `indices` | int32/int64 | `[M]` | contiguous，值为 `-1` 或 `[0, L)` |
 | `y` | 与 `x` 相同 | `[M, Y]` | contiguous，in-place 更新 |
 | `slice_offset` | int64 | scalar | `>= 0` |
@@ -190,7 +191,7 @@ struct MoeLoraBgmvFusedTilingData {
     uint32_t sliceOffset;
     uint32_t rowsPerCore;
     uint32_t blockDim;
-    uint32_t groupRows;          // 8，保留 4-row fallback
+    uint32_t groupRows;          // H<=2048 时为 8，否则为 4
     uint32_t outputTileRows;     // 512
     uint32_t rank;               // 16
     float scale;
@@ -204,29 +205,33 @@ dtype 和 index dtype 通过不同模板 kernel 入口选择，不在 Device 热
 Host 通过 `ACL_DEV_ATTR_VECTOR_CORE_NUM` 获取 AIV 数量，不硬编码核数：
 
 ```text
-desiredCoreNum = min(vectorCoreNum, ceil(M / 8))
-rowsPerCore = align_up(ceil(M / desiredCoreNum), 8)
+groupRows = H <= 2048 ? 8 : 4
+desiredCoreNum = min(vectorCoreNum, ceil(M / groupRows))
+rowsPerCore = align_up(ceil(M / desiredCoreNum), groupRows)
 blockDim = ceil(M / rowsPerCore)
 ```
 
-每个 Core 处理连续且以 8-row 对齐的区间。这样只会在 Core 边界拆开少量
+每个 Core 处理连续且以 `groupRows` 对齐的区间。这样只会在 Core 边界拆开少量
 combined-index group，同时保证不同 Core 写入不同的 y 行，不需要 atomic 或核间同步。
 
 Python 集成层仅在 `M >= 512` 时选择新算子；小 shape 继续走现有 kernel，避免
 8/4-row 分组判断和更大 UB 初始化增加 decode 延迟。该阈值是命名常量，最终根据
 1/2/8/32/128/256/512/1024-token msprof 结果调整。
 
-AscendC launcher 在融合算子内部进一步按行数选择编译期特化入口：
+AscendC launcher 在融合算子内部进一步选择编译期特化入口：
 
 ```text
-M < 2048 且 H == 2048 -> inplace variant，UB 154,432 B，不分配 productFp32Buffer
-其它 shape             -> reuse variant，UB 187,200 B，A/B 每组只 Cast 一次
+H <= 2048              -> group8 template
+2048 < H <= 4096       -> group4 template
+M < 2048 且 H == 2048  -> inplace variant，不分配 productFp32Buffer
+其它 shape             -> reuse variant，A/B 每组只 Cast 一次
 ```
 
 ### 3.3 UB 级切分
 
-第一版约束 `H <= 2048`、`O <= 2048`。Shrink 一次保存最多 8 行 X；Expand 将
-输出按 512 元素切分，B tile 固定最多 8192 元素。
+当前约束 `H <= 4096`、`O <= 4096`。Shrink 在窄输入模板一次保存最多 8 行 X，
+宽输入模板一次保存最多 4 行 X；Expand 始终按 512 元素切分，B tile 固定最多
+8192 元素，因此增大 O 不增加 UB 峰值。
 
 ```text
 H_aligned = align_up(H, 16)
@@ -236,40 +241,41 @@ weightTileElements = 512 * 16 = 8192
 
 #### UB 分配表
 
-`H_a = align_up(H, 16)`、`O_t = 512`、`W_t = max(H_a, 8192)`：
+`R = H <= 2048 ? 8 : 4`、`H_a = align_up(H, 16)`、`O_t = 512`、
+`W_t = max(H_a, 8192)`：
 
 | Buffer | 单位大小 | 数量 | 最大字节 | 阶段复用 |
 |---|---:|---:|---:|---|
-| `indicesQueue` | `8 * sizeof(index_t)` | 1 | 64 | 搬入 int32/int64 index |
-| `xQueue` | `8 * H_a * 2` | 1 | 32,768 | 搬入 8 行 FP16/BF16 X |
+| `indicesQueue` | `R * sizeof(index_t)` | 1 | 64 | 搬入 int32/int64 index |
+| `xQueue` | `R * H_a * 2` | 1 | 32,768 | 搬入 R 行 FP16/BF16 X |
 | `weightQueue` | `W_t * 2` | 1 | 16,384 | A rank row / B output tile |
-| `xFp32Buffer` | `8 * H_a * 4` | 1 | 65,536 | shrink X；expand rank duplicate |
+| `xFp32Buffer` | `R * H_a * 4` | 1 | 65,536 | shrink X；expand rank duplicate |
 | `weightFp32Buffer` | `W_t * 4` | 1 | 32,768 | 组内复用 A/B FP32 权重 |
 | `productFp32Buffer` | `W_t * 4` | 1 | 32,768 | 仅 reuse variant：Mul 与 Reduce scratch |
-| `rankBuffer` | `8 * 16 * 4` | 1 | 512 | FP32 shrink 中间结果 |
+| `rankBuffer` | `R * 16 * 4` | 1 | 512 | FP32 shrink 中间结果 |
 | `reduceTmpBuffer` | 256 | 1 | 256 | FP32 `ReduceSum` 临时区 |
 | `yInputQueue` | `O_t * 2` | 1 | 1,024 | 原 y slice |
 | `yOutputQueue` | `O_t * 2` | 1 | 1,024 | 更新后的 y slice |
 | `yInputFp32` | `O_t * 4` | 1 | 2,048 | y 升精度 |
 | `yAccumFp32` | `O_t * 4` | 1 | 2,048 | expand 归约结果 + y |
-| **inplace 总计** |  |  | **154,432** | `M < 2048 && H == 2048` |
-| **reuse 总计** |  |  | **187,200** | 其它 shape，小于 910B 每核 192 KiB UB |
+| **group8 inplace 总计** |  |  | **154,432** | `H=2048` |
+| **group8 reuse 总计** |  |  | **187,200** | `H=2048` |
+| **group4 inplace 总计** |  |  | **154,144** | `H=4096` |
+| **group4 reuse 总计** |  |  | **186,912** | `H=4096`，小于 910B 每核 192 KiB UB |
 
 FP16 和 BF16 的元素大小相同，因此 UB 公式一致：
 
 ```text
-inplaceUbBytes(int64 index) = 48 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 832
-reuseUbBytes(int64 index) = 48 * H_a + 10 * max(H_a, 8192) + 12 * O_t + 832
-bufferCoefficient(FP16) = 48 bytes/input-column + 12 bytes/output-element
-bufferCoefficient(BF16) = 48 bytes/input-column + 12 bytes/output-element
+inplaceUbBytes(int64 index) = 6 * R * H_a + 6 * max(H_a, 8192) + 12 * O_t + 72 * R + 256
+reuseUbBytes(int64 index) = 6 * R * H_a + 10 * max(H_a, 8192) + 12 * O_t + 72 * R + 256
 ```
 
-最大 shape `H=2048, O_t=512` 时，inplace variant 的 int64/int32 index 分别使用
-154,432/154,400 bytes；reuse variant 分别使用 187,200/187,168 bytes，距离
-192 KiB UB 上限分别剩余 9,408/9,440 bytes。Host 按 `M/H` 选择对应公式并查询
+`H=4096, R=4, O_t=512` 时，inplace/reuse variant 分别使用
+154,144/186,912 bytes，reuse 距离 192 KiB UB 上限剩余 9,696 bytes。Host 按
+`M/H` 选择对应公式并查询
 `ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE`；当 CANN 9.0 在 910B3 返回 0 时，不把 0
 当成真实容量，而依赖上述已封顶的 shape/UB 证明。若平台返回非零 UB，则必须验证
-`ubBytes <= queriedUbBytes`，否则拒绝调用并由 Python 回退旧路径。
+`ubBytes <= queriedUbBytes`，否则拒绝调用。
 
 所有 GM 到 UB、UB 到 GM 搬运使用 `DataCopyPad`，尾部不足 32B 时由 pad 参数处理。
 
@@ -342,13 +348,17 @@ use_fused = (
     and local_rank == 16
     and full_rank == 16
     and x2d.shape[0] >= FUSED_BGMV_MIN_ROWS
-    and x2d.shape[1] <= 2048
-    and out_size <= 2048
+    and x2d.shape[1] <= 4096
+    and out_size <= 4096
+    and (out_size <= 2048 or x2d.shape[0] >= 1024)
 )
 ```
 
 满足时直接调用 `moe_lora_bgmv_fused` 更新 y slice；否则保留现有 shrink、TP 通信、
-routed-weight multiply 和 expand 路径。该策略不改变 `fully_sharded` 语义。
+routed-weight multiply 和 expand 路径，作为所有未覆盖 shape/模式的通用兜底。
+`O > 2048` 使用更高的 1024-row 门槛，来自 910B3 上 256->4096 的交叉点实测：
+768 行融合慢于旧路径，960/1152 行开始略有收益，故生产路由采用保守的 1024。
+该策略不改变 `fully_sharded` 语义。
 
 ## 8. 验证计划
 
@@ -365,7 +375,8 @@ routed-weight multiply 和 expand 路径。该策略不改变 `fully_sharded` �
 ### 8.2 性能
 
 - 真实 Qwen3.5-35B-A3B router/expert 权重。
-- tokens：1、2、8、32、128、256、512、1024，top-k=8，rank=16。
+- Qwen 回归使用 top-k=8；DeepSeek-V4-Flash 目标 shape 使用 top-k=6，覆盖
+  768/960/1152/1536/3072 routed rows。
 - 记录 fused kernel、旧 shrink/expand 和完整 W13/W2 路径时间。
 - 每条路径独立 3 轮，奇偶轮交换顺序，以 msprof active step 中位数比较。
 
@@ -380,8 +391,9 @@ routed-weight multiply 和 expand 路径。该策略不改变 `fully_sharded` �
 - [x] Host、Kernel、注册和 Python wrapper 已实现。
 - [x] 编译与基本功能测试通过。
 - [ ] 中文接口 README 已生成。
-- [x] 至少 30 项精度测试通过（44/44）。
-- [x] 真实权重 torch_npu.profiler 门禁通过（10/10 优于 separate）。
+- [x] 至少 30 项精度测试通过（52/52）。
+- [x] 真实权重 torch_npu.profiler 门禁通过（22 case；生产路由 19 fused、
+  3 fallback、0 回退）。
 
 ## 10. 参考实现
 

@@ -1,15 +1,15 @@
 # `moe_lora_bgmv_fused` 精度验证报告
 
 - 测试平台：Ascend 910B3。
-- 测试时间：2026-08-23T10:22:42+00:00
+- 测试时间：2026-08-23T11:59:17+00:00
 - 参考实现：PyTorch CPU FP32 两阶段 BMM，最终 Cast 回输出 dtype。
 
 ## 总览
 
 | 指标 | 值 |
 | --- | ---: |
-| 总用例数 | 44 |
-| 通过数 | 44 |
+| 总用例数 | 52 |
+| 通过数 | 52 |
 | 失败数 | 0 |
 | 通过率 | 100.00% |
 
@@ -56,29 +56,38 @@ slice 外数据必须逐元素不变。
 | 15 | Large | 4096-row W13 | [4096, 2048, 1024, 1024] | bfloat16 | int32 | 7.622e-08 | 7.812e-03 | 1.562e-02 | True/True | PASS |
 | 16 | Large | 8192-row W2 | [8192, 512, 2048, 2048] | float16 | int32 | 1.466e-08 | 8.224e-04 | 9.766e-04 | True/True | PASS |
 | 16 | Large | 8192-row W2 | [8192, 512, 2048, 2048] | bfloat16 | int32 | 1.034e-08 | 6.579e-03 | 7.812e-03 | True/True | PASS |
-| 17 | Boundary | all disabled indices | [9, 63, 65, 96] | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 17 | Boundary | all disabled indices | [9, 63, 65, 96] | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 18 | Boundary | minimum valid weight | [9, 63, 65, 96] | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 18 | Boundary | minimum valid weight | [9, 63, 65, 96] | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 19 | Boundary | maximum valid weight | [9, 63, 65, 96] | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 19 | Boundary | maximum valid weight | [9, 63, 65, 96] | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 20 | Boundary | zero scale | [9, 63, 65, 96] | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 20 | Boundary | zero scale | [9, 63, 65, 96] | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 21 | Boundary | negative scale | [9, 63, 65, 96] | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 21 | Boundary | negative scale | [9, 63, 65, 96] | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 22 | Boundary | last valid slice | [9, 63, 33, 97] | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 22 | Boundary | last valid slice | [9, 63, 33, 97] | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 17 | DeepSeekV4 | TP8 W13 slice | [512, 4096, 256, 512] | float16 | int32 | 6.055e-08 | 8.210e-04 | 1.953e-03 | True/True | PASS |
+| 17 | DeepSeekV4 | TP8 W13 slice | [512, 4096, 256, 512] | bfloat16 | int32 | 3.987e-08 | 5.376e-03 | 1.562e-02 | True/True | PASS |
+| 18 | DeepSeekV4 | TP8 W2 | [512, 256, 4096, 4096] | float16 | int64 | 5.960e-09 | 8.857e-04 | 9.766e-04 | True/True | PASS |
+| 18 | DeepSeekV4 | TP8 W2 | [512, 256, 4096, 4096] | bfloat16 | int64 | 3.179e-09 | 6.667e-03 | 7.812e-03 | True/True | PASS |
+| 19 | DeepSeekV4 | TP1 W13 slice | [512, 4096, 2048, 4096] | float16 | int64 | 5.794e-08 | 8.403e-04 | 1.953e-03 | True/True | PASS |
+| 19 | DeepSeekV4 | TP1 W13 slice | [512, 4096, 2048, 4096] | bfloat16 | int64 | 4.690e-08 | 6.410e-03 | 1.562e-02 | True/True | PASS |
+| 20 | DeepSeekV4 | TP1 W2 | [512, 2048, 4096, 4096] | float16 | int32 | 5.577e-08 | 9.756e-04 | 1.953e-03 | True/True | PASS |
+| 20 | DeepSeekV4 | TP1 W2 | [512, 2048, 4096, 4096] | bfloat16 | int32 | 6.697e-08 | 7.752e-03 | 1.562e-02 | True/True | PASS |
+| 21 | Boundary | all disabled indices | [9, 63, 65, 96] | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 21 | Boundary | all disabled indices | [9, 63, 65, 96] | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 22 | Boundary | minimum valid weight | [9, 63, 65, 96] | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 22 | Boundary | minimum valid weight | [9, 63, 65, 96] | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 23 | Boundary | maximum valid weight | [9, 63, 65, 96] | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 23 | Boundary | maximum valid weight | [9, 63, 65, 96] | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 24 | Boundary | zero scale | [9, 63, 65, 96] | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 24 | Boundary | zero scale | [9, 63, 65, 96] | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 25 | Boundary | negative scale | [9, 63, 65, 96] | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 25 | Boundary | negative scale | [9, 63, 65, 96] | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 26 | Boundary | last valid slice | [9, 63, 33, 97] | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 26 | Boundary | last valid slice | [9, 63, 33, 97] | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
 
 ## 按 dtype 汇总
 
 | dtype | 用例数 | 通过数 | 失败数 |
 | --- | ---: | ---: | ---: |
-| bfloat16 | 22 | 22 | 0 |
-| float16 | 22 | 22 | 0 |
+| bfloat16 | 26 | 26 | 0 |
+| float16 | 26 | 26 | 0 |
 
 ## 关键发现
 
-1. 共 44 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4/8-row 复用和尾块。
-2. expert-sorted 快速路径覆盖 22 例，mixed/alternating fallback 覆盖 6 例。
+1. 共 52 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4/8-row 复用和尾块。
+2. expert-sorted 快速路径覆盖 30 例，mixed/alternating fallback 覆盖 6 例。
 3. 非 32B 对齐 H/O、slice offset、负/零 scale、全 -1 index 和最大合法 index 均纳入验证。
 4. 每个用例同时检查返回 alias 和 slice 外逐元素不变，避免只验证数值而漏掉 in-place 语义。
+5. DeepSeek-V4-Flash 的 TP8 4096->256、256->4096 和完整 4096->2048、2048->4096 形状均已覆盖。

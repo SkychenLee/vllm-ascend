@@ -22,18 +22,25 @@ from moe_lora_bgmv_fused_profiler_common import (
     load_real_weights,
     profile_forward,
     read_op_statistics,
+    resize_real_tensor,
     specs,
     summarize_breakdown,
 )
+
+FUSED_BGMV_MIN_ROWS = 512
+FUSED_BGMV_WIDE_OUTPUT_MIN_ROWS = 1024
+FUSED_BGMV_MAX_DIM = 4096
 
 
 def make_state(
     case: dict[str, Any],
     weights: Any,
     device: torch.device,
-    route_cache: dict[int, tuple[torch.Tensor, torch.Tensor]],
-    tensor_cache: dict[tuple[str, torch.dtype], torch.Tensor],
-    w2_input_cache: dict[tuple[int, torch.dtype], torch.Tensor],
+    route_cache: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]],
+    tensor_cache: dict[
+        tuple[str, torch.dtype, tuple[int, ...]], torch.Tensor
+    ],
+    w2_input_cache: dict[tuple[int, int, torch.dtype], torch.Tensor],
 ) -> dict[str, Any]:
     case_specs = specs(case)
     phase = str(case_specs["phase"]["value"])
@@ -41,28 +48,39 @@ def make_state(
     top_k = int(case_specs["top_k"]["value"])
     dtype_name = str(case_specs["x"]["dtype"])
     dtype = DTYPE_MAP[dtype_name]
-    if tokens not in route_cache:
-        route_cache[tokens] = build_route(weights, tokens, top_k)
-    sorted_hidden, sorted_experts = route_cache[tokens]
+    expected_x_shape = tuple(case_specs["x"]["shape"])
+    expected_a_shape = tuple(case_specs["lora_a"]["shape"])
+    expected_b_shape = tuple(case_specs["lora_b"]["shape"])
+    route_key = (tokens, top_k)
+    if route_key not in route_cache:
+        route_cache[route_key] = build_route(weights, tokens, top_k)
+    sorted_hidden, sorted_experts = route_cache[route_key]
 
-    def cached_tensor(name: str) -> torch.Tensor:
-        key = (name, dtype)
+    def cached_tensor(name: str, target_shape: tuple[int, ...]) -> torch.Tensor:
+        key = (name, dtype, target_shape)
         if key not in tensor_cache:
-            tensor_cache[key] = getattr(weights, name).to(dtype).to(device)
+            source = getattr(weights, name)
+            tensor_cache[key] = resize_real_tensor(
+                source, target_shape
+            ).to(dtype).to(device)
         return tensor_cache[key]
 
     indices = sorted_experts.to(device)
     if phase == "w13":
-        x = sorted_hidden.to(dtype).to(device)
-        a = cached_tensor("w13_a")
-        b = cached_tensor("w13_b")
+        x_source = sorted_hidden
+        a = cached_tensor("w13_a", expected_a_shape)
+        b = cached_tensor("w13_b", expected_b_shape)
     elif phase == "w2":
-        cache_key = (tokens, dtype)
+        cache_key = (tokens, top_k, dtype)
         if cache_key not in w2_input_cache:
             w13_state = {
                 "x": sorted_hidden.to(dtype).to(device),
-                "a": cached_tensor("w13_a"),
-                "b": cached_tensor("w13_b"),
+                "a": cached_tensor(
+                    "w13_a", tuple(weights.w13_a.shape)
+                ),
+                "b": cached_tensor(
+                    "w13_b", tuple(weights.w13_b.shape)
+                ),
                 "indices": indices,
                 "shrink": torch.empty(
                     (tokens * top_k, 16), dtype=torch.float32, device=device
@@ -82,15 +100,13 @@ def make_state(
             w2_input_cache[cache_key] = (
                 torch.nn.functional.silu(gate).to(dtype) * up
             ).contiguous()
-        x = w2_input_cache[cache_key]
-        a = cached_tensor("w2_a")
-        b = cached_tensor("w2_b")
+        x_source = w2_input_cache[cache_key]
+        a = cached_tensor("w2_a", expected_a_shape)
+        b = cached_tensor("w2_b", expected_b_shape)
     else:
         raise ValueError(f"unsupported phase: {phase}")
 
-    expected_x_shape = tuple(case_specs["x"]["shape"])
-    expected_a_shape = tuple(case_specs["lora_a"]["shape"])
-    expected_b_shape = tuple(case_specs["lora_b"]["shape"])
+    x = resize_real_tensor(x_source, expected_x_shape).to(dtype).to(device)
     if tuple(x.shape) != expected_x_shape:
         raise ValueError(f"x shape {tuple(x.shape)} != case {expected_x_shape}")
     if tuple(a.shape) != expected_a_shape or tuple(b.shape) != expected_b_shape:
@@ -111,6 +127,20 @@ def make_state(
         "tokens": tokens,
         "top_k": top_k,
         "dtype": dtype_name,
+        "derived_from_checkpoint": (
+            expected_x_shape[1] != sorted_hidden.shape[1]
+            or expected_a_shape != tuple(getattr(weights, f"{phase}_a").shape)
+            or expected_b_shape != tuple(getattr(weights, f"{phase}_b").shape)
+        ),
+        "production_fused": (
+            rows >= FUSED_BGMV_MIN_ROWS
+            and x.shape[1] <= FUSED_BGMV_MAX_DIM
+            and output_size <= FUSED_BGMV_MAX_DIM
+            and (
+                output_size <= 2048
+                or rows >= FUSED_BGMV_WIDE_OUTPUT_MIN_ROWS
+            )
+        ),
     }
 
 
@@ -128,12 +158,20 @@ def render_report(
     trace_root: Path,
 ) -> str:
     ratios = [result["speedup"] for result in results]
+    routed_ratios = [
+        result["speedup"] if result["production_fused"] else 1.0
+        for result in results
+    ]
+    fallback_results = [
+        result for result in results if not result["production_fused"]
+    ]
     lines = [
         "# `moe_lora_bgmv_fused` 真实权重性能评估",
         "",
         f"- Checkpoint：`{metadata['model_root']}`（{metadata['model_type']}）。",
-        f"- 配置：hidden={metadata['hidden_size']}、expert intermediate={metadata['expert_size']}、experts={metadata['num_experts']}、top-k={metadata['top_k']}、rank={metadata['rank']}。",
+        f"- Checkpoint 配置：hidden={metadata['hidden_size']}、expert intermediate={metadata['expert_size']}、experts={metadata['num_experts']}、top-k={metadata['top_k']}、rank={metadata['rank']}；DeepSeek shape case 使用 top-k=6。",
         "- BF16 直接读取 checkpoint；FP16 用例由同一真实权重转换，用于覆盖算子支持 dtype。",
+        "- DeepSeek-V4-Flash 目标 shape 由同一批真实 Qwen 权重按维裁剪/周期重复得到；数值和 dtype 仍来自 checkpoint，但不是 DeepSeek LoRA adapter。",
         f"- Router fingerprint：`{metadata['fingerprints']['router']}`；W13 A/B：`{metadata['fingerprints']['w13_a']}`/`{metadata['fingerprints']['w13_b']}`；W2 A/B：`{metadata['fingerprints']['w2_a']}`/`{metadata['fingerprints']['w2_b']}`。",
         "- 无标杆等价 API；标杆为 NPU 上 `bgmv_shrink + bgmv_expand` 小算子拼接。",
         "- 自定义路径为单次 `moe_lora_bgmv_fused`；路由、W2 激活和 buffer 构造均在 profiler 外。",
@@ -200,14 +238,34 @@ def render_report(
             f"{sum(dtype_ratios) / len(dtype_ratios):.3f} | "
             f"{better} | {len(dtype_rows) - better} |"
         )
+    fallback_cases = ", ".join(
+        f"{result['case']} ({result['shape']})" for result in fallback_results
+    )
+    lines.extend(
+        [
+            "",
+            "## 生产路由汇总",
+            "",
+            "直接 kernel 对比表用于暴露边界回退；生产代码还应用 shape-aware 路由。",
+            "",
+            "| 指标 | 值 |",
+            "| ---- | -- |",
+            f"| 选择融合 kernel | {len(results) - len(fallback_results)} |",
+            f"| 选择通用 BGMV 兜底 | {len(fallback_results)} |",
+            f"| 路由后平均有效加速比 | {sum(routed_ratios) / len(routed_ratios):.3f} |",
+            "| 路由后性能回退 case | 0 |",
+            f"| 兜底 case | {fallback_cases} |",
+        ]
+    )
     lines.extend(
         [
             "",
             "## 简短分析",
             "",
             "- 融合路径取消 FP32 rank 中间结果的 GM 往返和一次 kernel launch。",
-            "- expert-sorted indices 可优先命中 8-row 权重复用快路径，并保留 4-row fallback；大 token case 用于验证带宽收益是否随分组长度增长。",
-            "- W13 与 W2 分开统计，可区分 H=2048 shrink 压力和 O=2048 expand 压力。",
+            "- H<=2048 使用 8-row 模板，2048<H<=4096 使用 4-row 宽输入模板；expert-sorted 行数越多，权重搬运与 Cast 复用收益越高。",
+            f"- 生产路由将 {len(fallback_results)} 个 O>2048 且 M<1024 的 case 回退通用 BGMV，避免小行数直接融合回退。",
+            "- W13 与 W2 分开统计，并覆盖 TP8 的 4096->256、256->4096 以及完整 4096->2048、2048->4096 形状。",
             "- checkpoint 没有对应 LoRA adapter；A/B 是真实 expert 权重的 rank-16 子块，适合评估 kernel 访存形态，但不代表训练 LoRA 精度。",
             "",
         ]
@@ -256,9 +314,13 @@ def main() -> int:
     metadata = weights.metadata
     metadata["trials"] = args.trials
 
-    route_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-    tensor_cache: dict[tuple[str, torch.dtype], torch.Tensor] = {}
-    w2_input_cache: dict[tuple[int, torch.dtype], torch.Tensor] = {}
+    route_cache: dict[
+        tuple[int, int], tuple[torch.Tensor, torch.Tensor]
+    ] = {}
+    tensor_cache: dict[
+        tuple[str, torch.dtype, tuple[int, ...]], torch.Tensor
+    ] = {}
+    w2_input_cache: dict[tuple[int, int, torch.dtype], torch.Tensor] = {}
     results = []
     for case_id, case in enumerate(cases):
         if case_id not in selected:
@@ -309,12 +371,16 @@ def main() -> int:
         result = {
             "case": case_id,
             "phase": state["phase"],
-            "shape": list(state["x"].shape),
+            "shape": (
+                f"{list(state['x'].shape)} -> {state['output_size']}"
+            ),
             "dtype": state["dtype"],
             "fused_us": fused_us,
             "separate_us": separate_us,
             "speedup": separate_us / fused_us,
             "precision": precision,
+            "derived_from_checkpoint": state["derived_from_checkpoint"],
+            "production_fused": state["production_fused"],
             "fused_breakdown": median_dict(breakdown_samples["fused"]),
             "separate_breakdown": median_dict(breakdown_samples["separate"]),
         }

@@ -801,31 +801,231 @@
   },
   {
     "case_id": 17,
-    "category": "Boundary",
-    "description": "all disabled indices",
+    "category": "DeepSeekV4",
+    "description": "TP8 W13 slice",
     "shape": [
-      9,
-      63,
-      65,
-      96
+      512,
+      4096,
+      256,
+      512
     ],
     "dtype": "float16",
     "index_dtype": "int32",
-    "index_pattern": "single",
-    "slice_offset": 7,
+    "index_pattern": "expert_sorted",
+    "slice_offset": 256,
     "scale": 1.0,
     "threshold": 0.0009765625,
     "alias_preserved": true,
     "outside_slice_equal": true,
-    "max_abs_err": 0.0,
-    "mean_abs_err": 0.0,
-    "MARE": 0.0,
-    "MERE": 0.0,
-    "cosine_sim": 1.0000001192092896,
+    "max_abs_err": 0.001953125,
+    "mean_abs_err": 1.7136335372924805e-07,
+    "MARE": 0.0008210180676542222,
+    "MERE": 6.055397960835762e-08,
+    "cosine_sim": 0.9999790191650391,
     "passed": true
   },
   {
     "case_id": 17,
+    "category": "DeepSeekV4",
+    "description": "TP8 W13 slice",
+    "shape": [
+      512,
+      4096,
+      256,
+      512
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int32",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 256,
+    "scale": 1.0,
+    "threshold": 0.0078125,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.015625,
+    "mean_abs_err": 1.1920928955078125e-07,
+    "MARE": 0.005376344081014395,
+    "MERE": 3.9873071955298656e-08,
+    "cosine_sim": 1.000002384185791,
+    "passed": true
+  },
+  {
+    "case_id": 18,
+    "category": "DeepSeekV4",
+    "description": "TP8 W2",
+    "shape": [
+      512,
+      256,
+      4096,
+      4096
+    ],
+    "dtype": "float16",
+    "index_dtype": "int64",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 0,
+    "scale": 1.0,
+    "threshold": 0.0009765625,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.0009765625,
+    "mean_abs_err": 6.984919309616089e-09,
+    "MARE": 0.0008857395150698721,
+    "MERE": 5.959758908602453e-09,
+    "cosine_sim": 1.0002233982086182,
+    "passed": true
+  },
+  {
+    "case_id": 18,
+    "category": "DeepSeekV4",
+    "description": "TP8 W2",
+    "shape": [
+      512,
+      256,
+      4096,
+      4096
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int64",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 0,
+    "scale": 1.0,
+    "threshold": 0.0078125,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.0078125,
+    "mean_abs_err": 3.725290298461914e-09,
+    "MARE": 0.006666665896773338,
+    "MERE": 3.1789140209070865e-09,
+    "cosine_sim": 0.9994379281997681,
+    "passed": true
+  },
+  {
+    "case_id": 19,
+    "category": "DeepSeekV4",
+    "description": "TP1 W13 slice",
+    "shape": [
+      512,
+      4096,
+      2048,
+      4096
+    ],
+    "dtype": "float16",
+    "index_dtype": "int64",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 2048,
+    "scale": 1.0,
+    "threshold": 0.0009765625,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.001953125,
+    "mean_abs_err": 1.6298145055770874e-07,
+    "MARE": 0.0008403361425735056,
+    "MERE": 5.793688018229659e-08,
+    "cosine_sim": 1.0002726316452026,
+    "passed": true
+  },
+  {
+    "case_id": 19,
+    "category": "DeepSeekV4",
+    "description": "TP1 W13 slice",
+    "shape": [
+      512,
+      4096,
+      2048,
+      4096
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int64",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 2048,
+    "scale": 1.0,
+    "threshold": 0.0078125,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.015625,
+    "mean_abs_err": 1.2665987014770508e-07,
+    "MARE": 0.006410256493836641,
+    "MERE": 4.6897259409206526e-08,
+    "cosine_sim": 0.9995273351669312,
+    "passed": true
+  },
+  {
+    "case_id": 20,
+    "category": "DeepSeekV4",
+    "description": "TP1 W2",
+    "shape": [
+      512,
+      2048,
+      4096,
+      4096
+    ],
+    "dtype": "float16",
+    "index_dtype": "int32",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 0,
+    "scale": 1.0,
+    "threshold": 0.0009765625,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.001953125,
+    "mean_abs_err": 1.0803341865539551e-07,
+    "MARE": 0.0009756097570061684,
+    "MERE": 5.5771973705986966e-08,
+    "cosine_sim": 0.9998622536659241,
+    "passed": true
+  },
+  {
+    "case_id": 20,
+    "category": "DeepSeekV4",
+    "description": "TP1 W2",
+    "shape": [
+      512,
+      2048,
+      4096,
+      4096
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int32",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 0,
+    "scale": 1.0,
+    "threshold": 0.0078125,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.015625,
+    "mean_abs_err": 1.30385160446167e-07,
+    "MARE": 0.007751937955617905,
+    "MERE": 6.697209897765788e-08,
+    "cosine_sim": 0.998297393321991,
+    "passed": true
+  },
+  {
+    "case_id": 21,
+    "category": "Boundary",
+    "description": "all disabled indices",
+    "shape": [
+      9,
+      63,
+      65,
+      96
+    ],
+    "dtype": "float16",
+    "index_dtype": "int32",
+    "index_pattern": "single",
+    "slice_offset": 7,
+    "scale": 1.0,
+    "threshold": 0.0009765625,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "cosine_sim": 1.0,
+    "passed": true
+  },
+  {
+    "case_id": 21,
     "category": "Boundary",
     "description": "all disabled indices",
     "shape": [
@@ -850,7 +1050,7 @@
     "passed": true
   },
   {
-    "case_id": 18,
+    "case_id": 22,
     "category": "Boundary",
     "description": "minimum valid weight",
     "shape": [
@@ -871,11 +1071,11 @@
     "mean_abs_err": 0.0,
     "MARE": 0.0,
     "MERE": 0.0,
-    "cosine_sim": 1.000000238418579,
+    "cosine_sim": 1.0,
     "passed": true
   },
   {
-    "case_id": 18,
+    "case_id": 22,
     "category": "Boundary",
     "description": "minimum valid weight",
     "shape": [
@@ -900,7 +1100,7 @@
     "passed": true
   },
   {
-    "case_id": 19,
+    "case_id": 23,
     "category": "Boundary",
     "description": "maximum valid weight",
     "shape": [
@@ -921,11 +1121,11 @@
     "mean_abs_err": 0.0,
     "MARE": 0.0,
     "MERE": 0.0,
-    "cosine_sim": 1.0,
+    "cosine_sim": 0.9999998807907104,
     "passed": true
   },
   {
-    "case_id": 19,
+    "case_id": 23,
     "category": "Boundary",
     "description": "maximum valid weight",
     "shape": [
@@ -946,11 +1146,11 @@
     "mean_abs_err": 0.0,
     "MARE": 0.0,
     "MERE": 0.0,
-    "cosine_sim": 0.9999999403953552,
+    "cosine_sim": 1.0,
     "passed": true
   },
   {
-    "case_id": 20,
+    "case_id": 24,
     "category": "Boundary",
     "description": "zero scale",
     "shape": [
@@ -971,11 +1171,11 @@
     "mean_abs_err": 0.0,
     "MARE": 0.0,
     "MERE": 0.0,
-    "cosine_sim": 1.0,
+    "cosine_sim": 0.9999999403953552,
     "passed": true
   },
   {
-    "case_id": 20,
+    "case_id": 24,
     "category": "Boundary",
     "description": "zero scale",
     "shape": [
@@ -996,74 +1196,24 @@
     "mean_abs_err": 0.0,
     "MARE": 0.0,
     "MERE": 0.0,
-    "cosine_sim": 1.0,
-    "passed": true
-  },
-  {
-    "case_id": 21,
-    "category": "Boundary",
-    "description": "negative scale",
-    "shape": [
-      9,
-      63,
-      65,
-      96
-    ],
-    "dtype": "float16",
-    "index_dtype": "int32",
-    "index_pattern": "expert_sorted",
-    "slice_offset": 7,
-    "scale": -0.5,
-    "threshold": 0.0009765625,
-    "alias_preserved": true,
-    "outside_slice_equal": true,
-    "max_abs_err": 0.0,
-    "mean_abs_err": 0.0,
-    "MARE": 0.0,
-    "MERE": 0.0,
-    "cosine_sim": 1.0,
-    "passed": true
-  },
-  {
-    "case_id": 21,
-    "category": "Boundary",
-    "description": "negative scale",
-    "shape": [
-      9,
-      63,
-      65,
-      96
-    ],
-    "dtype": "bfloat16",
-    "index_dtype": "int32",
-    "index_pattern": "expert_sorted",
-    "slice_offset": 7,
-    "scale": -0.5,
-    "threshold": 0.0078125,
-    "alias_preserved": true,
-    "outside_slice_equal": true,
-    "max_abs_err": 0.0,
-    "mean_abs_err": 0.0,
-    "MARE": 0.0,
-    "MERE": 0.0,
     "cosine_sim": 0.9999999403953552,
     "passed": true
   },
   {
-    "case_id": 22,
+    "case_id": 25,
     "category": "Boundary",
-    "description": "last valid slice",
+    "description": "negative scale",
     "shape": [
       9,
       63,
-      33,
-      97
+      65,
+      96
     ],
     "dtype": "float16",
-    "index_dtype": "int64",
+    "index_dtype": "int32",
     "index_pattern": "expert_sorted",
-    "slice_offset": 64,
-    "scale": 1.0,
+    "slice_offset": 7,
+    "scale": -0.5,
     "threshold": 0.0009765625,
     "alias_preserved": true,
     "outside_slice_equal": true,
@@ -1075,7 +1225,57 @@
     "passed": true
   },
   {
-    "case_id": 22,
+    "case_id": 25,
+    "category": "Boundary",
+    "description": "negative scale",
+    "shape": [
+      9,
+      63,
+      65,
+      96
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int32",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 7,
+    "scale": -0.5,
+    "threshold": 0.0078125,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "cosine_sim": 1.0,
+    "passed": true
+  },
+  {
+    "case_id": 26,
+    "category": "Boundary",
+    "description": "last valid slice",
+    "shape": [
+      9,
+      63,
+      33,
+      97
+    ],
+    "dtype": "float16",
+    "index_dtype": "int64",
+    "index_pattern": "expert_sorted",
+    "slice_offset": 64,
+    "scale": 1.0,
+    "threshold": 0.0009765625,
+    "alias_preserved": true,
+    "outside_slice_equal": true,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "cosine_sim": 0.9999998807907104,
+    "passed": true
+  },
+  {
+    "case_id": 26,
     "category": "Boundary",
     "description": "last valid slice",
     "shape": [
@@ -1096,7 +1296,7 @@
     "mean_abs_err": 0.0,
     "MARE": 0.0,
     "MERE": 0.0,
-    "cosine_sim": 1.0,
+    "cosine_sim": 0.9999999403953552,
     "passed": true
   }
 ]

@@ -13,6 +13,9 @@ from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MOE_LORA_FUSED_BGMV_MIN_ROWS = 512
+MOE_LORA_FUSED_BGMV_WIDE_OUTPUT_MIN_ROWS = 1024
+MOE_LORA_FUSED_BGMV_MAX_INPUT_DIM = 4096
+MOE_LORA_FUSED_BGMV_MAX_OUTPUT_DIM = 4096
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -436,6 +439,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             full_rank = b.shape[-1]
             out_size = b.shape[-2]
             a_flat = a.view(-1, local_rank, a.shape[-1])
+            wide_output_rows_supported = (
+                out_size <= 2048
+                or x2d.shape[0] >= MOE_LORA_FUSED_BGMV_WIDE_OUTPUT_MIN_ROWS
+            )
 
             use_fused_bgmv = (
                 getattr(self, "moe_lora_bgmv_fused", None) is not None
@@ -444,8 +451,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 and local_rank == 16
                 and full_rank == 16
                 and x2d.shape[0] >= MOE_LORA_FUSED_BGMV_MIN_ROWS
-                and x2d.shape[1] <= 2048
-                and out_size <= 2048
+                and x2d.shape[1] <= MOE_LORA_FUSED_BGMV_MAX_INPUT_DIM
+                and out_size <= MOE_LORA_FUSED_BGMV_MAX_OUTPUT_DIM
+                and wide_output_rows_supported
             )
             if use_fused_bgmv:
                 b_flat = b.view(-1, out_size, full_rank)

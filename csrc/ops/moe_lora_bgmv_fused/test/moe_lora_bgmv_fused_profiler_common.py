@@ -72,6 +72,33 @@ def specs(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return values
 
 
+def resize_real_tensor(
+    tensor: torch.Tensor,
+    target_shape: tuple[int, ...],
+) -> torch.Tensor:
+    """Deterministically crop/repeat a real tensor to a target kernel shape."""
+    if tensor.ndim != len(target_shape):
+        raise ValueError(
+            f"cannot resize rank-{tensor.ndim} tensor to {target_shape}"
+        )
+    result = tensor
+    for dim, target_size in enumerate(target_shape):
+        source_size = result.shape[dim]
+        if source_size == target_size:
+            continue
+        if dim == 0:
+            raise ValueError(
+                "the routed-row/expert dimension must match the checkpoint"
+            )
+        if target_size < source_size:
+            result = result.narrow(dim, 0, target_size)
+            continue
+        repeats = [1] * result.ndim
+        repeats[dim] = (target_size + source_size - 1) // source_size
+        result = result.repeat(repeats).narrow(dim, 0, target_size)
+    return result.contiguous()
+
+
 def tensor_fingerprint(tensor: torch.Tensor) -> str:
     raw = tensor.contiguous().view(torch.uint16).numpy().tobytes()
     return hashlib.sha256(raw).hexdigest()[:16]

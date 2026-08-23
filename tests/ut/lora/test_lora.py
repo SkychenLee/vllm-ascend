@@ -194,6 +194,76 @@ def test_punica_fully_sharded_moe_reduces_partial_rank() -> None:
     assert expand_args[4] == 5
 
 
+@pytest.mark.parametrize(
+    ("rows", "input_hidden", "output_hidden"),
+    [(512, 4096, 256), (1024, 256, 4096), (1024, 4096, 4096)],
+)
+def test_punica_uses_fused_bgmv_for_4096_boundaries(
+    rows: int,
+    input_hidden: int,
+    output_hidden: int,
+) -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.moe_lora_bgmv_fused = Mock()
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+    wrapper.add_lora_fused_moe(
+        y=torch.zeros(rows, output_hidden, dtype=torch.float16),
+        x=torch.zeros(rows, input_hidden, dtype=torch.float16),
+        lora_a_stacked=(
+            torch.zeros(1, 1, 16, input_hidden, dtype=torch.float16),
+        ),
+        lora_b_stacked=(
+            torch.zeros(1, 1, output_hidden, 16, dtype=torch.float16),
+        ),
+        adapter_enabled=torch.tensor([1]),
+        combined_indices=torch.zeros(rows, dtype=torch.int32),
+    )
+
+    wrapper.moe_lora_bgmv_fused.assert_called_once()
+    wrapper.bgmv_shrink.assert_not_called()
+    wrapper.bgmv_expand_slice.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("rows", "input_hidden", "output_hidden", "rank"),
+    [
+        (511, 256, 256, 16),
+        (512, 4097, 256, 16),
+        (512, 256, 4097, 16),
+        (512, 256, 4096, 16),
+        (512, 256, 256, 8),
+    ],
+)
+def test_punica_falls_back_for_unsupported_fused_bgmv_shapes(
+    rows: int,
+    input_hidden: int,
+    output_hidden: int,
+    rank: int,
+) -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.moe_lora_bgmv_fused = Mock()
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+
+    wrapper.add_lora_fused_moe(
+        y=torch.zeros(rows, output_hidden, dtype=torch.float16),
+        x=torch.zeros(rows, input_hidden, dtype=torch.float16),
+        lora_a_stacked=(
+            torch.zeros(1, 1, rank, input_hidden, dtype=torch.float16),
+        ),
+        lora_b_stacked=(
+            torch.zeros(1, 1, output_hidden, rank, dtype=torch.float16),
+        ),
+        adapter_enabled=torch.tensor([1]),
+        combined_indices=torch.zeros(rows, dtype=torch.int32),
+    )
+
+    wrapper.moe_lora_bgmv_fused.assert_not_called()
+    wrapper.bgmv_shrink.assert_called_once()
+    wrapper.bgmv_expand_slice.assert_called_once()
+
+
 def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:
     context = SimpleNamespace(
         top_k=2,
