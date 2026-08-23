@@ -19,8 +19,8 @@ THRESHOLD = {
 }
 
 # category, description, M, H, O, Y, slice offset, index dtype,
-# index pattern, scale, optional boundary mode
-PRECISION_CASES = (
+# index pattern, scale, optional boundary mode, optional rank (default 16)
+BASE_PRECISION_CASES = (
     ("Grouped", "single 4-row group", 4, 64, 64, 64, 0, torch.int32, "group4_same", 1.0, None),
     ("Grouped", "two groups with slice", 8, 128, 96, 160, 32, torch.int64, "group4_same", 0.5, None),
     ("MoE", "small W2-like", 16, 512, 512, 512, 0, torch.int32, "expert_sorted", 1.0, None),
@@ -47,7 +47,78 @@ PRECISION_CASES = (
     ("Boundary", "zero scale", 9, 63, 65, 96, 7, torch.int64, "expert_sorted", 0.0, None),
     ("Boundary", "negative scale", 9, 63, 65, 96, 7, torch.int32, "expert_sorted", -0.5, None),
     ("Boundary", "last valid slice", 9, 63, 33, 97, 64, torch.int64, "expert_sorted", 1.0, None),
+    ("Boundary", "zero rows", 0, 64, 64, 64, 0, torch.int32, "single", 1.0, None, 8),
 )
+
+
+def _generic_boundary_cases() -> tuple[tuple[Any, ...], ...]:
+    cases = []
+    for rank in (8, 16, 32, 64):
+        output_tile = 8192 // rank
+        cases.extend(
+            (
+                (
+                    "Generic",
+                    f"rank{rank} H8191 O=P-1",
+                    2,
+                    8191,
+                    output_tile - 1,
+                    output_tile + 6,
+                    3,
+                    torch.int32,
+                    "single",
+                    1.0,
+                    None,
+                    rank,
+                ),
+                (
+                    "Generic",
+                    f"rank{rank} H8192 O=P",
+                    3,
+                    8192,
+                    output_tile,
+                    output_tile + 7,
+                    3,
+                    torch.int64,
+                    "mixed_within4",
+                    0.5,
+                    None,
+                    rank,
+                ),
+                (
+                    "Generic",
+                    f"rank{rank} H8193 O=P+1",
+                    5,
+                    8193,
+                    output_tile + 1,
+                    output_tile + 8,
+                    3,
+                    torch.int32,
+                    "expert_sorted",
+                    -0.25,
+                    None,
+                    rank,
+                ),
+                (
+                    "Generic",
+                    f"rank{rank} maximum H/O",
+                    1,
+                    16384,
+                    16384,
+                    16384,
+                    0,
+                    torch.int64,
+                    "single",
+                    1.0,
+                    None,
+                    rank,
+                ),
+            )
+        )
+    return tuple(cases)
+
+
+PRECISION_CASES = BASE_PRECISION_CASES + _generic_boundary_cases()
 
 _OPS_LOADED = False
 
@@ -113,11 +184,11 @@ def make_inputs(
         pattern,
         scale,
         boundary,
-    ) = case
+    ) = case[:11]
     indices = build_indices(rows, pattern, index_dtype)
     if boundary == "all_negative":
         indices.fill_(-1)
-    num_weights = max(int(indices.max().item()) + 1, 1)
+    num_weights = max(int(indices.max().item()) + 1, 1) if rows else 1
     if boundary == "minimum_index":
         num_weights = 5
         indices.zero_()
@@ -126,7 +197,7 @@ def make_inputs(
         indices.fill_(num_weights - 1)
 
     generator = torch.Generator().manual_seed(20260823 + case_id)
-    rank = 16
+    rank = int(case[11]) if len(case) > 11 else 16
     return {
         "x": _positive_random((rows, input_hidden), generator, dtype),
         "a": _positive_random(
@@ -174,6 +245,14 @@ def reference(inputs: dict[str, Any], chunk_rows: int = 64) -> torch.Tensor:
 
 
 def compute_metrics(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
+    if actual.numel() == 0:
+        return {
+            "max_abs_err": 0.0,
+            "mean_abs_err": 0.0,
+            "MARE": 0.0,
+            "MERE": 0.0,
+            "cosine_sim": 1.0,
+        }
     actual_f = actual.float()
     expected_f = expected.float()
     abs_err = (actual_f - expected_f).abs()
@@ -233,6 +312,7 @@ def evaluate_case(
         "category": category,
         "description": description,
         "shape": [case[2], case[3], case[4], case[5]],
+        "rank": int(inputs["a"].shape[1]),
         "dtype": dtype_name(dtype),
         "index_dtype": dtype_name(case[7]),
         "index_pattern": case[8],

@@ -91,6 +91,8 @@ namespace vllm_ascend {
         uint32_t output_full_dim,
         uint32_t slice_offset,
         uint32_t rows_per_core,
+        uint32_t core_num,
+        uint32_t rank,
         float scale,
         bool indices_is_int32);
 

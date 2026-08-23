@@ -117,12 +117,13 @@ def test_punica_fully_sharded_moe_gathers_rank_shards() -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
 
     def shrink(_, __, output, ___, ____):
-        output.copy_(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+        output.copy_(torch.arange(16, dtype=torch.float32).view(2, 8))
 
+    wrapper.moe_lora_bgmv_fused = Mock()
     wrapper.bgmv_shrink = Mock(side_effect=shrink)
     wrapper.bgmv_expand_slice = Mock()
-    lora_a = (torch.zeros(2, 2, 2, 3),)
-    lora_b = (torch.zeros(2, 2, 5, 4),)
+    lora_a = (torch.zeros(2, 2, 8, 3, dtype=torch.float16),)
+    lora_b = (torch.zeros(2, 2, 5, 16, dtype=torch.float16),)
 
     with (
         patch(
@@ -132,8 +133,8 @@ def test_punica_fully_sharded_moe_gathers_rank_shards() -> None:
         patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_reduce") as all_reduce,
     ):
         wrapper.add_lora_fused_moe(
-            y=torch.zeros(2, 5),
-            x=torch.zeros(2, 3),
+            y=torch.zeros(2, 5, dtype=torch.float16),
+            x=torch.zeros(2, 3, dtype=torch.float16),
             lora_a_stacked=lora_a,
             lora_b_stacked=lora_b,
             expert_ids=torch.tensor([0, 1]),
@@ -144,12 +145,19 @@ def test_punica_fully_sharded_moe_gathers_rank_shards() -> None:
 
     all_gather.assert_called_once()
     all_reduce.assert_not_called()
+    wrapper.moe_lora_bgmv_fused.assert_not_called()
     expand_args = wrapper.bgmv_expand_slice.call_args.args
     assert torch.equal(
         expand_args[0],
-        torch.tensor([[1.0, 2.0, 11.0, 12.0], [3.0, 4.0, 13.0, 14.0]]),
+        torch.cat(
+            (
+                torch.arange(16, dtype=torch.float32).view(2, 8),
+                torch.arange(16, dtype=torch.float32).view(2, 8) + 10,
+            ),
+            dim=-1,
+        ),
     )
-    assert expand_args[1].shape == (4, 5, 4)
+    assert expand_args[1].shape == (4, 5, 16)
     assert torch.equal(expand_args[3], torch.tensor([0, 3]))
 
 
@@ -157,12 +165,13 @@ def test_punica_fully_sharded_moe_reduces_partial_rank() -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
 
     def shrink(_, __, output, ___, ____):
-        output.copy_(torch.arange(8, dtype=torch.float32).view(2, 4))
+        output.copy_(torch.arange(16, dtype=torch.float32).view(2, 8))
 
+    wrapper.moe_lora_bgmv_fused = Mock()
     wrapper.bgmv_shrink = Mock(side_effect=shrink)
     wrapper.bgmv_expand_slice = Mock()
-    lora_a = (torch.zeros(2, 2, 4, 3),)
-    lora_b = (torch.zeros(2, 2, 5, 4),)
+    lora_a = (torch.zeros(2, 2, 8, 3, dtype=torch.float16),)
+    lora_b = (torch.zeros(2, 2, 5, 8, dtype=torch.float16),)
 
     with (
         patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather") as all_gather,
@@ -172,8 +181,8 @@ def test_punica_fully_sharded_moe_reduces_partial_rank() -> None:
         ) as all_reduce,
     ):
         wrapper.add_lora_fused_moe(
-            y=torch.zeros(2, 10),
-            x=torch.zeros(2, 3),
+            y=torch.zeros(2, 10, dtype=torch.float16),
+            x=torch.zeros(2, 3, dtype=torch.float16),
             lora_a_stacked=lora_a,
             lora_b_stacked=lora_b,
             expert_ids=torch.tensor([0, 1]),
@@ -185,36 +194,45 @@ def test_punica_fully_sharded_moe_reduces_partial_rank() -> None:
 
     all_gather.assert_not_called()
     all_reduce.assert_called_once()
+    wrapper.moe_lora_bgmv_fused.assert_not_called()
     expand_args = wrapper.bgmv_expand_slice.call_args.args
     assert torch.equal(
         expand_args[0],
-        torch.arange(8, dtype=torch.float32).view(2, 4) + 10,
+        torch.arange(16, dtype=torch.float32).view(2, 8) + 10,
     )
-    assert expand_args[1].shape == (4, 5, 4)
+    assert expand_args[1].shape == (4, 5, 8)
     assert expand_args[4] == 5
 
 
 @pytest.mark.parametrize(
-    ("rows", "input_hidden", "output_hidden"),
-    [(512, 4096, 256), (1024, 256, 4096), (1024, 4096, 4096)],
+    ("rows", "input_hidden", "output_hidden", "rank", "dtype"),
+    [
+        (6, 4096, 256, 16, torch.float16),
+        (6, 256, 4096, 16, torch.bfloat16),
+        (1, 4097, 256, 8, torch.float16),
+        (2, 256, 4097, 32, torch.bfloat16),
+        (3, 16384, 1, 64, torch.float16),
+    ],
 )
-def test_punica_uses_fused_bgmv_for_4096_boundaries(
+def test_punica_uses_fused_bgmv_for_supported_contract(
     rows: int,
     input_hidden: int,
     output_hidden: int,
+    rank: int,
+    dtype: torch.dtype,
 ) -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
     wrapper.moe_lora_bgmv_fused = Mock()
     wrapper.bgmv_shrink = Mock()
     wrapper.bgmv_expand_slice = Mock()
     wrapper.add_lora_fused_moe(
-        y=torch.zeros(rows, output_hidden, dtype=torch.float16),
-        x=torch.zeros(rows, input_hidden, dtype=torch.float16),
+        y=torch.zeros(rows, output_hidden, dtype=dtype),
+        x=torch.zeros(rows, input_hidden, dtype=dtype),
         lora_a_stacked=(
-            torch.zeros(1, 1, 16, input_hidden, dtype=torch.float16),
+            torch.zeros(1, 1, rank, input_hidden, dtype=dtype),
         ),
         lora_b_stacked=(
-            torch.zeros(1, 1, output_hidden, 16, dtype=torch.float16),
+            torch.zeros(1, 1, output_hidden, rank, dtype=dtype),
         ),
         adapter_enabled=torch.tensor([1]),
         combined_indices=torch.zeros(rows, dtype=torch.int32),
@@ -226,42 +244,116 @@ def test_punica_uses_fused_bgmv_for_4096_boundaries(
 
 
 @pytest.mark.parametrize(
-    ("rows", "input_hidden", "output_hidden", "rank"),
+    ("input_hidden", "output_hidden", "rank", "dtype", "fused_available"),
     [
-        (511, 256, 256, 16),
-        (512, 4097, 256, 16),
-        (512, 256, 4097, 16),
-        (512, 256, 4096, 16),
-        (512, 256, 256, 8),
+        (256, 256, 4, torch.float16, True),
+        (256, 256, 128, torch.float16, True),
+        (16385, 256, 16, torch.float16, True),
+        (256, 16385, 16, torch.bfloat16, True),
+        (256, 256, 16, torch.float32, True),
+        (256, 256, 16, torch.float16, False),
     ],
 )
-def test_punica_falls_back_for_unsupported_fused_bgmv_shapes(
-    rows: int,
+def test_punica_falls_back_outside_fused_bgmv_contract(
     input_hidden: int,
     output_hidden: int,
     rank: int,
+    dtype: torch.dtype,
+    fused_available: bool,
 ) -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    fused_op = Mock() if fused_available else None
+    wrapper.moe_lora_bgmv_fused = fused_op
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+
+    wrapper.add_lora_fused_moe(
+        y=torch.zeros(1, output_hidden, dtype=dtype),
+        x=torch.zeros(1, input_hidden, dtype=dtype),
+        lora_a_stacked=(
+            torch.zeros(1, 1, rank, input_hidden, dtype=dtype),
+        ),
+        lora_b_stacked=(
+            torch.zeros(1, 1, output_hidden, rank, dtype=dtype),
+        ),
+        adapter_enabled=torch.tensor([1]),
+        combined_indices=torch.zeros(1, dtype=torch.int32),
+    )
+
+    if fused_op is not None:
+        fused_op.assert_not_called()
+    wrapper.bgmv_shrink.assert_called_once()
+    wrapper.bgmv_expand_slice.assert_called_once()
+
+
+def test_punica_falls_back_for_mismatched_fused_bgmv_dtypes() -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
     wrapper.moe_lora_bgmv_fused = Mock()
     wrapper.bgmv_shrink = Mock()
     wrapper.bgmv_expand_slice = Mock()
 
     wrapper.add_lora_fused_moe(
-        y=torch.zeros(rows, output_hidden, dtype=torch.float16),
-        x=torch.zeros(rows, input_hidden, dtype=torch.float16),
-        lora_a_stacked=(
-            torch.zeros(1, 1, rank, input_hidden, dtype=torch.float16),
-        ),
-        lora_b_stacked=(
-            torch.zeros(1, 1, output_hidden, rank, dtype=torch.float16),
-        ),
+        y=torch.zeros(2, 5, dtype=torch.float16),
+        x=torch.zeros(2, 3, dtype=torch.float16),
+        lora_a_stacked=(torch.zeros(1, 1, 8, 3, dtype=torch.bfloat16),),
+        lora_b_stacked=(torch.zeros(1, 1, 5, 8, dtype=torch.float16),),
         adapter_enabled=torch.tensor([1]),
-        combined_indices=torch.zeros(rows, dtype=torch.int32),
+        combined_indices=torch.zeros(2, dtype=torch.int32),
     )
 
     wrapper.moe_lora_bgmv_fused.assert_not_called()
     wrapper.bgmv_shrink.assert_called_once()
     wrapper.bgmv_expand_slice.assert_called_once()
+
+
+def test_punica_mul_routed_weight_uses_split_bgmv() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+
+    def shrink(_, __, output, ___, ____):
+        output.copy_(torch.arange(16, dtype=torch.float32).view(2, 8))
+
+    wrapper.moe_lora_bgmv_fused = Mock()
+    wrapper.bgmv_shrink = Mock(side_effect=shrink)
+    wrapper.bgmv_expand_slice = Mock()
+    topk_weights = torch.tensor([0.5, -2.0], dtype=torch.float32)
+
+    wrapper.add_lora_fused_moe(
+        y=torch.zeros(2, 5, dtype=torch.float16),
+        x=torch.zeros(2, 3, dtype=torch.float16),
+        lora_a_stacked=(torch.zeros(1, 1, 8, 3, dtype=torch.float16),),
+        lora_b_stacked=(torch.zeros(1, 1, 5, 8, dtype=torch.float16),),
+        topk_weights=topk_weights,
+        adapter_enabled=torch.tensor([1]),
+        mul_routed_weight=True,
+        combined_indices=torch.zeros(2, dtype=torch.int32),
+    )
+
+    wrapper.moe_lora_bgmv_fused.assert_not_called()
+    wrapper.bgmv_shrink.assert_called_once()
+    wrapper.bgmv_expand_slice.assert_called_once()
+    expected_delta = torch.arange(16, dtype=torch.float32).view(2, 8) * topk_weights.view(-1, 1)
+    assert torch.equal(wrapper.bgmv_expand_slice.call_args.args[0], expected_delta)
+
+
+def test_punica_rank_mismatch_preserves_split_error() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.moe_lora_bgmv_fused = Mock()
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+
+    with pytest.raises(ValueError, match="A projection has rank 8, but LoRA B expects rank 16"):
+        wrapper.add_lora_fused_moe(
+            y=torch.zeros(2, 5, dtype=torch.float16),
+            x=torch.zeros(2, 3, dtype=torch.float16),
+            lora_a_stacked=(torch.zeros(1, 1, 8, 3, dtype=torch.float16),),
+            lora_b_stacked=(torch.zeros(1, 1, 5, 16, dtype=torch.float16),),
+            adapter_enabled=torch.tensor([1]),
+            combined_indices=torch.zeros(2, dtype=torch.int32),
+        )
+
+    wrapper.moe_lora_bgmv_fused.assert_not_called()
+    wrapper.bgmv_shrink.assert_called_once()
+    wrapper.bgmv_expand_slice.assert_not_called()
 
 
 def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:

@@ -12,10 +12,10 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-MOE_LORA_FUSED_BGMV_MIN_ROWS = 512
-MOE_LORA_FUSED_BGMV_WIDE_OUTPUT_MIN_ROWS = 1024
-MOE_LORA_FUSED_BGMV_MAX_INPUT_DIM = 4096
-MOE_LORA_FUSED_BGMV_MAX_OUTPUT_DIM = 4096
+MOE_LORA_FUSED_BGMV_SUPPORTED_RANKS = frozenset((8, 16, 32, 64))
+MOE_LORA_FUSED_BGMV_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
+MOE_LORA_FUSED_BGMV_MIN_DIM = 1
+MOE_LORA_FUSED_BGMV_MAX_DIM = 16384
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -439,21 +439,24 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             full_rank = b.shape[-1]
             out_size = b.shape[-2]
             a_flat = a.view(-1, local_rank, a.shape[-1])
-            wide_output_rows_supported = (
-                out_size <= 2048
-                or x2d.shape[0] >= MOE_LORA_FUSED_BGMV_WIDE_OUTPUT_MIN_ROWS
+
+            fused_dtype_supported = (
+                x2d.dtype in MOE_LORA_FUSED_BGMV_SUPPORTED_DTYPES
+                and x2d.dtype == a.dtype == b.dtype == y2d.dtype
+            )
+            fused_dims_supported = (
+                MOE_LORA_FUSED_BGMV_MIN_DIM <= x2d.shape[1] <= MOE_LORA_FUSED_BGMV_MAX_DIM
+                and MOE_LORA_FUSED_BGMV_MIN_DIM <= out_size <= MOE_LORA_FUSED_BGMV_MAX_DIM
             )
 
             use_fused_bgmv = (
                 getattr(self, "moe_lora_bgmv_fused", None) is not None
                 and not fully_sharded
                 and not mul_routed_weight
-                and local_rank == 16
-                and full_rank == 16
-                and x2d.shape[0] >= MOE_LORA_FUSED_BGMV_MIN_ROWS
-                and x2d.shape[1] <= MOE_LORA_FUSED_BGMV_MAX_INPUT_DIM
-                and out_size <= MOE_LORA_FUSED_BGMV_MAX_OUTPUT_DIM
-                and wide_output_rows_supported
+                and local_rank == full_rank
+                and local_rank in MOE_LORA_FUSED_BGMV_SUPPORTED_RANKS
+                and fused_dtype_supported
+                and fused_dims_supported
             )
             if use_fused_bgmv:
                 b_flat = b.view(-1, out_size, full_rank)

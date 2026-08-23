@@ -30,15 +30,19 @@ namespace vllm_ascend {
 
 namespace {
 
-constexpr uint32_t kRank = 16;
+constexpr uint32_t kFastRank = 16;
 constexpr uint32_t kDefaultGroupRows = 8;
 constexpr uint32_t kWideInputGroupRows = 4;
 constexpr uint32_t kOutputTileElements = 512;
-constexpr uint32_t kWeightTileElements = kOutputTileElements * kRank;
+constexpr uint32_t kWeightTileElements =
+    kOutputTileElements * kFastRank;
+constexpr uint32_t kGenericTileElements = 8192;
+constexpr uint32_t kGenericReduceTmpBytes = 512;
 constexpr uint32_t kWideInputThreshold = 2048;
-constexpr uint32_t kMaxInputHiddenDim = 4096;
-constexpr uint32_t kMaxOutputHiddenDim = 4096;
+constexpr uint32_t kFastMaxHiddenDim = 4096;
+constexpr uint32_t kMaxHiddenDim = 16384;
 constexpr uint32_t kFp32ReuseMinRows = 2048;
+constexpr uint32_t kBalancedCoreMaxRows = 1024;
 
 struct BgmvFusedDeviceResources {
     uint32_t vectorCoreNum;
@@ -67,7 +71,9 @@ const BgmvFusedDeviceResources& GetBgmvFusedDeviceResources()
                 &ubBytes) == ACL_SUCCESS,
             "moe_lora_bgmv_fused: failed to query UB capacity");
         TORCH_CHECK(
-            vectorCoreNum > 0,
+            vectorCoreNum > 0 &&
+                static_cast<uint64_t>(vectorCoreNum) <=
+                    std::numeric_limits<uint32_t>::max(),
             "moe_lora_bgmv_fused: invalid Vector Core count");
         return BgmvFusedDeviceResources{
             static_cast<uint32_t>(vectorCoreNum),
@@ -76,43 +82,124 @@ const BgmvFusedDeviceResources& GetBgmvFusedDeviceResources()
     return resources;
 }
 
+uint64_t CheckedAdd(
+    uint64_t lhs,
+    uint64_t rhs,
+    const char* description)
+{
+    TORCH_CHECK(
+        rhs <= std::numeric_limits<uint64_t>::max() - lhs,
+        "moe_lora_bgmv_fused: ", description, " overflows uint64");
+    return lhs + rhs;
+}
+
+uint64_t CheckedMultiply(
+    uint64_t lhs,
+    uint64_t rhs,
+    const char* description)
+{
+    TORCH_CHECK(
+        lhs == 0 || rhs <= std::numeric_limits<uint64_t>::max() / lhs,
+        "moe_lora_bgmv_fused: ", description, " overflows uint64");
+    return lhs * rhs;
+}
+
+uint64_t CeilDivide(uint64_t value, uint64_t divisor)
+{
+    TORCH_CHECK(
+        divisor != 0,
+        "moe_lora_bgmv_fused: ceil-divisor must be non-zero");
+    return value / divisor + (value % divisor != 0 ? 1 : 0);
+}
+
 uint64_t AlignUp32Bytes(uint64_t bytes)
 {
     constexpr uint64_t blockBytes = 32;
-    return (bytes + blockBytes - 1) / blockBytes * blockBytes;
+    return CheckedMultiply(
+        CeilDivide(bytes, blockBytes), blockBytes, "aligned buffer size");
 }
 
-uint64_t CalculateUbBytes(
+void AddAlignedBufferBytes(
+    uint64_t& totalBytes,
+    uint64_t elementCount,
+    uint64_t elementBytes)
+{
+    const uint64_t bufferBytes = AlignUp32Bytes(CheckedMultiply(
+        elementCount, elementBytes, "UB buffer size"));
+    totalBytes = CheckedAdd(totalBytes, bufferBytes, "total UB size");
+}
+
+uint32_t CheckedUint32(uint64_t value, const char* description)
+{
+    TORCH_CHECK(
+        value <= std::numeric_limits<uint32_t>::max(),
+        "moe_lora_bgmv_fused: ", description,
+        " exceeds uint32 launch limits");
+    return static_cast<uint32_t>(value);
+}
+
+bool IsSupportedRank(int64_t rank)
+{
+    return rank == 8 || rank == 16 || rank == 32 || rank == 64;
+}
+
+uint64_t CalculateFastUbBytes(
     uint32_t inputHiddenDim,
     uint32_t indexElementBytes,
     uint32_t dataElementBytes,
     bool reuseFp32Weight,
     uint32_t groupRows)
 {
-    const uint32_t weightBufferElements = std::max(
+    const uint64_t weightBufferElements = std::max<uint64_t>(
         inputHiddenDim, kWeightTileElements);
     uint64_t bytes = 0;
-    bytes += AlignUp32Bytes(groupRows * indexElementBytes);
-    bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(groupRows) * inputHiddenDim *
+    AddAlignedBufferBytes(bytes, groupRows, indexElementBytes);
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(groupRows, inputHiddenDim, "grouped input size"),
         dataElementBytes);
-    bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(weightBufferElements) * dataElementBytes);
-    bytes += 2 * AlignUp32Bytes(
-        static_cast<uint64_t>(kOutputTileElements) * dataElementBytes);
-    bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(groupRows) * inputHiddenDim *
+    AddAlignedBufferBytes(bytes, weightBufferElements, dataElementBytes);
+    AddAlignedBufferBytes(bytes, kOutputTileElements, dataElementBytes);
+    AddAlignedBufferBytes(bytes, kOutputTileElements, dataElementBytes);
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(groupRows, inputHiddenDim, "grouped FP32 input size"),
         sizeof(float));
     if (reuseFp32Weight) {
-        bytes += AlignUp32Bytes(
-            static_cast<uint64_t>(weightBufferElements) * sizeof(float));
+        AddAlignedBufferBytes(bytes, weightBufferElements, sizeof(float));
     }
-    bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(weightBufferElements) * sizeof(float));
-    bytes += AlignUp32Bytes(groupRows * kRank * sizeof(float));
-    bytes += AlignUp32Bytes(256);
-    bytes += 2 * AlignUp32Bytes(
-        kOutputTileElements * sizeof(float));
+    AddAlignedBufferBytes(bytes, weightBufferElements, sizeof(float));
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(groupRows, kFastRank, "grouped rank size"),
+        sizeof(float));
+    AddAlignedBufferBytes(bytes, 256, 1);
+    AddAlignedBufferBytes(bytes, kOutputTileElements, sizeof(float));
+    AddAlignedBufferBytes(bytes, kOutputTileElements, sizeof(float));
+    return bytes;
+}
+
+uint64_t CalculateGenericUbBytes(
+    uint32_t rank,
+    uint32_t outputHiddenDim,
+    uint32_t indexElementBytes,
+    uint32_t dataElementBytes)
+{
+    const uint64_t outputTileElements = kGenericTileElements / rank;
+    uint64_t bytes = 0;
+    AddAlignedBufferBytes(bytes, 1, indexElementBytes);
+    AddAlignedBufferBytes(bytes, kGenericTileElements, dataElementBytes);
+    AddAlignedBufferBytes(bytes, kGenericTileElements, dataElementBytes);
+    AddAlignedBufferBytes(bytes, outputHiddenDim, dataElementBytes);
+    AddAlignedBufferBytes(bytes, kGenericTileElements, sizeof(float));
+    AddAlignedBufferBytes(bytes, kGenericTileElements, sizeof(float));
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(2, rank, "Generic rank partial size"),
+        sizeof(float));
+    AddAlignedBufferBytes(bytes, kGenericReduceTmpBytes, 1);
+    AddAlignedBufferBytes(bytes, outputTileElements, sizeof(float));
+    AddAlignedBufferBytes(bytes, outputTileElements, sizeof(float));
     return bytes;
 }
 
@@ -162,9 +249,13 @@ at::Tensor moe_lora_bgmv_fused(
     TORCH_CHECK(
         loraA.size(0) == loraB.size(0),
         "moe_lora_bgmv_fused: lora_a and lora_b weight counts must match");
+    const int64_t rank64 = loraA.size(1);
     TORCH_CHECK(
-        loraA.size(1) == kRank && loraB.size(2) == kRank,
-        "moe_lora_bgmv_fused: only rank 16 is supported");
+        loraB.size(2) == rank64,
+        "moe_lora_bgmv_fused: lora_b rank must match lora_a rank");
+    TORCH_CHECK(
+        IsSupportedRank(rank64),
+        "moe_lora_bgmv_fused: rank must be one of 8, 16, 32 or 64");
     TORCH_CHECK(
         loraA.size(2) == x.size(1),
         "moe_lora_bgmv_fused: lora_a input dimension must match x");
@@ -172,15 +263,15 @@ at::Tensor moe_lora_bgmv_fused(
         sliceSize == loraB.size(1),
         "moe_lora_bgmv_fused: slice_size must match lora_b output dimension");
     TORCH_CHECK(
-        sliceOffset >= 0 && sliceSize > 0 &&
+        sliceOffset >= 0 && sliceSize > 0 && sliceSize <= y.size(1) &&
             sliceOffset <= y.size(1) - sliceSize,
         "moe_lora_bgmv_fused: output slice is out of range");
     TORCH_CHECK(
-        x.size(1) > 0 && x.size(1) <= kMaxInputHiddenDim,
-        "moe_lora_bgmv_fused: input hidden dimension must be in [1, 4096]");
+        x.size(1) > 0 && x.size(1) <= kMaxHiddenDim,
+        "moe_lora_bgmv_fused: input hidden dimension must be in [1, 16384]");
     TORCH_CHECK(
-        sliceSize <= kMaxOutputHiddenDim,
-        "moe_lora_bgmv_fused: output hidden dimension must be <= 4096");
+        sliceSize <= kMaxHiddenDim,
+        "moe_lora_bgmv_fused: output hidden dimension must be in [1, 16384]");
     TORCH_CHECK(
         std::isfinite(scale),
         "moe_lora_bgmv_fused: scale must be finite");
@@ -198,28 +289,49 @@ at::Tensor moe_lora_bgmv_fused(
     if (numRows64 == 0) {
         return y;
     }
-    TORCH_CHECK(
-        numRows64 <= std::numeric_limits<uint32_t>::max() &&
-            x.size(1) <= std::numeric_limits<uint32_t>::max() &&
-            sliceSize <= std::numeric_limits<uint32_t>::max() &&
-            y.size(1) <= std::numeric_limits<uint32_t>::max() &&
-            sliceOffset <= std::numeric_limits<uint32_t>::max(),
-        "moe_lora_bgmv_fused: shape exceeds uint32 launch limits");
+    const uint32_t numRows = CheckedUint32(
+        static_cast<uint64_t>(numRows64), "row count");
+    const uint32_t inputHiddenDim = CheckedUint32(
+        static_cast<uint64_t>(x.size(1)), "input hidden dimension");
+    const uint32_t outputHiddenDim = CheckedUint32(
+        static_cast<uint64_t>(sliceSize), "output hidden dimension");
+    const uint32_t outputFullDim = CheckedUint32(
+        static_cast<uint64_t>(y.size(1)), "full output dimension");
+    const uint32_t sliceOffset32 = CheckedUint32(
+        static_cast<uint64_t>(sliceOffset), "slice offset");
+    const uint32_t rank = CheckedUint32(
+        static_cast<uint64_t>(rank64), "rank");
 
     const BgmvFusedDeviceResources& resources =
         GetBgmvFusedDeviceResources();
     const uint32_t indexElementBytes =
         indices.scalar_type() == at::kInt ? sizeof(int32_t) : sizeof(int64_t);
-    const uint32_t groupRows =
-        x.size(1) > kWideInputThreshold ?
-        kWideInputGroupRows : kDefaultGroupRows;
-    const uint64_t requiredUbBytes = CalculateUbBytes(
-        static_cast<uint32_t>(x.size(1)),
-        indexElementBytes,
-        static_cast<uint32_t>(x.element_size()),
-        numRows64 >= kFp32ReuseMinRows ||
-            x.size(1) != kWideInputThreshold,
-        groupRows);
+    const uint32_t dataElementBytes = CheckedUint32(
+        static_cast<uint64_t>(x.element_size()), "data element size");
+    const bool useFastKernel =
+        rank == kFastRank &&
+        inputHiddenDim <= kFastMaxHiddenDim &&
+        outputHiddenDim <= kFastMaxHiddenDim;
+    const bool reuseFp32Weight =
+        numRows >= kFp32ReuseMinRows ||
+        inputHiddenDim != kWideInputThreshold ||
+        outputHiddenDim > kWideInputThreshold;
+    const uint32_t groupRows = useFastKernel ?
+        (inputHiddenDim > kWideInputThreshold ?
+            kWideInputGroupRows : kDefaultGroupRows) :
+        1;
+    const uint64_t requiredUbBytes = useFastKernel ?
+        CalculateFastUbBytes(
+            inputHiddenDim,
+            indexElementBytes,
+            dataElementBytes,
+            reuseFp32Weight,
+            groupRows) :
+        CalculateGenericUbBytes(
+            rank,
+            outputHiddenDim,
+            indexElementBytes,
+            dataElementBytes);
     if (resources.ubBytes != 0) {
         TORCH_CHECK(
             requiredUbBytes <= resources.ubBytes,
@@ -227,25 +339,34 @@ at::Tensor moe_lora_bgmv_fused(
             " UB bytes, but device reports ", resources.ubBytes);
     }
 
-    const uint32_t numRows = static_cast<uint32_t>(numRows64);
-    uint32_t desiredCoreNum = (numRows + groupRows - 1) / groupRows;
-    if (desiredCoreNum > resources.vectorCoreNum) {
-        desiredCoreNum = resources.vectorCoreNum;
+    const bool useBalancedRows =
+        !useFastKernel || numRows <= kBalancedCoreMaxRows;
+    uint64_t desiredCoreNum64 = 0;
+    if (useBalancedRows) {
+        desiredCoreNum64 = std::min<uint64_t>(
+            numRows, resources.vectorCoreNum);
+    } else {
+        desiredCoreNum64 = std::min<uint64_t>(
+            CeilDivide(numRows, groupRows), resources.vectorCoreNum);
     }
-    uint32_t rowsPerCore =
-        (numRows + desiredCoreNum - 1) / desiredCoreNum;
-    rowsPerCore =
-        (rowsPerCore + groupRows - 1) / groupRows * groupRows;
+    uint64_t rowsPerCore64 = CeilDivide(numRows, desiredCoreNum64);
+    if (!useBalancedRows) {
+        rowsPerCore64 = CheckedMultiply(
+            CeilDivide(rowsPerCore64, groupRows),
+            groupRows,
+            "aligned rows per core");
+    }
+    const uint64_t coreNum64 = useBalancedRows ?
+        desiredCoreNum64 : CeilDivide(numRows, rowsPerCore64);
+    const uint32_t rowsPerCore = CheckedUint32(
+        rowsPerCore64, "rows per core");
+    const uint32_t coreNum = CheckedUint32(coreNum64, "core count");
 
     void* xPtr = x.data_ptr();
     void* aPtr = loraA.data_ptr();
     void* bPtr = loraB.data_ptr();
     void* indicesPtr = indices.data_ptr();
     void* yPtr = y.data_ptr();
-    const uint32_t inputHiddenDim = static_cast<uint32_t>(x.size(1));
-    const uint32_t outputHiddenDim = static_cast<uint32_t>(sliceSize);
-    const uint32_t outputFullDim = static_cast<uint32_t>(y.size(1));
-    const uint32_t sliceOffset32 = static_cast<uint32_t>(sliceOffset);
     const float scaleFloat = static_cast<float>(scale);
     const bool indicesIsInt32 = indices.scalar_type() == at::kInt;
     const AscendType ascendType = GetBgmvFusedAscendType(scalarType);
@@ -267,6 +388,8 @@ at::Tensor moe_lora_bgmv_fused(
         outputFullDim,
         sliceOffset32,
         rowsPerCore,
+        coreNum,
+        rank,
         scaleFloat,
         indicesIsInt32
     ]() -> int {
@@ -284,6 +407,8 @@ at::Tensor moe_lora_bgmv_fused(
             outputFullDim,
             sliceOffset32,
             rowsPerCore,
+            coreNum,
+            rank,
             scaleFloat,
             indicesIsInt32);
         return 0;

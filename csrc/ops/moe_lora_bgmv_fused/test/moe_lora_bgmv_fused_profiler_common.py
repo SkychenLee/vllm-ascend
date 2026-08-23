@@ -29,6 +29,11 @@ DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
 }
+INDEX_DTYPE_MAP = {
+    "int32": torch.int32,
+    "int64": torch.int64,
+}
+SUPPORTED_RANKS = (8, 16, 32, 64)
 
 
 @dataclass
@@ -129,6 +134,8 @@ def _load_rank_weights(
 
 
 def load_real_weights(model_root: Path, rank: int) -> RealWeights:
+    if rank not in SUPPORTED_RANKS:
+        raise ValueError(f"rank must be one of {SUPPORTED_RANKS}, got {rank}")
     config = json.loads((model_root / "config.json").read_text(encoding="utf-8"))
     text_config = config.get("text_config", config)
     if text_config.get("model_type") != "qwen3_5_moe_text":
@@ -188,14 +195,23 @@ def build_route(
     weights: RealWeights,
     tokens: int,
     top_k: int,
+    routed_rows: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     repeats = (tokens + weights.router.shape[0] - 1) // weights.router.shape[0]
     hidden = weights.router.repeat((repeats, 1))[:tokens].contiguous()
     logits = hidden.float() @ weights.router.float().T
     topk_ids = torch.topk(logits, top_k, dim=1).indices.to(torch.int32)
     flat_experts = topk_ids.reshape(-1)
+    repeated_hidden = hidden.repeat_interleave(top_k, dim=0)
+    if routed_rows is not None:
+        if routed_rows <= 0 or routed_rows > flat_experts.numel():
+            raise ValueError(
+                f"routed_rows must be in [1, {flat_experts.numel()}]"
+            )
+        flat_experts = flat_experts[:routed_rows]
+        repeated_hidden = repeated_hidden[:routed_rows]
     permutation = torch.argsort(flat_experts, stable=True)
-    sorted_hidden = hidden.repeat_interleave(top_k, dim=0)[permutation].contiguous()
+    sorted_hidden = repeated_hidden[permutation].contiguous()
     sorted_experts = flat_experts[permutation].contiguous()
     return sorted_hidden, sorted_experts
 
@@ -236,8 +252,19 @@ def compute_metrics(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, f
     expected_f = expected.float()
     abs_err = (actual_f - expected_f).abs()
     rel_err = abs_err / (expected_f.abs() + 1e-7)
+    expected_norm = torch.linalg.vector_norm(expected_f)
+    error_norm = torch.linalg.vector_norm(actual_f - expected_f)
+    cosine = torch.nn.functional.cosine_similarity(
+        actual_f.flatten().unsqueeze(0),
+        expected_f.flatten().unsqueeze(0),
+    ).item()
     return {
         "max_abs_err": abs_err.max().item(),
+        "mean_abs_err": abs_err.mean().item(),
+        "expected_abs_max": expected_f.abs().max().item(),
+        "expected_abs_mean": expected_f.abs().mean().item(),
+        "relative_l2": (error_norm / expected_norm.clamp_min(1e-12)).item(),
+        "cosine_sim": cosine,
         "MERE": rel_err.mean().item(),
         "MARE": rel_err.max().item(),
     }
@@ -335,6 +362,28 @@ def profile_forward(forward: Callable[[], torch.Tensor], handler_dir: str) -> fl
                 raise
             time.sleep(0.2)
     return _sum_total_time_us(csv_path) / PROFILER_SCHEDULE_ACTIVE
+
+
+def screen_forward(
+    forward: Callable[[], torch.Tensor],
+    reset_output: Callable[[], None],
+    warmup: int,
+    iterations: int,
+) -> float:
+    """Return synchronized wall time per call for quick crossover screening."""
+    if warmup < 0 or iterations <= 0:
+        raise ValueError("screen warmup must be non-negative and iterations positive")
+    reset_output()
+    for _ in range(warmup):
+        forward()
+    torch.npu.synchronize()
+    reset_output()
+    torch.npu.synchronize()
+    begin = time.perf_counter_ns()
+    for _ in range(iterations):
+        forward()
+    torch.npu.synchronize()
+    return (time.perf_counter_ns() - begin) / iterations / 1000.0
 
 
 def summarize_breakdown(

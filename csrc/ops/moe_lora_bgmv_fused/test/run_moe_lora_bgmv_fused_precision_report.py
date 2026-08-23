@@ -60,8 +60,8 @@ def render_markdown(results: list[dict]) -> str:
         "",
         "## 用例结果",
         "",
-        "| # | 类别 | 描述 | Shape(M,H,O,Y) | dtype | index dtype | MERE | MARE | MaxAbs | alias/slice | 结果 |",
-        "| ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        "| # | 类别 | 描述 | Shape(M,H,O,Y) | rank | dtype | index dtype | MERE | MARE | MaxAbs | alias/slice | 结果 |",
+        "| ---: | --- | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- | --- |",
     ]
     for result in results:
         alias_slice = (
@@ -69,7 +69,7 @@ def render_markdown(results: list[dict]) -> str:
         )
         lines.append(
             f"| {result['case_id']} | {result['category']} | {result['description']} "
-            f"| {result['shape']} | {result['dtype']} | {result['index_dtype']} "
+            f"| {result['shape']} | {result['rank']} | {result['dtype']} | {result['index_dtype']} "
             f"| {_scientific(result['MERE'])} | {_scientific(result['MARE'])} "
             f"| {_scientific(result['max_abs_err'])} | {alias_slice} "
             f"| {_status(result['passed'])} |"
@@ -98,9 +98,9 @@ def render_markdown(results: list[dict]) -> str:
             "",
             "## 关键发现",
             "",
-            f"1. 共 {len(results)} 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4/8-row 复用和尾块。",
+            f"1. 共 {len(results)} 个 FP16/BF16 与 int32/int64 组合，覆盖 rank 8/16/32/64、M=0、1-row fallback、4/8-row 复用和尾块。",
             f"2. expert-sorted 快速路径覆盖 {len(grouped)} 例，mixed/alternating fallback 覆盖 {len(fallback)} 例。",
-            "3. 非 32B 对齐 H/O、slice offset、负/零 scale、全 -1 index 和最大合法 index 均纳入验证。",
+            "3. 非 32B 对齐 H/O、8191/8192/8193/16384 边界、P-1/P/P+1、slice offset、负/零 scale、全 -1 index 和最大合法 index均纳入验证。",
             "4. 每个用例同时检查返回 alias 和 slice 外逐元素不变，避免只验证数值而漏掉 in-place 语义。",
             "5. DeepSeek-V4-Flash 的 TP8 4096->256、256->4096 和完整 4096->2048、2048->4096 形状均已覆盖。",
             "",
