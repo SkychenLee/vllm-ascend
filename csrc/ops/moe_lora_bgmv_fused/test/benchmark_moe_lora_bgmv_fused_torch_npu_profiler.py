@@ -206,7 +206,7 @@ def render_report(
             "## 简短分析",
             "",
             "- 融合路径取消 FP32 rank 中间结果的 GM 往返和一次 kernel launch。",
-            "- expert-sorted indices 可命中 4-row 权重复用快路径；大 token case 用于验证带宽收益是否随分组长度增长。",
+            "- expert-sorted indices 可优先命中 8-row 权重复用快路径，并保留 4-row fallback；大 token case 用于验证带宽收益是否随分组长度增长。",
             "- W13 与 W2 分开统计，可区分 H=2048 shrink 压力和 O=2048 expand 压力。",
             "- checkpoint 没有对应 LoRA adapter；A/B 是真实 expert 权重的 rank-16 子块，适合评估 kernel 访存形态，但不代表训练 LoRA 精度。",
             "",

@@ -23,7 +23,8 @@ public:
     using DataT = scalar_t;
 
     static constexpr uint32_t kRank = 16;
-    static constexpr uint32_t kGroupRows = 4;
+    static constexpr uint32_t kGroupRows = 8;
+    static constexpr uint32_t kFallbackGroupRows = 4;
     static constexpr uint32_t kOutputTileElements = 512;
     static constexpr uint32_t kWeightTileElements =
         kOutputTileElements * kRank;
@@ -125,7 +126,7 @@ public:
             AscendC::LocalTensor<index_t> indicesLocal =
                 CopyInIndices(row, currentRows);
 
-            if (currentRows == kGroupRows &&
+            if (currentRows >= kFallbackGroupRows &&
                 inputHiddenDim_ % kFloatElementsPerBlock == 0) {
                 const int64_t index0 =
                     static_cast<int64_t>(indicesLocal.GetValue(0));
@@ -135,16 +136,45 @@ public:
                     static_cast<int64_t>(indicesLocal.GetValue(2));
                 const int64_t index3 =
                     static_cast<int64_t>(indicesLocal.GetValue(3));
+                if (currentRows == kGroupRows) {
+                    const int64_t index4 =
+                        static_cast<int64_t>(indicesLocal.GetValue(4));
+                    const int64_t index5 =
+                        static_cast<int64_t>(indicesLocal.GetValue(5));
+                    const int64_t index6 =
+                        static_cast<int64_t>(indicesLocal.GetValue(6));
+                    const int64_t index7 =
+                        static_cast<int64_t>(indicesLocal.GetValue(7));
+                    if (index0 == index1 && index0 == index2 &&
+                        index0 == index3 && index0 == index4 &&
+                        index0 == index5 && index0 == index6 &&
+                        index0 == index7) {
+                        indicesQueue_.FreeTensor(indicesLocal);
+                        if (index0 >= 0) {
+                            ProcessGroup<kGroupRows>(
+                                row, static_cast<uint64_t>(index0));
+                        }
+                        row += kGroupRows;
+                        continue;
+                    }
+                }
                 if (index0 == index1 && index0 == index2 &&
                     index0 == index3) {
                     indicesQueue_.FreeTensor(indicesLocal);
                     if (index0 >= 0) {
-                        ProcessGroup<kGroupRows>(
+                        ProcessGroup<kFallbackGroupRows>(
                             row, static_cast<uint64_t>(index0));
                     }
-                    row += kGroupRows;
+                    row += kFallbackGroupRows;
                     continue;
                 }
+
+                indicesQueue_.FreeTensor(indicesLocal);
+                if (index0 >= 0) {
+                    ProcessGroup<1>(row, static_cast<uint64_t>(index0));
+                }
+                row += 1;
+                continue;
             }
 
             for (uint32_t localRow = 0; localRow < currentRows; ++localRow) {

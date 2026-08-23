@@ -14,7 +14,8 @@ y[row, slice] += rank_out[row] @ B[indices[row]].T
 
 当前两个 kernel 会把 FP32 rank 中间结果写入 GM，再由 expand 读回；并且每个
 token 都重新从 GM 搬入相同 expert/adapter 的 A/B 权重。新算子把 rank=16 中间
-结果留在 UB，并在连续 4 行具有相同 index 时复用 A/B 权重搬运。
+结果留在 UB，并在连续 8 行具有相同 index 时优先复用 A/B 权重搬运，
+不足 8 行时保留 4-row 快速路径。
 
 PyTorch 和 NumPy 没有同名接口。本算子是 vLLM-Ascend 内部 in-place 自定义算子，
 语义以本设计为准。
@@ -86,31 +87,31 @@ y[m, slice_offset + o] = cast_dtype(float(y[m, slice_offset + o]) + d[m, o])
 其中 `k in [0, 16)`、`o in [0, O)`。FP16/BF16 输入全部 Cast 到 FP32 计算，
 最终按 `CAST_RINT` 转回输出 dtype。
 
-### 2.1 4-row 分组快速路径
+### 2.1 8/4-row 分组快速路径
 
 AllGather MoE 的 routed rows 已按 expert 排序；相同 adapter 下，同一 expert 的
-`combined_idx` 连续。Kernel 每次观察连续 4 行：
+`combined_idx` 连续。Kernel 每次最多观察连续 8 行：
 
 ```cpp
-index0 = indices[row + 0];
-index1 = indices[row + 1];
-index2 = indices[row + 2];
-index3 = indices[row + 3];
-if (H % 8 == 0 &&
-    index0 == index1 && index0 == index2 && index0 == index3) {
+if (H % 8 == 0 && indices[row:row+8] 全部相同) {
     if (index0 >= 0) {
-        ProcessGroup<4>(row, index0);  // A/B 每个 tile 只从 GM 搬一次
+        ProcessGroup<8>(row, index0);
+    }
+    row += 8;
+} else if (H % 8 == 0 && indices[row:row+4] 全部相同) {
+    if (index0 >= 0) {
+        ProcessGroup<4>(row, index0);
     }
     row += 4;
 } else {
-    ProcessGroup<1>(row, index0);      // 任意 index 排列的正确性回退
+    ProcessGroup<1>(row, index0);
     row += 1;
 }
 ```
 
 该判断只影响性能，不改变结果；不要求 `indices` 全局有序。FP32 X 每行起始地址
-必须 32B 对齐，因此 `H` 不是 8 的倍数时也逐行处理。`-1` 的 4-row group 直接
-跳过，mixed index 逐行处理。
+必须 32B 对齐，因此 `H` 不是 8 的倍数时也逐行处理。`-1` 的 8/4-row group
+直接跳过，mixed index 逐行处理。
 
 ### 2.2 AscendC API 序列
 
@@ -130,8 +131,9 @@ for (rank = 0; rank < 16; ++rank) {
 }
 ```
 
-`R` 为 4 或 1。X 每行只从 GM 搬一次；4-row 快速路径中每个 A rank row 只从
-GM 搬一次。`ReduceSum` 后不复用其源数据，下一行先重新 Cast A 到 `weightFp32`。
+`R` 为 8、4 或 1。X 每行只从 GM 搬一次；分组快速路径中每个 A rank row 每组
+只从 GM 搬一次。`ReduceSum` 后不复用其源数据，下一行先重新 Cast A 到
+`weightFp32`。
 
 #### Expand 阶段
 
@@ -157,9 +159,9 @@ for (output_begin = 0; output_begin < O; output_begin += 512) {
 }
 ```
 
-B 的 BF16/FP16 local tensor在 4 行之间保留；每行重新 Cast 后原地 Mul，避免额外
-32 KiB FP32 B 副本。这样保留现有 expand 的归约顺序，同时将 B 的 GM 流量最多
-降低到原来的 1/4。
+B 的 BF16/FP16 local tensor 在 8 行或 4 行之间保留；每行重新 Cast 后原地 Mul，
+避免额外 32 KiB FP32 B 副本。这样保留现有 expand 的归约顺序，同时将 B 的 GM
+流量最多降低到原来的 1/8。
 
 ### 2.3 实现路径选择
 
@@ -170,7 +172,7 @@ B 的 BF16/FP16 local tensor在 4 行之间保留；每行重新 Cast 后原地 
 虽然数学上包含两个小矩阵乘，但每行动态选择不同权重，rank 固定为 16，且需要
 in-place slice add。直接调用常规 GEMM 仍需先做动态分组、workspace permutation
 和 scatter。第一版采用 AscendC Vector kernel，在不增加动态 shape/workspace 的
-前提下利用现有 expert-sorted 局部性。若 4-row 复用仍达不到目标，再评估带显式
+前提下利用现有 expert-sorted 局部性。若 8-row 复用仍达不到目标，再评估带显式
 group offsets 的 CATLASS/Grouped GEMM v3。
 
 ## 3. Tiling 策略
@@ -186,7 +188,7 @@ struct MoeLoraBgmvFusedTilingData {
     uint32_t sliceOffset;
     uint32_t rowsPerCore;
     uint32_t blockDim;
-    uint32_t groupRows;          // 4
+    uint32_t groupRows;          // 8，保留 4-row fallback
     uint32_t outputTileRows;     // 512
     uint32_t rank;               // 16
     float scale;
@@ -200,21 +202,21 @@ dtype 和 index dtype 通过不同模板 kernel 入口选择，不在 Device 热
 Host 通过 `ACL_DEV_ATTR_VECTOR_CORE_NUM` 获取 AIV 数量，不硬编码核数：
 
 ```text
-desiredCoreNum = min(vectorCoreNum, ceil(M / 4))
-rowsPerCore = align_up(ceil(M / desiredCoreNum), 4)
+desiredCoreNum = min(vectorCoreNum, ceil(M / 8))
+rowsPerCore = align_up(ceil(M / desiredCoreNum), 8)
 blockDim = ceil(M / rowsPerCore)
 ```
 
-每个 Core 处理连续且以 4-row 对齐的区间。这样只会在 Core 边界拆开少量
+每个 Core 处理连续且以 8-row 对齐的区间。这样只会在 Core 边界拆开少量
 combined-index group，同时保证不同 Core 写入不同的 y 行，不需要 atomic 或核间同步。
 
 Python 集成层仅在 `M >= 512` 时选择新算子；小 shape 继续走现有 kernel，避免
-4-row 分组判断和更大 UB 初始化增加 decode 延迟。该阈值是命名常量，最终根据
+8/4-row 分组判断和更大 UB 初始化增加 decode 延迟。该阈值是命名常量，最终根据
 1/2/8/32/128/256/512/1024-token msprof 结果调整。
 
 ### 3.3 UB 级切分
 
-第一版约束 `H <= 2048`、`O <= 2048`。Shrink 一次保存最多 4 行 X；Expand 将
+第一版约束 `H <= 2048`、`O <= 2048`。Shrink 一次保存最多 8 行 X；Expand 将
 输出按 512 元素切分，B tile 固定最多 8192 元素。
 
 ```text
@@ -229,29 +231,30 @@ weightTileElements = 512 * 16 = 8192
 
 | Buffer | 单位大小 | 数量 | 最大字节 | 阶段复用 |
 |---|---:|---:|---:|---|
-| `indicesQueue` | `4 * sizeof(index_t)` | 1 | 32 | 搬入 int32/int64 index |
-| `xQueue` | `4 * H_a * 2` | 1 | 16,384 | 搬入 4 行 FP16/BF16 X |
+| `indicesQueue` | `8 * sizeof(index_t)` | 1 | 64 | 搬入 int32/int64 index |
+| `xQueue` | `8 * H_a * 2` | 1 | 32,768 | 搬入 8 行 FP16/BF16 X |
 | `weightQueue` | `W_t * 2` | 1 | 16,384 | A rank row / B output tile |
-| `xFp32Buffer` | `4 * H_a * 4` | 1 | 32,768 | shrink X；expand rank duplicate |
+| `xFp32Buffer` | `8 * H_a * 4` | 1 | 65,536 | shrink X；expand rank duplicate |
 | `weightFp32Buffer` | `W_t * 4` | 1 | 32,768 | A/B Cast、Mul、Reduce |
-| `rankBuffer` | `4 * 16 * 4` | 1 | 256 | FP32 shrink 中间结果 |
+| `rankBuffer` | `8 * 16 * 4` | 1 | 512 | FP32 shrink 中间结果 |
 | `reduceTmpBuffer` | 256 | 1 | 256 | FP32 `ReduceSum` 临时区 |
 | `yInputQueue` | `O_t * 2` | 1 | 1,024 | 原 y slice |
 | `yOutputQueue` | `O_t * 2` | 1 | 1,024 | 更新后的 y slice |
 | `yInputFp32` | `O_t * 4` | 1 | 2,048 | y 升精度 |
 | `yAccumFp32` | `O_t * 4` | 1 | 2,048 | expand 归约结果 + y |
-| **总计** |  |  | **104,992** | 小于 910B 每核 UB |
+| **总计** |  |  | **154,432** | 小于 910B 每核 UB |
 
 FP16 和 BF16 的元素大小相同，因此 UB 公式一致：
 
 ```text
-ubBytes = 24 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 544
-bufferCoefficient(FP16) = 24 bytes/input-column + 12 bytes/output-element
-bufferCoefficient(BF16) = 24 bytes/input-column + 12 bytes/output-element
-fixed/reusable weight region = 6 * max(H_a, 8192) + 544 bytes
+ubBytes(int64 index) = 48 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 832
+bufferCoefficient(FP16) = 48 bytes/input-column + 12 bytes/output-element
+bufferCoefficient(BF16) = 48 bytes/input-column + 12 bytes/output-element
+fixed/reusable weight region = 6 * max(H_a, 8192) + 832 bytes
 ```
 
-最大 shape `H=2048, O_t=512` 使用 104,992 bytes。Host 查询
+最大 shape `H=2048, O_t=512`、int64 index 使用 154,432 bytes；int32 index 使用
+154,400 bytes。Host 查询
 `ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE`；当 CANN 9.0 在 910B3 返回 0 时，不把 0
 当成真实容量，而依赖上述已封顶的 shape/UB 证明。若平台返回非零 UB，则必须验证
 `ubBytes <= queriedUbBytes`，否则拒绝调用并由 Python 回退旧路径。
@@ -263,7 +266,8 @@ fixed/reusable weight region = 6 * max(H_a, 8192) + 544 bytes
 算子不需要 workspace。输出 y 由调用方提供并原地更新；rank 中间结果只存在于 UB。
 
 所有 shape、blockDim 和 buffer 大小只依赖 Tensor shape；Device 读取 indices 值只
-决定走 4-row 或 1-row 分支，不产生动态输出 shape，也不执行 Host `.item()`，因此
+决定走 8-row、4-row 或 1-row 分支，不产生动态输出 shape，也不执行 Host
+`.item()`，因此
 支持 ACL Graph capture/replay。
 
 ## 5. 性能规划
@@ -285,7 +289,8 @@ W13 和 W2 分别比较，并继续运行完整 W13 -> SiLU/Mul -> W2 真实权�
 ### 5.2 收益来源
 
 1. 取消 `[M, 16]` FP32 rank tensor 的 GM 写回、读回和一次 kernel launch。
-2. 连续 4 行 index 相同时，A/B 权重 GM 搬运最多降到原来的 1/4。
+2. 连续 8 行 index 相同时，A/B 权重 GM 搬运最多降到原来的 1/8；短分组保留
+   4-row 路径。
 3. X 在 shrink 的 16 个 rank 归约中常驻 FP32 UB，不重复从 GM 搬运。
 4. rank=16 编译期特化，移除运行时 rank 分支。
 5. mixed index 自动使用 1-row 路径，不额外构造 permutation/workspace。
@@ -299,8 +304,8 @@ W13 和 W2 分别比较，并继续运行完整 W13 -> SiLU/Mul -> W2 真实权�
   才默认启用新路径。
 - 1/2/8/32-token 必须保持旧路径，端到端不得回退。
 
-预期是访存与 Vector 计算混合受限。4-row 路径主要减少 A/B GM 流量；Cast、Mul、
-Reduce 指令数量基本不变，因此 4 倍权重流量下降不等于 4 倍 kernel 加速。
+预期是访存与 Vector 计算混合受限。8/4-row 路径主要减少 A/B GM 流量；Cast、
+Mul、Reduce 指令数量基本不变，因此权重流量下降不会线性转化为 kernel 加速。
 
 ## 6. Kernel 实现要点
 
@@ -311,7 +316,7 @@ Reduce 指令数量基本不变，因此 4 倍权重流量下降不等于 4 倍 
 5. Expand 复用现有 rank=16 的 `BlockReduceSum + PairReduceSum` 指令组合。
 6. 高维 `Copy` 的 `repeatTime <= 4`，不会超过 255。
 7. 不向 kernel 传右值；Host 将 `scale` 转为 FP32 局部变量后捕获并传入。
-8. Core 范围按 4 行对齐，不同 Core 不写同一个 y cache line。
+8. Core 范围按 8 行对齐，不同 Core 不写同一个 y cache line。
 
 ## 7. Python 集成策略
 
@@ -338,7 +343,7 @@ routed-weight multiply 和 expand 路径。该策略不改变 `fully_sharded` �
 
 - 至少 30 个 shape/dtype/index 组合。
 - FP16/BF16，int32/int64 index。
-- 全有效、全 `-1`、mixed index、连续 4 行相同 index、完全不分组。
+- 全有效、全 `-1`、mixed index、连续 8/4 行相同 index、完全不分组。
 - 非 32B 对齐的 H/O 尾部。
 - slice offset、in-place add、scale 非 1。
 - 与 `bgmv_shrink + bgmv_expand` 严格 parity，并与 PyTorch FP32 参考做 allclose。

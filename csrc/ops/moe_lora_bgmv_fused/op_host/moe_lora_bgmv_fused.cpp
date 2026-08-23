@@ -31,7 +31,7 @@ namespace vllm_ascend {
 namespace {
 
 constexpr uint32_t kRank = 16;
-constexpr uint32_t kGroupRows = 4;
+constexpr uint32_t kGroupRows = 8;
 constexpr uint32_t kOutputTileElements = 512;
 constexpr uint32_t kWeightTileElements = kOutputTileElements * kRank;
 constexpr uint32_t kMaxHiddenDim = 2048;
