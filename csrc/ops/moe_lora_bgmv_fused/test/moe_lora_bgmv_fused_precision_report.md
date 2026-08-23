@@ -1,7 +1,7 @@
 # `moe_lora_bgmv_fused` 精度验证报告
 
 - 测试平台：Ascend 910B3（物理 NPU 7）
-- 测试时间：2026-08-23T09:04:14+00:00
+- 测试时间：2026-08-23T09:23:17+00:00
 - 参考实现：PyTorch CPU FP32 两阶段 BMM，最终 Cast 回输出 dtype。
 
 ## 总览
@@ -78,7 +78,7 @@ slice 外数据必须逐元素不变。
 
 ## 关键发现
 
-1. 共 44 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4-row 复用和尾块。
+1. 共 44 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4/8-row 复用和尾块。
 2. expert-sorted 快速路径覆盖 22 例，mixed/alternating fallback 覆盖 6 例。
 3. 非 32B 对齐 H/O、slice offset、负/零 scale、全 -1 index 和最大合法 index 均纳入验证。
 4. 每个用例同时检查返回 alias 和 slice 外逐元素不变，避免只验证数值而漏掉 in-place 语义。

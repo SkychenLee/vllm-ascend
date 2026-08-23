@@ -99,6 +99,8 @@ uint64_t CalculateUbBytes(
         sizeof(float));
     bytes += AlignUp32Bytes(
         static_cast<uint64_t>(weightBufferElements) * sizeof(float));
+    bytes += AlignUp32Bytes(
+        static_cast<uint64_t>(weightBufferElements) * sizeof(float));
     bytes += AlignUp32Bytes(kGroupRows * kRank * sizeof(float));
     bytes += AlignUp32Bytes(256);
     bytes += 2 * AlignUp32Bytes(

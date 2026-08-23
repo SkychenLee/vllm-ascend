@@ -98,7 +98,7 @@ def render_markdown(results: list[dict]) -> str:
             "",
             "## 关键发现",
             "",
-            f"1. 共 {len(results)} 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4-row 复用和尾块。",
+            f"1. 共 {len(results)} 个 FP16/BF16 与 int32/int64 组合，覆盖 1-row fallback、4/8-row 复用和尾块。",
             f"2. expert-sorted 快速路径覆盖 {len(grouped)} 例，mixed/alternating fallback 覆盖 {len(fallback)} 例。",
             "3. 非 32B 对齐 H/O、slice offset、负/零 scale、全 -1 index 和最大合法 index 均纳入验证。",
             "4. 每个用例同时检查返回 alias 和 slice 外逐元素不变，避免只验证数值而漏掉 in-place 语义。",

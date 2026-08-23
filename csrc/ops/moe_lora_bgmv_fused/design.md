@@ -122,18 +122,18 @@ DataCopyPad(xLocal, xGm[row:row+R, :]);
 Cast(xFp32, xLocal, CAST_NONE, R * H);
 for (rank = 0; rank < 16; ++rank) {
     DataCopyPad(weightLocal, aGm[index, rank, :]);
+    Cast(weightFp32, weightLocal, CAST_NONE, H);
     for (r = 0; r < R; ++r) {
-        Cast(weightFp32, weightLocal, CAST_NONE, H);
-        Mul(weightFp32, xFp32[r * H], weightFp32, H);
-        ReduceSum(weightFp32, weightFp32, weightFp32, H);
-        rankLocal[r, rank] = weightFp32.GetValue(0) * scale;
+        Mul(productFp32, xFp32[r * H], weightFp32, H);
+        ReduceSum(rankLocal[r, rank], productFp32, reduceTmp, H);
     }
 }
+Muls(rankLocal, rankLocal, scale, R * 16);
 ```
 
 `R` 为 8、4 或 1。X 每行只从 GM 搬一次；分组快速路径中每个 A rank row 每组
-只从 GM 搬一次。`ReduceSum` 后不复用其源数据，下一行先重新 Cast A 到
-`weightFp32`。
+只从 GM 搬一次并 Cast 一次。独立的 `productFp32` 接收 Mul 和 Reduce 结果，保留
+`weightFp32` 供组内后续行复用。
 
 #### Expand 阶段
 
@@ -142,10 +142,10 @@ for (rank = 0; rank < 16; ++rank) {
 ```cpp
 for (output_begin = 0; output_begin < O; output_begin += 512) {
     DataCopyPad(weightLocal, bGm[index, output_begin, 0]);
+    Cast(weightFp32, weightLocal, CAST_NONE, tile_outputs * 16);
     for (r = 0; r < R; ++r) {
         Copy(rankDup, rankLocal[r], rank=16, repeat=4);
-        Cast(weightFp32, weightLocal, CAST_NONE, tile_outputs * 16);
-        Mul(weightFp32, rankDup, weightFp32,
+        Mul(productFp32, rankDup, weightFp32,
             mask=64, repeat=ceil(tile_outputs * 16 / 64),
             src0RepStride=0);
         BlockReduceSum(...);
@@ -159,9 +159,10 @@ for (output_begin = 0; output_begin < O; output_begin += 512) {
 }
 ```
 
-B 的 BF16/FP16 local tensor 在 8 行或 4 行之间保留；每行重新 Cast 后原地 Mul，
-避免额外 32 KiB FP32 B 副本。这样保留现有 expand 的归约顺序，同时将 B 的 GM
-流量最多降低到原来的 1/8。
+B 的 BF16/FP16 local tensor 和 FP32 Cast 结果在 8 行或 4 行之间保留；每行只把
+Mul/Reduce 结果写入独立的 FP32 product buffer。这样在额外使用 32 KiB UB 的
+前提下保留现有 expand 归约顺序，并将 B 的 GM 流量和 Cast 指令最多降到原来的
+1/8。
 
 ### 2.3 实现路径选择
 
@@ -235,26 +236,27 @@ weightTileElements = 512 * 16 = 8192
 | `xQueue` | `8 * H_a * 2` | 1 | 32,768 | 搬入 8 行 FP16/BF16 X |
 | `weightQueue` | `W_t * 2` | 1 | 16,384 | A rank row / B output tile |
 | `xFp32Buffer` | `8 * H_a * 4` | 1 | 65,536 | shrink X；expand rank duplicate |
-| `weightFp32Buffer` | `W_t * 4` | 1 | 32,768 | A/B Cast、Mul、Reduce |
+| `weightFp32Buffer` | `W_t * 4` | 1 | 32,768 | 组内复用 A/B FP32 权重 |
+| `productFp32Buffer` | `W_t * 4` | 1 | 32,768 | Mul 与 Reduce scratch |
 | `rankBuffer` | `8 * 16 * 4` | 1 | 512 | FP32 shrink 中间结果 |
 | `reduceTmpBuffer` | 256 | 1 | 256 | FP32 `ReduceSum` 临时区 |
 | `yInputQueue` | `O_t * 2` | 1 | 1,024 | 原 y slice |
 | `yOutputQueue` | `O_t * 2` | 1 | 1,024 | 更新后的 y slice |
 | `yInputFp32` | `O_t * 4` | 1 | 2,048 | y 升精度 |
 | `yAccumFp32` | `O_t * 4` | 1 | 2,048 | expand 归约结果 + y |
-| **总计** |  |  | **154,432** | 小于 910B 每核 UB |
+| **总计** |  |  | **187,200** | 小于 910B 每核 192 KiB UB |
 
 FP16 和 BF16 的元素大小相同，因此 UB 公式一致：
 
 ```text
-ubBytes(int64 index) = 48 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 832
+ubBytes(int64 index) = 48 * H_a + 10 * max(H_a, 8192) + 12 * O_t + 832
 bufferCoefficient(FP16) = 48 bytes/input-column + 12 bytes/output-element
 bufferCoefficient(BF16) = 48 bytes/input-column + 12 bytes/output-element
-fixed/reusable weight region = 6 * max(H_a, 8192) + 832 bytes
+fixed/reusable weight region = 10 * max(H_a, 8192) + 832 bytes
 ```
 
-最大 shape `H=2048, O_t=512`、int64 index 使用 154,432 bytes；int32 index 使用
-154,400 bytes。Host 查询
+最大 shape `H=2048, O_t=512`、int64 index 使用 187,200 bytes；int32 index 使用
+187,168 bytes，距离 192 KiB UB 上限分别剩余 9,408/9,440 bytes。Host 查询
 `ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE`；当 CANN 9.0 在 910B3 返回 0 时，不把 0
 当成真实容量，而依赖上述已封顶的 shape/UB 证明。若平台返回非零 UB，则必须验证
 `ubBytes <= queriedUbBytes`，否则拒绝调用并由 Python 回退旧路径。
@@ -312,7 +314,7 @@ Mul、Reduce 指令数量基本不变，因此权重流量下降不会线性转�
 1. `TPipe` 在 kernel 入口创建并以指针传入类，避免 Scalar 常量折叠受阻。
 2. `DataCopyPad` 的长度和 repeat 参数均由 Host 已验证的 uint32 shape 派生。
 3. FP16/BF16 在 `Mul`、`ReduceSum` 和 `Add` 前 Cast 到 FP32。
-4. `ReduceSum` 后重新 Cast weight local，再处理下一行，禁止直接复用被归约的源 tensor。
+4. `ReduceSum` 使用独立 product tensor，保留 Cast 后的 weight tensor供组内复用。
 5. Expand 复用现有 rank=16 的 `BlockReduceSum + PairReduceSum` 指令组合。
 6. 高维 `Copy` 的 `repeatTime <= 4`，不会超过 255。
 7. 不向 kernel 传右值；Host 将 `scale` 转为 FP32 局部变量后捕获并传入。

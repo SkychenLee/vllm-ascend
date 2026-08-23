@@ -132,6 +132,6 @@ def build_indices(rows: int, pattern: str, dtype: torch.dtype) -> torch.Tensor:
 1. 每个 shape 同时覆盖 FP16 和 BF16；index dtype 按 shape 配置，并在边界回归中
    交换 int32/int64，确保四种 dtype 组合均被执行。
 2. 精度用例使用较小 `num_weights`，性能用例使用 Qwen3.5-35B-A3B 的 256 experts。
-3. `expert_sorted` 用于命中 4-row 快速路径；`alternating` 和 `mixed_within4` 用于验证
-   1-row 回退路径。
+3. `expert_sorted` 用于命中 8-row 快速路径；`group4_same` 覆盖 4-row fallback；
+   `alternating` 和 `mixed_within4` 用于验证 1-row 回退路径。
 4. 大 shape 只用于真实模型和性能评测；常规精度回归不重复构造超大 CPU gather。

@@ -100,6 +100,9 @@ public:
             weightFp32Buffer_,
             weightBufferElements * sizeof(float));
         pipe_->InitBuffer(
+            productFp32Buffer_,
+            weightBufferElements * sizeof(float));
+        pipe_->InitBuffer(
             rankBuffer_, kGroupRows * kRank * sizeof(float));
         pipe_->InitBuffer(reduceTmpBuffer_, kReduceTmpBytes);
         pipe_->InitBuffer(
@@ -261,6 +264,8 @@ private:
         AscendC::LocalTensor<float> xFp32 = xFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> weightFp32 =
             weightFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> productFp32 =
+            productFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> rankLocal = rankBuffer_.Get<float>();
         AscendC::LocalTensor<float> reduceTmp =
             reduceTmpBuffer_.Get<float>();
@@ -286,22 +291,23 @@ private:
             weightQueue_.EnQue(weightLocal);
             weightLocal = weightQueue_.DeQue<DataT>();
 
+            AscendC::Cast(
+                weightFp32,
+                weightLocal,
+                AscendC::RoundMode::CAST_NONE,
+                inputHiddenDim_);
+            AscendC::PipeBarrier<PIPE_V>();
+
             for (uint32_t localRow = 0; localRow < Rows; ++localRow) {
-                AscendC::Cast(
-                    weightFp32,
-                    weightLocal,
-                    AscendC::RoundMode::CAST_NONE,
-                    inputHiddenDim_);
-                AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Mul(
-                    weightFp32,
+                    productFp32,
                     xFp32[localRow * inputHiddenDim_],
                     weightFp32,
                     inputHiddenDim_);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::ReduceSum<float>(
                     rankLocal[localRow * kRank + rank],
-                    weightFp32,
+                    productFp32,
                     reduceTmp,
                     inputHiddenDim_);
                 AscendC::PipeBarrier<PIPE_V>();
@@ -327,6 +333,8 @@ private:
         AscendC::LocalTensor<float> rankDup = xFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> weightFp32 =
             weightFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> productFp32 =
+            productFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> yInputFp32 =
             yInputFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> yAccumFp32 =
@@ -358,6 +366,7 @@ private:
                 weightPadParams);
             weightQueue_.EnQue(weightLocal);
             weightLocal = weightQueue_.DeQue<DataT>();
+            CastWeight(weightFp32, weightLocal, weightElements);
 
             for (uint32_t localRow = 0; localRow < Rows; ++localRow) {
                 DuplicateRank(
@@ -365,9 +374,9 @@ private:
                     rankLocal[localRow * kRank]);
                 ExpandDot(
                     yAccumFp32,
-                    weightFp32,
+                    productFp32,
                     rankDup,
-                    weightLocal,
+                    weightFp32,
                     weightElements);
                 AddAndCopyOut(
                     startRow + localRow,
@@ -397,10 +406,8 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
-    __aicore__ inline void ExpandDot(
-        AscendC::LocalTensor<float> output,
+    __aicore__ inline void CastWeight(
         AscendC::LocalTensor<float> weightFp32,
-        AscendC::LocalTensor<float> rankDup,
         AscendC::LocalTensor<DataT> weightLocal,
         uint32_t weightElements)
     {
@@ -416,9 +423,33 @@ private:
                 kFloatElementsPerRepeat,
                 static_cast<uint8_t>(fullRepeats),
                 castParams_);
-            AscendC::PipeBarrier<PIPE_V>();
+        }
+        if (tailElements != 0) {
+            const uint32_t tailOffset =
+                fullRepeats * kFloatElementsPerRepeat;
+            AscendC::Cast(
+                weightFp32[tailOffset],
+                weightLocal[tailOffset],
+                AscendC::RoundMode::CAST_NONE,
+                tailElements);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void ExpandDot(
+        AscendC::LocalTensor<float> output,
+        AscendC::LocalTensor<float> productFp32,
+        AscendC::LocalTensor<float> rankDup,
+        AscendC::LocalTensor<float> weightFp32,
+        uint32_t weightElements)
+    {
+        const uint32_t fullRepeats =
+            weightElements / kFloatElementsPerRepeat;
+        const uint32_t tailElements =
+            weightElements % kFloatElementsPerRepeat;
+        if (fullRepeats != 0) {
             AscendC::Mul(
-                weightFp32,
+                productFp32,
                 rankDup,
                 weightFp32,
                 kFloatElementsPerRepeat,
@@ -429,14 +460,8 @@ private:
         if (tailElements != 0) {
             const uint32_t tailOffset =
                 fullRepeats * kFloatElementsPerRepeat;
-            AscendC::Cast(
-                weightFp32[tailOffset],
-                weightLocal[tailOffset],
-                AscendC::RoundMode::CAST_NONE,
-                tailElements);
-            AscendC::PipeBarrier<PIPE_V>();
             AscendC::Mul(
-                weightFp32[tailOffset],
+                productFp32[tailOffset],
                 rankDup,
                 weightFp32[tailOffset],
                 tailElements);
@@ -450,15 +475,15 @@ private:
             blockReduceRepeats * kFloatElementsPerRepeat;
         if (paddedWeightElements > weightElements) {
             AscendC::Duplicate(
-                weightFp32[weightElements],
+                productFp32[weightElements],
                 0.0f,
                 paddedWeightElements - weightElements);
             AscendC::PipeBarrier<PIPE_V>();
         }
 
         AscendC::BlockReduceSum(
-            weightFp32,
-            weightFp32,
+            productFp32,
+            productFp32,
             static_cast<uint8_t>(blockReduceRepeats),
             kFloatElementsPerRepeat,
             reduceSumParams_.dstRepStride,
@@ -475,7 +500,7 @@ private:
             pairReduceRepeats * kFloatElementsPerRepeat;
         if (paddedBlockOutputs > blockOutputs) {
             AscendC::Duplicate(
-                weightFp32[blockOutputs],
+                productFp32[blockOutputs],
                 0.0f,
                 paddedBlockOutputs - blockOutputs);
             AscendC::PipeBarrier<PIPE_V>();
@@ -483,7 +508,7 @@ private:
 
         AscendC::PairReduceSum(
             output,
-            weightFp32,
+            productFp32,
             static_cast<uint8_t>(pairReduceRepeats),
             kFloatElementsPerRepeat,
             reduceSumParams_.dstRepStride,
@@ -555,6 +580,7 @@ private:
     AscendC::TQue<AscendC::QuePosition::VECOUT, 1> yOutputQueue_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> xFp32Buffer_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> weightFp32Buffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> productFp32Buffer_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> rankBuffer_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> reduceTmpBuffer_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> yInputFp32Buffer_;
