@@ -1,0 +1,996 @@
+[
+  {
+    "suite": "routing",
+    "case_id": 1,
+    "category": "Decode",
+    "description": "1 token, DeepSeek top-k",
+    "shape": [
+      1,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 6,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 1,
+    "category": "Decode",
+    "description": "1 token, DeepSeek top-k",
+    "shape": [
+      1,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 6,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 2,
+    "category": "Decode",
+    "description": "2 tokens",
+    "shape": [
+      2,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 12,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 2,
+    "category": "Decode",
+    "description": "2 tokens",
+    "shape": [
+      2,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 12,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 3,
+    "category": "Decode",
+    "description": "8 tokens",
+    "shape": [
+      8,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 48,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 3,
+    "category": "Decode",
+    "description": "8 tokens",
+    "shape": [
+      8,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 48,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 4,
+    "category": "Decode",
+    "description": "32 tokens",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 4,
+    "category": "Decode",
+    "description": "32 tokens",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 5,
+    "category": "Prefill",
+    "description": "128 tokens",
+    "shape": [
+      128,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 768,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 5,
+    "category": "Prefill",
+    "description": "128 tokens",
+    "shape": [
+      128,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 768,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 6,
+    "category": "Prefill",
+    "description": "512 tokens",
+    "shape": [
+      512,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 3072,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 6,
+    "category": "Prefill",
+    "description": "512 tokens",
+    "shape": [
+      512,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 3072,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 7,
+    "category": "TopK",
+    "description": "top-k 1",
+    "shape": [
+      32,
+      1
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 32,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 7,
+    "category": "TopK",
+    "description": "top-k 1",
+    "shape": [
+      32,
+      1
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 32,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 8,
+    "category": "TopK",
+    "description": "top-k 2",
+    "shape": [
+      32,
+      2
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 64,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 8,
+    "category": "TopK",
+    "description": "top-k 2",
+    "shape": [
+      32,
+      2
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 64,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 9,
+    "category": "TopK",
+    "description": "top-k 8",
+    "shape": [
+      32,
+      8
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 256,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 9,
+    "category": "TopK",
+    "description": "top-k 8",
+    "shape": [
+      32,
+      8
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 256,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 10,
+    "category": "Experts",
+    "description": "small expert table",
+    "shape": [
+      16,
+      2
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 32,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 10,
+    "category": "Experts",
+    "description": "small expert table",
+    "shape": [
+      16,
+      2
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 32,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 11,
+    "category": "Small",
+    "description": "single pair",
+    "shape": [
+      1,
+      1
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 1,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 11,
+    "category": "Small",
+    "description": "single pair",
+    "shape": [
+      1,
+      1
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 1,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 12,
+    "category": "Small",
+    "description": "non-aligned 5 pairs",
+    "shape": [
+      5,
+      1
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 5,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 12,
+    "category": "Small",
+    "description": "non-aligned 5 pairs",
+    "shape": [
+      5,
+      1
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 5,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 13,
+    "category": "Small",
+    "description": "non-aligned 18 pairs",
+    "shape": [
+      3,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 18,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 13,
+    "category": "Small",
+    "description": "non-aligned 18 pairs",
+    "shape": [
+      3,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 18,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 14,
+    "category": "Large",
+    "description": "2048-token prefill",
+    "shape": [
+      2048,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 12288,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 14,
+    "category": "Large",
+    "description": "2048-token prefill",
+    "shape": [
+      2048,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 12288,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 15,
+    "category": "Large",
+    "description": "4096-token prefill",
+    "shape": [
+      4096,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 24576,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 15,
+    "category": "Large",
+    "description": "4096-token prefill",
+    "shape": [
+      4096,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 24576,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 16,
+    "category": "Capacity",
+    "description": "mapping capacity exceeds T",
+    "shape": [
+      17,
+      2
+    ],
+    "dtype": "bool",
+    "boundary": null,
+    "numel": 34,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 16,
+    "category": "Capacity",
+    "description": "mapping capacity exceeds T",
+    "shape": [
+      17,
+      2
+    ],
+    "dtype": "int8",
+    "boundary": null,
+    "numel": 34,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 17,
+    "category": "Boundary",
+    "description": "all token LoRA indices are -1",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": "all_no_lora",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 17,
+    "category": "Boundary",
+    "description": "all token LoRA indices are -1",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": "all_no_lora",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 18,
+    "category": "Boundary",
+    "description": "all adapters disabled",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": "all_disabled",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 18,
+    "category": "Boundary",
+    "description": "all adapters disabled",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": "all_disabled",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 19,
+    "category": "Boundary",
+    "description": "all adapters enabled",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": "all_enabled",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 19,
+    "category": "Boundary",
+    "description": "all adapters enabled",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": "all_enabled",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 20,
+    "category": "Boundary",
+    "description": "maximum valid LoRA/expert IDs",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": "max_ids",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 20,
+    "category": "Boundary",
+    "description": "maximum valid LoRA/expert IDs",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": "max_ids",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 21,
+    "category": "Boundary",
+    "description": "all nonzero routing positions negative",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "bool",
+    "boundary": "negative_expanded",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "routing",
+    "case_id": 21,
+    "category": "Boundary",
+    "description": "all nonzero routing positions negative",
+    "shape": [
+      32,
+      6
+    ],
+    "dtype": "int8",
+    "boundary": "negative_expanded",
+    "numel": 192,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 1,
+    "category": "shrink",
+    "description": "shrink int32/int64 index compatibility",
+    "shape": [
+      7,
+      8
+    ],
+    "dtype": "float16",
+    "index_dtype": "int32",
+    "numel": 56,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.02,
+    "max_abs_err": 1.9073486328125e-06,
+    "mean_abs_err": 3.714646652497322e-07,
+    "MARE": 0.0001847709936555475,
+    "MERE": 3.398305125301704e-06,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 2,
+    "category": "shrink",
+    "description": "shrink int32/int64 index compatibility",
+    "shape": [
+      7,
+      8
+    ],
+    "dtype": "float16",
+    "index_dtype": "int64",
+    "numel": 56,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.02,
+    "max_abs_err": 1.9073486328125e-06,
+    "mean_abs_err": 3.714646652497322e-07,
+    "MARE": 0.0001847709936555475,
+    "MERE": 3.398305125301704e-06,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 3,
+    "category": "shrink",
+    "description": "shrink int32/int64 index compatibility",
+    "shape": [
+      7,
+      8
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int32",
+    "numel": 56,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.02,
+    "max_abs_err": 9.5367431640625e-07,
+    "mean_abs_err": 1.5326908453516808e-07,
+    "MARE": 3.4182633044110844e-06,
+    "MERE": 1.3837131973559735e-07,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 4,
+    "category": "shrink",
+    "description": "shrink int32/int64 index compatibility",
+    "shape": [
+      7,
+      8
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int64",
+    "numel": 56,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.02,
+    "max_abs_err": 9.5367431640625e-07,
+    "mean_abs_err": 1.5326908453516808e-07,
+    "MARE": 3.4182633044110844e-06,
+    "MERE": 1.3837131973559735e-07,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 5,
+    "category": "expand",
+    "description": "expand int32/int64 index compatibility",
+    "shape": [
+      7,
+      128
+    ],
+    "dtype": "float16",
+    "index_dtype": "int32",
+    "numel": 896,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.02,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 6,
+    "category": "expand",
+    "description": "expand int32/int64 index compatibility",
+    "shape": [
+      7,
+      128
+    ],
+    "dtype": "float16",
+    "index_dtype": "int64",
+    "numel": 896,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.02,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 7,
+    "category": "expand",
+    "description": "expand int32/int64 index compatibility",
+    "shape": [
+      7,
+      128
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int32",
+    "numel": 896,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.15,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "bgmv_index",
+    "case_id": 8,
+    "category": "expand",
+    "description": "expand int32/int64 index compatibility",
+    "shape": [
+      7,
+      128
+    ],
+    "dtype": "bfloat16",
+    "index_dtype": "int64",
+    "numel": 896,
+    "index_parity_max_abs": 0.0,
+    "reference_rtol_atol": 0.15,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "acl_graph",
+    "case_id": 1,
+    "category": "Decode",
+    "description": "1 token, DeepSeek top-k",
+    "shape": [
+      1,
+      6
+    ],
+    "dtype": "bool",
+    "numel": 6,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  },
+  {
+    "suite": "acl_graph",
+    "case_id": 15,
+    "category": "Large",
+    "description": "4096-token prefill",
+    "shape": [
+      4096,
+      6
+    ],
+    "dtype": "bool",
+    "numel": 24576,
+    "mismatch_count": 0,
+    "max_abs_err": 0.0,
+    "mean_abs_err": 0.0,
+    "MARE": 0.0,
+    "MERE": 0.0,
+    "passed": true
+  }
+]

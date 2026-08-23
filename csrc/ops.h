@@ -36,7 +36,8 @@ namespace vllm_ascend {
         uint32_t num_tokens_per_core,
         uint32_t input_hidden_dim,
         uint32_t lora_rank,
-        float scale);
+        float scale,
+        bool indices_is_int32);
 
     extern void bgmv_expand_impl(
         AscendType type,
@@ -52,7 +53,29 @@ namespace vllm_ascend {
         uint32_t lora_rank,
         uint32_t output_hidden_dim,
         uint32_t slice_offset,
-        uint32_t output_full_dim);
+        uint32_t output_full_dim,
+        bool indices_is_int32);
+
+    extern void moe_lora_build_combined_idx_impl(
+        void *stream,
+        void *expanded_row_idx,
+        void *topk_ids,
+        void *token_lora_indices,
+        void *adapter_enabled,
+        void *combined_idx,
+        uint32_t num_pairs,
+        uint32_t top_k,
+        uint32_t num_experts,
+        uint32_t tile_length,
+        uint32_t output_pairs_per_core,
+        uint32_t block_dim);
+
+    at::Tensor moe_lora_build_combined_idx(
+        const at::Tensor &expanded_row_idx,
+        const at::Tensor &topk_ids,
+        const at::Tensor &token_lora_indices,
+        const at::Tensor &adapter_enabled,
+        int64_t num_experts);
 
     extern void sgmv_shrink_impl(
         AscendType type,

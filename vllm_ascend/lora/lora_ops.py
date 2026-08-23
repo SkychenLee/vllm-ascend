@@ -16,6 +16,22 @@
 import torch
 
 
+def moe_lora_build_combined_idx(
+    expanded_row_idx: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_lora_indices: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+    num_experts: int,
+) -> torch.Tensor:
+    return torch.ops._C_ascend.moe_lora_build_combined_idx(
+        expanded_row_idx,
+        topk_ids,
+        token_lora_indices,
+        adapter_enabled,
+        num_experts,
+    )
+
+
 def bgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,

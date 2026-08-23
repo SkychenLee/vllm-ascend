@@ -51,6 +51,17 @@ at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indic
     return y_out;
 }
 
+at::Tensor moe_lora_build_combined_idx_meta(
+    const at::Tensor &expanded_row_idx,
+    const at::Tensor &topk_ids,
+    const at::Tensor &token_lora_indices,
+    const at::Tensor &adapter_enabled,
+    int64_t num_experts) {
+    return at::empty_symint(
+        expanded_row_idx.sym_sizes(),
+        expanded_row_idx.options().dtype(at::kInt));
+}
+
 at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
                         at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -1551,6 +1562,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Direct kernel meta implementations
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
+    // Build the per-routed-row combined (LoRA, expert) index.
+    ops.impl(
+        "moe_lora_build_combined_idx",
+        &vllm_ascend::meta::moe_lora_build_combined_idx_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess

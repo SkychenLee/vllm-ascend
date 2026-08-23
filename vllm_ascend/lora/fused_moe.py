@@ -39,6 +39,7 @@ from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.lora.lora_ops import moe_lora_build_combined_idx
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
@@ -188,29 +189,22 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
 
 
 def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids):
-    """Recover per-permuted-row (expert_id, lora_slot) for the dispatched rows.
+    """Build one combined (LoRA, expert) index per dispatched row.
 
     npu_moe_init_routing semantics (verified empirically): ``expanded_row_idx``
     is indexed by the ORIGINAL flat (token, k) position and gives where that
-    pair landed in the expert-sorted array -- not the reverse. So recovering
-    "which (token, k) pair does sorted row i hold" needs the inverse permutation
-    of ``expanded``, not a direct gather by it. ``argsort`` output shape ==
-    input shape (value-independent), so this stays graph-capturable -- no
-    ``.item()``/data-dependent host sync.
+    pair landed in the expert-sorted array. The fused AscendC kernel scatters
+    the original token/expert metadata directly into sorted-row order, which
+    removes the AiCPU argsort and the following gather/where kernels.
     """
-    top_k = lora_context.top_k
-    expanded = torch.abs(expanded_row_idx)
-    inv_perm = torch.argsort(expanded)
-    expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
-
-    # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
-    # (host-known constant). Clamping defensively to the last index is a no-op
-    # in normal operation but keeps the gather graph-safe.
-    orig_token = inv_perm // top_k
     token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-    orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
-    lora_per_row = token_lora_indices[orig_token]
-    return expert_per_row, lora_per_row
+    return moe_lora_build_combined_idx(
+        expanded_row_idx.reshape(-1).contiguous(),
+        topk_ids.contiguous(),
+        token_lora_indices,
+        lora_context.adapter_enabled,
+        lora_context.local_num_experts,
+    )
 
 
 def _recover_moe_lora_routing_all2all(
@@ -256,15 +250,22 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
     Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
 
     Args:
-        lora_routing: (expert_per_row, lora_per_row) pre-computed by the
-            caller via _recover_moe_lora_routing (AllGather) or
-            _recover_moe_lora_routing_all2all (AlltoAll).
+        lora_routing: combined int32 indices for AllGather, or
+            ``(expert_per_row, lora_per_row)`` for AlltoAll.
     """
-    expert_per_row, lora_per_row = lora_routing
+    if isinstance(lora_routing, torch.Tensor):
+        combined_indices = lora_routing
+        expert_per_row = None
+        lora_per_row = None
+        num_rows = combined_indices.numel()
+    else:
+        combined_indices = None
+        expert_per_row, lora_per_row = lora_routing
+        num_rows = expert_per_row.numel()
     # EP rank may receive 0 dispatched tokens when all tokens route to
     # experts on other ranks. Skip LoRA to avoid passing empty tensors
     # to add_lora_fused_moe (which can trigger NPU kernel crashes).
-    if expert_per_row.numel() == 0:
+    if num_rows == 0:
         return
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
@@ -275,6 +276,7 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         adapter_enabled=lora_context.adapter_enabled,
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
+        combined_indices=combined_indices,
     )
 
 
@@ -284,10 +286,18 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
     is the activation output that fed the base down GMM.
     """
-    expert_per_row, lora_per_row = lora_routing
+    if isinstance(lora_routing, torch.Tensor):
+        combined_indices = lora_routing
+        expert_per_row = None
+        lora_per_row = None
+        num_rows = combined_indices.numel()
+    else:
+        combined_indices = None
+        expert_per_row, lora_per_row = lora_routing
+        num_rows = expert_per_row.numel()
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
     # kernel crashes with empty tensors.
-    if expert_per_row.numel() == 0:
+    if num_rows == 0:
         return
     offset = 0
     if lora_context.fully_sharded:
@@ -303,6 +313,7 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         fully_sharded=lora_context.fully_sharded,
         offset=offset,
         token_lora_mapping=lora_per_row,
+        combined_indices=combined_indices,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for

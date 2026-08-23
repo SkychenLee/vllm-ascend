@@ -317,6 +317,8 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
 {
     at::ScalarType scalar_type = x.scalar_type();
     TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
+    TORCH_CHECK(indices.scalar_type() == torch::kInt || indices.scalar_type() == torch::kLong,
+                "indices should be int32 or int64");
     TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
     TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
                 "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
@@ -334,11 +336,12 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     int input_hidden_token = x.size(1);
     uint32_t lora_rank = y.size(1);
     float scale_f = static_cast<float>(scale);
+    bool indices_is_int32 = indices.scalar_type() == torch::kInt;
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_shrink");
     cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, input_hidden_token,
-                          lora_rank, scale_f]() -> int {
+                          lora_rank, scale_f, indices_is_int32]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
         int64_t aiv_num = 0;
@@ -346,7 +349,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
         bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, num_tokens_per_core,
-                         input_hidden_token, lora_rank, scale_f);
+                         input_hidden_token, lora_rank, scale_f, indices_is_int32);
         return 0;
     });
     cmd.Run();
@@ -358,6 +361,8 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
 {
     at::ScalarType scalar_type = y.scalar_type();
     TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
+    TORCH_CHECK(indices.scalar_type() == torch::kInt || indices.scalar_type() == torch::kLong,
+                "indices should be int32 or int64");
     TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
     TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
                 "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
@@ -380,11 +385,12 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     int batch_size = x.size(0);
     int lora_rank = x.size(1);
     int output_full_dim = y.size(1);
+    bool indices_is_int32 = indices.scalar_type() == torch::kInt;
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_expand");
     cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size, lora_rank,
-                          slice_offset, slice_size, output_full_dim]() -> int {
+                          slice_offset, slice_size, output_full_dim, indices_is_int32]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
         int64_t aiv_num = 0;
@@ -392,7 +398,7 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
         bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
-                         num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
+                         num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim, indices_is_int32);
         return 0;
     });
     cmd.Run();
@@ -2133,6 +2139,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
+
+    ops.def(
+        "moe_lora_build_combined_idx(Tensor expanded_row_idx, Tensor topk_ids, "
+        "Tensor token_lora_indices, Tensor adapter_enabled, int num_experts) -> Tensor");
+    ops.impl(
+        "moe_lora_build_combined_idx",
+        torch::kPrivateUse1,
+        &vllm_ascend::moe_lora_build_combined_idx);
 
     ops.def("sgmv_shrink(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y, float scale) -> ()");
     ops.impl("sgmv_shrink", torch::kPrivateUse1, &vllm_ascend::sgmv_shrink);

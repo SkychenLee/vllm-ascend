@@ -198,15 +198,62 @@ def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:
     context = SimpleNamespace(
         top_k=2,
         punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([0, -1, 1])),
+        adapter_enabled=torch.tensor([True, True]),
+        local_num_experts=2,
     )
     topk_ids = torch.tensor([[1, 0], [0, 1], [1, 1]])
     # Original flat rows [0..5] land at these expert-sorted positions.
     expanded_row_idx = torch.tensor([2, 0, 1, 3, 4, 5])
 
-    expert_ids, lora_slots = _recover_moe_lora_routing_allgather(context, expanded_row_idx, topk_ids)
+    expected = torch.tensor([0, -1, 1, -1, 3, 3], dtype=torch.int32)
+    with patch(
+        "vllm_ascend.lora.fused_moe.moe_lora_build_combined_idx",
+        return_value=expected,
+    ) as build_combined:
+        combined = _recover_moe_lora_routing_allgather(context, expanded_row_idx, topk_ids)
 
-    assert torch.equal(expert_ids, torch.tensor([0, 0, 1, 1, 1, 1]))
-    assert torch.equal(lora_slots, torch.tensor([0, -1, 0, -1, 1, 1]))
+    assert combined is expected
+    build_combined.assert_called_once_with(
+        expanded_row_idx,
+        topk_ids,
+        context.punica_wrapper.token_lora_indices,
+        context.adapter_enabled,
+        2,
+    )
+
+
+def test_moe_lora_apply_reuses_fused_combined_indices() -> None:
+    punica_wrapper = Mock()
+    context = SimpleNamespace(
+        punica_wrapper=punica_wrapper,
+        w13_lora_a_stacked="w13_a",
+        w13_lora_b_stacked="w13_b",
+        w2_lora_a_stacked="w2_a",
+        w2_lora_b_stacked="w2_b",
+        adapter_enabled="already_applied_by_fused_index_builder",
+        fully_sharded=False,
+        tp_rank=0,
+    )
+    combined = torch.tensor([0, -1, 3], dtype=torch.int32)
+
+    moe_lora_apply_w13(
+        context,
+        gate_up_out="gate_up_out",
+        hidden_states="hidden_states",
+        lora_routing=combined,
+    )
+    moe_lora_apply_w2(
+        context,
+        down_out="down_out",
+        silu_out="silu_out",
+        lora_routing=combined,
+    )
+
+    calls = punica_wrapper.add_lora_fused_moe.call_args_list
+    assert calls[0].kwargs["combined_indices"] is combined
+    assert calls[1].kwargs["combined_indices"] is combined
+    assert calls[0].kwargs["expert_ids"] is None
+    assert calls[1].kwargs["expert_ids"] is None
 
 
 def test_all2all_routing_uses_local_experts_and_exchanged_adapters() -> None:

@@ -17,7 +17,7 @@
 #include "kernel_operator.h"
 #include "types.h"
 
-template <typename scalar_t>
+template <typename scalar_t, typename index_t>
 class BGMVExpand {
 public:
     using X_T = float;
@@ -70,7 +70,7 @@ public:
         wGm_.SetGlobalBuffer((__gm__ W_T *)weight);
         yInGm_.SetGlobalBuffer((__gm__ Y_T *)yIn);
         yOutGm_.SetGlobalBuffer((__gm__ Y_T *)yOut);
-        indicesGm_.SetGlobalBuffer((__gm__ int64_t *)indices, indicesSize);
+        indicesGm_.SetGlobalBuffer((__gm__ index_t *)indices, indicesSize);
 
         pipe_->InitBuffer(inQueueX_, 1, NUM_ELEMENTS_PER_REPEAT * sizeof(X_T));
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, W_IN_TILE_NUM_ELEMENTS * sizeof(W_T));
@@ -166,36 +166,37 @@ private:
     __aicore__ inline void CopyInX(const int64_t idx)
     {
         AscendC::LocalTensor<X_T> xLocal = inQueueX_.AllocTensor<X_T>();
-        if constexpr (std::is_same_v<X_T, float>) {
-            DataCopy(xLocal, xGm_[maxLoRARank_ * idx], maxLoRARank_);
-        } else {
-            uint16_t blockLen = static_cast<uint16_t>(maxLoRARank_ * sizeof(X_T));
-            DataCopyPad(xLocal, xGm_[maxLoRARank_ * idx], {1, blockLen, 0, 0}, {});
-        }
+        AscendC::DataCopyExtParams copyParams{
+            1,
+            static_cast<uint32_t>(maxLoRARank_ * sizeof(X_T)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<X_T> padParams{false, 0, 0, 0};
+        AscendC::DataCopyPad(
+            xLocal,
+            xGm_[maxLoRARank_ * idx],
+            copyParams,
+            padParams);
         inQueueX_.EnQue(xLocal);
         xLocal = inQueueX_.DeQue<X_T>();
         AscendC::LocalTensor<float> xDup = dupBufferX_.Get<float>();
 
-        // As we are generating multiple output elements with one API invocation,
-        // we need to duplicate the X vector multiple times to fill one NUM_BYTES_PER_REPEAT
-        if constexpr (std::is_same_v<X_T, float>) {
-            for (int32_t i = 0; i < NUM_ELEMENTS_PER_REPEAT; i += maxLoRARank_) {
-                for (int32_t j = 0; j < maxLoRARank_; j++) {
-                    float entry = xLocal.GetValue(j);
-                    xDup.SetValue(i + j, entry);
-                }
-            }
-        } else {
-            Cast(xDup, xLocal, AscendC::RoundMode::CAST_NONE, maxLoRARank_);
-            AscendC::PipeBarrier<PIPE_V>();
-
-            for (int32_t i = maxLoRARank_; i < NUM_ELEMENTS_PER_REPEAT; i += maxLoRARank_) {
-                for (int32_t j = 0; j < maxLoRARank_; j++) {
-                    float entry = xDup.GetValue(j);
-                    xDup.SetValue(i + j, entry);
-                }
-            }
-        }
+        // maxLoRARank_ is one of {8, 16, 32, 64}. Repeat the whole rank
+        // vector with one Vector instruction instead of 64 scalar Get/Set
+        // operations for every routed row.
+        constexpr uint32_t elementsPerBlock = 32 / sizeof(float);
+        const uint8_t repeatTime = static_cast<uint8_t>(
+            NUM_ELEMENTS_PER_REPEAT / maxLoRARank_);
+        const uint16_t dstRepeatStride = static_cast<uint16_t>(
+            maxLoRARank_ / elementsPerBlock);
+        AscendC::Copy(
+            xDup,
+            xLocal,
+            maxLoRARank_,
+            repeatTime,
+            {1, 1, dstRepeatStride, 0});
+        AscendC::PipeBarrier<PIPE_V>();
         inQueueX_.FreeTensor(xLocal);
     }
 
@@ -297,7 +298,7 @@ private:
     AscendC::GlobalTensor<W_T> wGm_;
     AscendC::GlobalTensor<Y_T> yInGm_;
     AscendC::GlobalTensor<Y_T> yOutGm_;
-    AscendC::GlobalTensor<int64_t> indicesGm_;
+    AscendC::GlobalTensor<index_t> indicesGm_;
     uint32_t batchSize_;
     uint32_t numTokensPerCore_;
     uint32_t maxLoRARank_;
@@ -326,40 +327,57 @@ private:
 
 };
 
-#define BGMV_EXPAND_TYPE_DECLARE(TYPE)                                                                                 \
-    extern "C" __global__ __aicore__ void bgmv_expand_##TYPE(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
+#define BGMV_EXPAND_TYPE_DECLARE(TYPE, INDEX_TYPE, INDEX_SUFFIX)                                                       \
+    extern "C" __global__ __aicore__ void bgmv_expand_##TYPE##_##INDEX_SUFFIX(                                      \
+                                                             __gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
                                                              uint32_t indicesSize, __gm__ void* yIn, __gm__ void* yOut,\
                                                              uint32_t batchSize, uint32_t numTokensPerCore,            \
                                                              uint32_t maxLoRARank, uint32_t outputHiddenDim,           \
                                                              uint32_t sliceOffset, uint32_t outputFullDim)             \
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
-        BGMVExpand<TYPE> op(&pipe);                                                                                    \
+        BGMVExpand<TYPE, INDEX_TYPE> op(&pipe);                                                                        \
         op.Init(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,                  \
                 outputHiddenDim, sliceOffset, outputFullDim);                                                          \
         op.Process();                                                                                                  \
     }
 
 // declare all dtype kernel
-BGMV_EXPAND_TYPE_DECLARE(half)
+BGMV_EXPAND_TYPE_DECLARE(half, int64_t, int64)
+BGMV_EXPAND_TYPE_DECLARE(half, int32_t, int32)
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
+    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t, int64_t, int64)
+    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t, int32_t, int32)
 #endif
 
 namespace vllm_ascend {
 extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* yIn, void* yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
-                             uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
+                             uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim,
+                             bool indicesIsInt32)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore,
-                                                        maxLoRARank, outputHiddenDim, sliceOffset, outputFullDim);
-    } else if (type == AscendType::BF16) {
-        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-        bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
+        if (indicesIsInt32) {
+            bgmv_expand_half_int32<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
                                                                   numTokensPerCore, maxLoRARank, outputHiddenDim,
                                                                   sliceOffset, outputFullDim);
+        } else {
+            bgmv_expand_half_int64<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
+                                                                  numTokensPerCore, maxLoRARank, outputHiddenDim,
+                                                                  sliceOffset, outputFullDim);
+        }
+    } else if (type == AscendType::BF16) {
+        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        if (indicesIsInt32) {
+            bgmv_expand_bfloat16_t_int32<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,
+                outputHiddenDim, sliceOffset, outputFullDim);
+        } else {
+            bgmv_expand_bfloat16_t_int64<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,
+                outputHiddenDim, sliceOffset, outputFullDim);
+        }
         #endif
     } else {
         return;

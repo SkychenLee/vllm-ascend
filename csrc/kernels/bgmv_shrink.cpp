@@ -17,7 +17,7 @@
 #include "kernel_operator.h"
 #include "types.h"
 
-template <typename scalar_t>
+template <typename scalar_t, typename index_t>
 class BGMVShrink {
 public:
     using X_T = scalar_t;
@@ -44,7 +44,7 @@ public:
         xGm_.SetGlobalBuffer((__gm__ X_T *)x);
         yOutGm_.SetGlobalBuffer((__gm__ Y_T *)y);
         wGm_.SetGlobalBuffer((__gm__ W_T *)weight);
-        indicesGm_.SetGlobalBuffer((__gm__ int64_t *)indices, indicesSize);
+        indicesGm_.SetGlobalBuffer((__gm__ index_t *)indices, indicesSize);
 
         pipe_->InitBuffer(inQueueX_, BUFFER_NUM, TILE_LENGTH * sizeof(X_T));
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, TILE_LENGTH * sizeof(W_T));
@@ -199,7 +199,7 @@ private:
     AscendC::TBuf<AscendC::QuePosition::VECCALC> tmpBufferX_, tmpBufferW_, outBufferY_;
     AscendC::GlobalTensor<X_T> xGm_;
     AscendC::GlobalTensor<W_T> wGm_;
-    AscendC::GlobalTensor<int64_t> indicesGm_;
+    AscendC::GlobalTensor<index_t> indicesGm_;
     AscendC::GlobalTensor<Y_T> yOutGm_;
     uint32_t batchSize_;
     uint32_t numTokensPerCore_;
@@ -212,37 +212,50 @@ private:
     bool incremental_;
 };
 
-#define BGMV_SHRINK_TYPE_DECLARE(TYPE)                                                                                 \
-    extern "C" __global__ __aicore__ void bgmv_shrink_##TYPE(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
+#define BGMV_SHRINK_TYPE_DECLARE(TYPE, INDEX_TYPE, INDEX_SUFFIX)                                                       \
+    extern "C" __global__ __aicore__ void bgmv_shrink_##TYPE##_##INDEX_SUFFIX(                                      \
+                                                             __gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
                                                              uint32_t indicesSize, __gm__ void* y, uint32_t batchSize, \
                                                              uint32_t numTokensPerCore, uint32_t inputHiddenDim,       \
                                                              uint32_t maxLoRARank, float scale)                        \
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
-        BGMVShrink<TYPE> op(&pipe);                                                                                    \
+        BGMVShrink<TYPE, INDEX_TYPE> op(&pipe);                                                                        \
         op.Init(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, inputHiddenDim, maxLoRARank, scale);  \
         op.Process();                                                                                                  \
     }
 
 // declare all dtype kernel
-BGMV_SHRINK_TYPE_DECLARE(half)
+BGMV_SHRINK_TYPE_DECLARE(half, int64_t, int64)
+BGMV_SHRINK_TYPE_DECLARE(half, int32_t, int32)
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-    BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
+    BGMV_SHRINK_TYPE_DECLARE(bfloat16_t, int64_t, int64)
+    BGMV_SHRINK_TYPE_DECLARE(bfloat16_t, int32_t, int32)
 #endif
 
 namespace vllm_ascend {
 extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* y, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
-                             uint32_t maxLoRARank, float scale)
+                             uint32_t maxLoRARank, float scale, bool indicesIsInt32)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
-                                                        inputHiddenDim, maxLoRARank, scale);
+        if (indicesIsInt32) {
+            bgmv_shrink_half_int32<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize,
+                                                                  numTokensPerCore, inputHiddenDim, maxLoRARank, scale);
+        } else {
+            bgmv_shrink_half_int64<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize,
+                                                                  numTokensPerCore, inputHiddenDim, maxLoRARank, scale);
+        }
     } else if (type == AscendType::BF16) {
         #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-        bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
-                                                                  inputHiddenDim, maxLoRARank, scale);
+        if (indicesIsInt32) {
+            bgmv_shrink_bfloat16_t_int32<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, inputHiddenDim, maxLoRARank, scale);
+        } else {
+            bgmv_shrink_bfloat16_t_int64<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, inputHiddenDim, maxLoRARank, scale);
+        }
         #endif
     } else {
         return;
