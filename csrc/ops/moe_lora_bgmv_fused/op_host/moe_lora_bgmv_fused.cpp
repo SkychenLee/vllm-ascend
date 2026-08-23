@@ -38,9 +38,13 @@ constexpr uint32_t kWeightTileElements =
     kOutputTileElements * kFastRank;
 constexpr uint32_t kGenericTileElements = 8192;
 constexpr uint32_t kGenericReduceTmpBytes = 512;
+constexpr uint32_t kGroupedGenericRows = 4;
 constexpr uint32_t kWideInputThreshold = 2048;
 constexpr uint32_t kFastMaxHiddenDim = 4096;
 constexpr uint32_t kMaxHiddenDim = 16384;
+constexpr uint32_t kGroupedMaxOutputStrideElements = 0x7fffffffU;
+constexpr uint32_t kGroupedRank8MinRows = 512;
+constexpr uint32_t kGroupedRank32Or64MinRows = 384;
 constexpr uint32_t kFp32ReuseMinRows = 2048;
 constexpr uint32_t kBalancedCoreMaxRows = 1024;
 
@@ -143,6 +147,17 @@ bool IsSupportedRank(int64_t rank)
     return rank == 8 || rank == 16 || rank == 32 || rank == 64;
 }
 
+bool IsGroupedGenericRank(uint32_t rank)
+{
+    return rank == 8 || rank == 32 || rank == 64;
+}
+
+bool HasEnoughRowsForGroupedGeneric(uint32_t rank, uint32_t numRows)
+{
+    return rank == 8 ? numRows >= kGroupedRank8MinRows :
+        numRows >= kGroupedRank32Or64MinRows;
+}
+
 uint64_t CalculateFastUbBytes(
     uint32_t inputHiddenDim,
     uint32_t indexElementBytes,
@@ -200,6 +215,68 @@ uint64_t CalculateGenericUbBytes(
     AddAlignedBufferBytes(bytes, kGenericReduceTmpBytes, 1);
     AddAlignedBufferBytes(bytes, outputTileElements, sizeof(float));
     AddAlignedBufferBytes(bytes, outputTileElements, sizeof(float));
+    return bytes;
+}
+
+uint64_t CalculateGroupedGenericUbBytes(
+    uint32_t rank,
+    uint32_t inputHiddenDim,
+    uint32_t outputHiddenDim,
+    uint32_t indexElementBytes,
+    uint32_t dataElementBytes)
+{
+    const uint64_t inputAlignedBytes = AlignUp32Bytes(
+        CheckedMultiply(
+            inputHiddenDim,
+            dataElementBytes,
+            "Grouped Generic aligned input size"));
+    const uint64_t inputAlignedElements =
+        inputAlignedBytes / dataElementBytes;
+    const uint64_t outputAlignedBytes = AlignUp32Bytes(
+        CheckedMultiply(
+            outputHiddenDim,
+            dataElementBytes,
+            "Grouped Generic aligned output size"));
+    const uint64_t outputAlignedElements =
+        outputAlignedBytes / dataElementBytes;
+    const uint64_t outputTileElements =
+        kGenericTileElements / rank;
+
+    uint64_t bytes = 0;
+    AddAlignedBufferBytes(
+        bytes, kGroupedGenericRows, indexElementBytes);
+    AddAlignedBufferBytes(
+        bytes, kGenericTileElements, dataElementBytes);
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(
+            kGroupedGenericRows,
+            outputAlignedElements,
+            "Grouped Generic y buffer size"),
+        dataElementBytes);
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(
+            kGroupedGenericRows,
+            inputAlignedElements,
+            "Grouped Generic FP32 input size"),
+        sizeof(float));
+    AddAlignedBufferBytes(
+        bytes, kGenericTileElements, sizeof(float));
+    AddAlignedBufferBytes(
+        bytes, kGenericTileElements, sizeof(float));
+    AddAlignedBufferBytes(
+        bytes,
+        CheckedMultiply(
+            kGroupedGenericRows,
+            rank,
+            "Grouped Generic rank size"),
+        sizeof(float));
+    AddAlignedBufferBytes(bytes, kGenericReduceTmpBytes, 1);
+    AddAlignedBufferBytes(
+        bytes, outputTileElements, sizeof(float));
+    AddAlignedBufferBytes(
+        bytes, outputTileElements, sizeof(float));
     return bytes;
 }
 
@@ -285,6 +362,8 @@ at::Tensor moe_lora_bgmv_fused(
             x.device() == indices.device() && x.device() == y.device(),
         "moe_lora_bgmv_fused: all tensors must be on the same device");
 
+    const uint32_t numWeights = CheckedUint32(
+        static_cast<uint64_t>(loraA.size(0)), "weight count");
     const int64_t numRows64 = x.size(0);
     if (numRows64 == 0) {
         return y;
@@ -312,6 +391,13 @@ at::Tensor moe_lora_bgmv_fused(
         rank == kFastRank &&
         inputHiddenDim <= kFastMaxHiddenDim &&
         outputHiddenDim <= kFastMaxHiddenDim;
+    const bool useGroupedGeneric =
+        !useFastKernel && IsGroupedGenericRank(rank) &&
+        HasEnoughRowsForGroupedGeneric(rank, numRows) &&
+        inputHiddenDim <= kFastMaxHiddenDim &&
+        outputHiddenDim <= kFastMaxHiddenDim &&
+        outputFullDim - outputHiddenDim <=
+            kGroupedMaxOutputStrideElements;
     const bool reuseFp32Weight =
         numRows >= kFp32ReuseMinRows ||
         inputHiddenDim != kWideInputThreshold ||
@@ -320,18 +406,28 @@ at::Tensor moe_lora_bgmv_fused(
         (inputHiddenDim > kWideInputThreshold ?
             kWideInputGroupRows : kDefaultGroupRows) :
         1;
-    const uint64_t requiredUbBytes = useFastKernel ?
-        CalculateFastUbBytes(
+    uint64_t requiredUbBytes = 0;
+    if (useFastKernel) {
+        requiredUbBytes = CalculateFastUbBytes(
             inputHiddenDim,
             indexElementBytes,
             dataElementBytes,
             reuseFp32Weight,
-            groupRows) :
-        CalculateGenericUbBytes(
+            groupRows);
+    } else if (useGroupedGeneric) {
+        requiredUbBytes = CalculateGroupedGenericUbBytes(
+            rank,
+            inputHiddenDim,
+            outputHiddenDim,
+            indexElementBytes,
+            dataElementBytes);
+    } else {
+        requiredUbBytes = CalculateGenericUbBytes(
             rank,
             outputHiddenDim,
             indexElementBytes,
             dataElementBytes);
+    }
     if (resources.ubBytes != 0) {
         TORCH_CHECK(
             requiredUbBytes <= resources.ubBytes,
@@ -383,6 +479,7 @@ at::Tensor moe_lora_bgmv_fused(
         indicesPtr,
         yPtr,
         numRows,
+        numWeights,
         inputHiddenDim,
         outputHiddenDim,
         outputFullDim,
@@ -402,6 +499,7 @@ at::Tensor moe_lora_bgmv_fused(
             indicesPtr,
             yPtr,
             numRows,
+            numWeights,
             inputHiddenDim,
             outputHiddenDim,
             outputFullDim,

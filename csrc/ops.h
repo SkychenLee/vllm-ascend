@@ -86,6 +86,7 @@ namespace vllm_ascend {
         void *indices,
         void *y,
         uint32_t num_rows,
+        uint32_t num_weights,
         uint32_t input_hidden_dim,
         uint32_t output_hidden_dim,
         uint32_t output_full_dim,

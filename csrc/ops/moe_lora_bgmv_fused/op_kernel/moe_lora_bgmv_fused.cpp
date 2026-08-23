@@ -56,6 +56,7 @@ public:
         GM_ADDR indices,
         GM_ADDR y,
         uint32_t numRows,
+        uint32_t numWeights,
         uint32_t inputHiddenDim,
         uint32_t outputHiddenDim,
         uint32_t outputFullDim,
@@ -65,6 +66,7 @@ public:
         float scale)
     {
         numRows_ = numRows;
+        numWeights_ = numWeights;
         inputHiddenDim_ = inputHiddenDim;
         outputHiddenDim_ = outputHiddenDim;
         outputFullDim_ = outputFullDim;
@@ -180,7 +182,7 @@ public:
                                 index0 == index5 && index0 == index6 &&
                                 index0 == index7) {
                                 indicesQueue_.FreeTensor(indicesLocal);
-                                if (index0 >= 0) {
+                                if (IsValidWeightIndex(index0)) {
                                     ProcessGroup<kGroupRows>(
                                         row, static_cast<uint64_t>(index0));
                                 }
@@ -192,7 +194,7 @@ public:
                     if (index0 == index1 && index0 == index2 &&
                         index0 == index3) {
                         indicesQueue_.FreeTensor(indicesLocal);
-                        if (index0 >= 0) {
+                        if (IsValidWeightIndex(index0)) {
                             ProcessGroup<kFallbackGroupRows>(
                                 row, static_cast<uint64_t>(index0));
                         }
@@ -202,7 +204,7 @@ public:
                 }
                 if (index0 == index1) {
                     indicesQueue_.FreeTensor(indicesLocal);
-                    if (index0 >= 0) {
+                    if (IsValidWeightIndex(index0)) {
                         ProcessGroup<2>(
                             row, static_cast<uint64_t>(index0));
                     }
@@ -211,7 +213,7 @@ public:
                 }
 
                 indicesQueue_.FreeTensor(indicesLocal);
-                if (index0 >= 0) {
+                if (IsValidWeightIndex(index0)) {
                     ProcessGroup<1>(row, static_cast<uint64_t>(index0));
                 }
                 row += 1;
@@ -221,7 +223,7 @@ public:
             for (uint32_t localRow = 0; localRow < currentRows; ++localRow) {
                 const int64_t weightIndex = static_cast<int64_t>(
                     indicesLocal.GetValue(localRow));
-                if (weightIndex >= 0) {
+                if (IsValidWeightIndex(weightIndex)) {
                     ProcessGroup<1>(
                         row + localRow,
                         static_cast<uint64_t>(weightIndex));
@@ -233,6 +235,12 @@ public:
     }
 
 private:
+    __aicore__ inline bool IsValidWeightIndex(int64_t index) const
+    {
+        return index >= 0 &&
+            static_cast<uint64_t>(index) < numWeights_;
+    }
+
     __aicore__ inline AscendC::LocalTensor<index_t> CopyInIndices(
         uint32_t row,
         uint32_t rows)
@@ -684,6 +692,7 @@ private:
     AscendC::GlobalTensor<DataT> yGm_;
 
     uint32_t numRows_;
+    uint32_t numWeights_;
     uint32_t inputHiddenDim_;
     uint32_t outputHiddenDim_;
     uint32_t outputFullDim_;
@@ -735,6 +744,7 @@ public:
         GM_ADDR indices,
         GM_ADDR y,
         uint32_t numRows,
+        uint32_t numWeights,
         uint32_t inputHiddenDim,
         uint32_t outputHiddenDim,
         uint32_t outputFullDim,
@@ -743,6 +753,7 @@ public:
         float scale)
     {
         numRows_ = numRows;
+        numWeights_ = numWeights;
         inputHiddenDim_ = inputHiddenDim;
         outputHiddenDim_ = outputHiddenDim;
         outputFullDim_ = outputFullDim;
@@ -805,7 +816,7 @@ public:
             const int64_t weightIndex =
                 static_cast<int64_t>(indexLocal.GetValue(0));
             indicesQueue_.FreeTensor(indexLocal);
-            if (weightIndex < 0) {
+            if (!IsValidWeightIndex(weightIndex)) {
                 continue;
             }
             ComputeShrink(row, static_cast<uint64_t>(weightIndex));
@@ -814,6 +825,12 @@ public:
     }
 
 private:
+    __aicore__ inline bool IsValidWeightIndex(int64_t index) const
+    {
+        return index >= 0 &&
+            static_cast<uint64_t>(index) < numWeights_;
+    }
+
     __aicore__ inline AscendC::LocalTensor<index_t> CopyInIndex(
         uint32_t row)
     {
@@ -890,6 +907,64 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
+    __aicore__ inline void EnqueueAWeight(
+        uint64_t weightBase,
+        uint32_t rankBase,
+        uint32_t rankBatch,
+        uint32_t hBegin,
+        uint32_t hCount,
+        uint32_t hAligned)
+    {
+        const uint32_t sourceStrideBytes =
+            (inputHiddenDim_ - hCount) * sizeof(DataT);
+        AscendC::LocalTensor<DataT> weightLocal =
+            weightQueue_.AllocTensor<DataT>();
+        AscendC::DataCopyExtParams weightCopyParams{
+            static_cast<uint16_t>(rankBatch),
+            static_cast<uint32_t>(hCount * sizeof(DataT)),
+            sourceStrideBytes,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<DataT> weightPadParams{
+            hAligned != hCount,
+            0,
+            static_cast<uint8_t>(hAligned - hCount),
+            static_cast<DataT>(0)};
+        AscendC::DataCopyPad(
+            weightLocal,
+            aGm_[weightBase +
+                static_cast<uint64_t>(rankBase) * inputHiddenDim_ +
+                hBegin],
+            weightCopyParams,
+            weightPadParams);
+        weightQueue_.EnQue(weightLocal);
+    }
+
+    __aicore__ inline void EnqueueBWeight(
+        uint64_t weightBase,
+        uint32_t outputBegin,
+        uint32_t outputElements)
+    {
+        const uint32_t weightElements = outputElements * kRank;
+        AscendC::LocalTensor<DataT> weightLocal =
+            weightQueue_.AllocTensor<DataT>();
+        AscendC::DataCopyExtParams weightCopyParams{
+            1,
+            static_cast<uint32_t>(weightElements * sizeof(DataT)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<DataT> weightPadParams{
+            false, 0, 0, static_cast<DataT>(0)};
+        AscendC::DataCopyPad(
+            weightLocal,
+            bGm_[weightBase +
+                static_cast<uint64_t>(outputBegin) * kRank],
+            weightCopyParams,
+            weightPadParams);
+        weightQueue_.EnQue(weightLocal);
+    }
+
     __aicore__ inline void ComputeShrink(
         uint32_t row,
         uint64_t weightIndex)
@@ -942,44 +1017,42 @@ private:
             const uint32_t maxRankBatch =
                 kKTileElements / hAligned;
 
-            for (uint32_t rankBase = 0;
-                 rankBase < kRank;) {
-                const uint32_t remainingRanks = kRank - rankBase;
-                const uint32_t rankBatch =
-                    remainingRanks < maxRankBatch
-                        ? remainingRanks
-                        : maxRankBatch;
+            uint32_t rankBase = 0;
+            uint32_t rankBatch =
+                kRank < maxRankBatch ? kRank : maxRankBatch;
+            EnqueueAWeight(
+                weightBase,
+                rankBase,
+                rankBatch,
+                hBegin,
+                hCount,
+                hAligned);
+            while (rankBase < kRank) {
                 const uint32_t batchElements =
                     rankBatch * hAligned;
-                const uint32_t sourceStrideBytes =
-                    (inputHiddenDim_ - hCount) * sizeof(DataT);
-
                 AscendC::LocalTensor<DataT> weightLocal =
-                    weightQueue_.AllocTensor<DataT>();
-                AscendC::DataCopyExtParams weightCopyParams{
-                    static_cast<uint16_t>(rankBatch),
-                    static_cast<uint32_t>(hCount * sizeof(DataT)),
-                    sourceStrideBytes,
-                    0,
-                    0};
-                AscendC::DataCopyPadExtParams<DataT> weightPadParams{
-                    hAligned != hCount,
-                    0,
-                    static_cast<uint8_t>(hAligned - hCount),
-                    static_cast<DataT>(0)};
-                AscendC::DataCopyPad(
-                    weightLocal,
-                    aGm_[weightBase +
-                        static_cast<uint64_t>(rankBase) *
-                            inputHiddenDim_ +
-                        hBegin],
-                    weightCopyParams,
-                    weightPadParams);
-                weightQueue_.EnQue(weightLocal);
-                weightLocal = weightQueue_.DeQue<DataT>();
+                    weightQueue_.DeQue<DataT>();
                 CastToFp32(
                     productFp32, weightLocal, batchElements);
                 weightQueue_.FreeTensor(weightLocal);
+
+                const uint32_t nextRankBase = rankBase + rankBatch;
+                uint32_t nextRankBatch = 0;
+                if (nextRankBase < kRank) {
+                    const uint32_t remainingRanks =
+                        kRank - nextRankBase;
+                    nextRankBatch =
+                        remainingRanks < maxRankBatch
+                            ? remainingRanks
+                            : maxRankBatch;
+                    EnqueueAWeight(
+                        weightBase,
+                        nextRankBase,
+                        nextRankBatch,
+                        hBegin,
+                        hCount,
+                        hAligned);
+                }
 
                 for (uint32_t batchRank = 0;
                      batchRank < rankBatch;
@@ -999,7 +1072,8 @@ private:
                         hCount);
                     AscendC::PipeBarrier<PIPE_V>();
                 }
-                rankBase += rankBatch;
+                rankBase = nextRankBase;
+                rankBatch = nextRankBatch;
             }
         }
 
@@ -1217,39 +1291,36 @@ private:
             DataT>();
         DuplicateRank(rankDup, rankLocal);
 
-        for (uint32_t outputBegin = 0;
-             outputBegin < outputHiddenDim_;
-             outputBegin += kOutputTileElements) {
-            uint32_t outputElements =
-                outputHiddenDim_ - outputBegin;
-            if (outputElements > kOutputTileElements) {
-                outputElements = kOutputTileElements;
-            }
+        uint32_t outputBegin = 0;
+        uint32_t outputElements = outputHiddenDim_;
+        if (outputElements > kOutputTileElements) {
+            outputElements = kOutputTileElements;
+        }
+        EnqueueBWeight(weightBase, outputBegin, outputElements);
+        while (outputBegin < outputHiddenDim_) {
             const uint32_t weightElements =
                 outputElements * kRank;
 
             AscendC::LocalTensor<DataT> weightLocal =
-                weightQueue_.AllocTensor<DataT>();
-            AscendC::DataCopyExtParams weightCopyParams{
-                1,
-                static_cast<uint32_t>(
-                    weightElements * sizeof(DataT)),
-                0,
-                0,
-                0};
-            AscendC::DataCopyPadExtParams<DataT> weightPadParams{
-                false, 0, 0, static_cast<DataT>(0)};
-            AscendC::DataCopyPad(
-                weightLocal,
-                bGm_[weightBase +
-                    static_cast<uint64_t>(outputBegin) * kRank],
-                weightCopyParams,
-                weightPadParams);
-            weightQueue_.EnQue(weightLocal);
-            weightLocal = weightQueue_.DeQue<DataT>();
+                weightQueue_.DeQue<DataT>();
             CastToFp32(
                 productFp32, weightLocal, weightElements);
             weightQueue_.FreeTensor(weightLocal);
+
+            const uint32_t nextOutputBegin =
+                outputBegin + outputElements;
+            uint32_t nextOutputElements = 0;
+            if (nextOutputBegin < outputHiddenDim_) {
+                nextOutputElements =
+                    outputHiddenDim_ - nextOutputBegin;
+                if (nextOutputElements > kOutputTileElements) {
+                    nextOutputElements = kOutputTileElements;
+                }
+                EnqueueBWeight(
+                    weightBase,
+                    nextOutputBegin,
+                    nextOutputElements);
+            }
 
             const uint32_t fullRepeats =
                 weightElements / kVectorElements;
@@ -1283,6 +1354,8 @@ private:
                 yAccumFp32,
                 yInputFp32,
                 yLocal);
+            outputBegin = nextOutputBegin;
+            outputElements = nextOutputElements;
         }
         yQueue_.EnQue<
             AscendC::QuePosition::VECOUT,
@@ -1324,11 +1397,771 @@ private:
     AscendC::GlobalTensor<DataT> yGm_;
 
     uint32_t numRows_;
+    uint32_t numWeights_;
     uint32_t inputHiddenDim_;
     uint32_t outputHiddenDim_;
     uint32_t outputFullDim_;
     uint32_t sliceOffset_;
     uint32_t coreNum_;
+    float scale_;
+    uint64_t singleAWeightElements_;
+    uint64_t singleBWeightElements_;
+
+    AscendC::UnaryRepeatParams castParams_ = {1, 1, 8, 4};
+    AscendC::UnaryRepeatParams reduceSumParams_ = {1, 1, 1, 8};
+    AscendC::BinaryRepeatParams contiguousMulParams_ =
+        {1, 1, 1, 8, 8, 8};
+    AscendC::BinaryRepeatParams rankMulParams_ =
+        {1, 1, 1, 8, 0, 8};
+};
+
+template <typename scalar_t, typename index_t, uint32_t rank>
+class MoeLoraBgmvFusedGenericGrouped {
+public:
+    using DataT = scalar_t;
+
+    static constexpr uint32_t kRank = rank;
+    static constexpr uint32_t kMaxGroupRows = 4;
+    static constexpr uint32_t kWeightTileElements = 8192;
+    static constexpr uint32_t kOutputTileElements =
+        kWeightTileElements / kRank;
+    static constexpr uint32_t kVectorElements = 64;
+    static constexpr uint32_t kDataElementsPerBlock =
+        32 / sizeof(DataT);
+    static constexpr uint32_t kBlocksPerRepeat = 8;
+    static constexpr uint32_t kReduceTmpBytes = 512;
+
+    static_assert(kRank == 8 || kRank == 32 || kRank == 64);
+    static_assert(kWeightTileElements % kRank == 0);
+    static_assert(kWeightTileElements / kVectorElements <= 255);
+    static_assert(sizeof(DataT) == 2);
+
+    __aicore__ inline explicit MoeLoraBgmvFusedGenericGrouped(
+        AscendC::TPipe* pipe)
+        : pipe_(pipe)
+    {}
+
+    __aicore__ inline void Init(
+        GM_ADDR x,
+        GM_ADDR loraA,
+        GM_ADDR loraB,
+        GM_ADDR indices,
+        GM_ADDR y,
+        uint32_t numRows,
+        uint32_t numWeights,
+        uint32_t inputHiddenDim,
+        uint32_t outputHiddenDim,
+        uint32_t outputFullDim,
+        uint32_t sliceOffset,
+        uint32_t coreNum,
+        float scale)
+    {
+        numRows_ = numRows;
+        numWeights_ = numWeights;
+        inputHiddenDim_ = inputHiddenDim;
+        outputHiddenDim_ = outputHiddenDim;
+        outputFullDim_ = outputFullDim;
+        sliceOffset_ = sliceOffset;
+        coreNum_ = coreNum;
+        scale_ = scale;
+        inputAlignedElements_ =
+            (inputHiddenDim_ + kDataElementsPerBlock - 1) /
+            kDataElementsPerBlock * kDataElementsPerBlock;
+        outputAlignedElements_ =
+            (outputHiddenDim_ + kDataElementsPerBlock - 1) /
+            kDataElementsPerBlock * kDataElementsPerBlock;
+        singleAWeightElements_ =
+            static_cast<uint64_t>(kRank) * inputHiddenDim_;
+        singleBWeightElements_ =
+            static_cast<uint64_t>(outputHiddenDim_) * kRank;
+
+        xGm_.SetGlobalBuffer(reinterpret_cast<__gm__ DataT*>(x));
+        aGm_.SetGlobalBuffer(reinterpret_cast<__gm__ DataT*>(loraA));
+        bGm_.SetGlobalBuffer(reinterpret_cast<__gm__ DataT*>(loraB));
+        indicesGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ index_t*>(indices), numRows_);
+        yGm_.SetGlobalBuffer(reinterpret_cast<__gm__ DataT*>(y));
+
+        pipe_->InitBuffer(
+            indicesQueue_, 1,
+            kMaxGroupRows * sizeof(index_t));
+        pipe_->InitBuffer(
+            dataQueue_, 1,
+            kWeightTileElements * sizeof(DataT));
+        pipe_->InitBuffer(
+            yQueue_, 1,
+            kMaxGroupRows * outputAlignedElements_ * sizeof(DataT));
+
+        pipe_->InitBuffer(
+            xFp32Buffer_,
+            kMaxGroupRows * inputAlignedElements_ * sizeof(float));
+        pipe_->InitBuffer(
+            weightFp32Buffer_,
+            kWeightTileElements * sizeof(float));
+        pipe_->InitBuffer(
+            productFp32Buffer_,
+            kWeightTileElements * sizeof(float));
+        pipe_->InitBuffer(
+            rankBuffer_,
+            kMaxGroupRows * kRank * sizeof(float));
+        pipe_->InitBuffer(reduceTmpBuffer_, kReduceTmpBytes);
+        pipe_->InitBuffer(
+            yInputFp32Buffer_,
+            kOutputTileElements * sizeof(float));
+        pipe_->InitBuffer(
+            yAccumFp32Buffer_,
+            kOutputTileElements * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        const uint32_t blockIdx = AscendC::GetBlockIdx();
+        const uint32_t rowsPerBlock = numRows_ / coreNum_;
+        const uint32_t extraRows = numRows_ % coreNum_;
+        const uint32_t prefixExtra =
+            blockIdx < extraRows ? blockIdx : extraRows;
+        uint32_t row = blockIdx * rowsPerBlock + prefixExtra;
+        const uint32_t rowEnd = row + rowsPerBlock +
+            (blockIdx < extraRows ? 1 : 0);
+
+        while (row < rowEnd) {
+            uint32_t currentRows = rowEnd - row;
+            if (currentRows > kMaxGroupRows) {
+                currentRows = kMaxGroupRows;
+            }
+            AscendC::LocalTensor<index_t> indicesLocal =
+                CopyInIndices(row, currentRows);
+            const int64_t index0 =
+                static_cast<int64_t>(indicesLocal.GetValue(0));
+
+            if (IsValidWeightIndex(index0) &&
+                currentRows == kMaxGroupRows) {
+                const int64_t index1 =
+                    static_cast<int64_t>(indicesLocal.GetValue(1));
+                const int64_t index2 =
+                    static_cast<int64_t>(indicesLocal.GetValue(2));
+                const int64_t index3 =
+                    static_cast<int64_t>(indicesLocal.GetValue(3));
+                if (index0 == index1 && index0 == index2 &&
+                    index0 == index3) {
+                    indicesQueue_.FreeTensor(indicesLocal);
+                    ProcessGroup<kMaxGroupRows>(
+                        row, static_cast<uint64_t>(index0));
+                    row += kMaxGroupRows;
+                    continue;
+                }
+            }
+
+            if (IsValidWeightIndex(index0) && currentRows >= 2) {
+                const int64_t index1 =
+                    static_cast<int64_t>(indicesLocal.GetValue(1));
+                if (index0 == index1) {
+                    indicesQueue_.FreeTensor(indicesLocal);
+                    ProcessGroup<2>(
+                        row, static_cast<uint64_t>(index0));
+                    row += 2;
+                    continue;
+                }
+            }
+
+            indicesQueue_.FreeTensor(indicesLocal);
+            if (IsValidWeightIndex(index0)) {
+                ProcessGroup<1>(
+                    row, static_cast<uint64_t>(index0));
+            }
+            ++row;
+        }
+    }
+
+private:
+    __aicore__ inline bool IsValidWeightIndex(int64_t index) const
+    {
+        return index >= 0 &&
+            static_cast<uint64_t>(index) < numWeights_;
+    }
+
+    __aicore__ inline AscendC::LocalTensor<index_t> CopyInIndices(
+        uint32_t row,
+        uint32_t rows)
+    {
+        AscendC::LocalTensor<index_t> indicesLocal =
+            indicesQueue_.AllocTensor<index_t>();
+        AscendC::DataCopyExtParams copyParams{
+            1,
+            static_cast<uint32_t>(rows * sizeof(index_t)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<index_t> padParams{
+            false, 0, 0, static_cast<index_t>(0)};
+        AscendC::DataCopyPad(
+            indicesLocal, indicesGm_[row], copyParams, padParams);
+        indicesQueue_.EnQue(indicesLocal);
+        return indicesQueue_.DeQue<index_t>();
+    }
+
+    __aicore__ inline void CastToFp32(
+        AscendC::LocalTensor<float> dst,
+        AscendC::LocalTensor<DataT> src,
+        uint32_t count)
+    {
+        const uint32_t fullRepeats = count / kVectorElements;
+        const uint32_t tailElements = count % kVectorElements;
+        if (fullRepeats != 0) {
+            AscendC::Cast(
+                dst,
+                src,
+                AscendC::RoundMode::CAST_NONE,
+                kVectorElements,
+                static_cast<uint8_t>(fullRepeats),
+                castParams_);
+        }
+        if (tailElements != 0) {
+            const uint32_t tailOffset =
+                fullRepeats * kVectorElements;
+            AscendC::Cast(
+                dst[tailOffset],
+                src[tailOffset],
+                AscendC::RoundMode::CAST_NONE,
+                tailElements);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void MulContiguous(
+        AscendC::LocalTensor<float> dst,
+        AscendC::LocalTensor<float> lhs,
+        AscendC::LocalTensor<float> rhs,
+        uint32_t count)
+    {
+        const uint32_t fullRepeats = count / kVectorElements;
+        const uint32_t tailElements = count % kVectorElements;
+        if (fullRepeats != 0) {
+            AscendC::Mul(
+                dst,
+                lhs,
+                rhs,
+                kVectorElements,
+                static_cast<uint8_t>(fullRepeats),
+                contiguousMulParams_);
+        }
+        if (tailElements != 0) {
+            const uint32_t tailOffset =
+                fullRepeats * kVectorElements;
+            AscendC::Mul(
+                dst[tailOffset],
+                lhs[tailOffset],
+                rhs[tailOffset],
+                tailElements);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    template <uint32_t Rows>
+    __aicore__ inline void ProcessGroup(
+        uint32_t startRow,
+        uint64_t weightIndex)
+    {
+        ComputeShrink<Rows>(startRow, weightIndex);
+        ComputeExpand<Rows>(startRow, weightIndex);
+    }
+
+    template <uint32_t Rows>
+    __aicore__ inline void CopyInX(uint32_t startRow)
+    {
+        AscendC::LocalTensor<float> xFp32 =
+            xFp32Buffer_.Get<float>();
+        for (uint32_t localRow = 0; localRow < Rows; ++localRow) {
+            AscendC::LocalTensor<DataT> xLocal =
+                dataQueue_.AllocTensor<DataT>();
+            AscendC::DataCopyExtParams copyParams{
+                1,
+                static_cast<uint32_t>(
+                    inputHiddenDim_ * sizeof(DataT)),
+                0,
+                0,
+                0};
+            AscendC::DataCopyPadExtParams<DataT> padParams{
+                inputAlignedElements_ != inputHiddenDim_,
+                0,
+                static_cast<uint8_t>(
+                    inputAlignedElements_ - inputHiddenDim_),
+                static_cast<DataT>(0)};
+            AscendC::DataCopyPad(
+                xLocal,
+                xGm_[static_cast<uint64_t>(startRow + localRow) *
+                    inputHiddenDim_],
+                copyParams,
+                padParams);
+            dataQueue_.EnQue(xLocal);
+            xLocal = dataQueue_.DeQue<DataT>();
+            CastToFp32(
+                xFp32[localRow * inputAlignedElements_],
+                xLocal,
+                inputHiddenDim_);
+            dataQueue_.FreeTensor(xLocal);
+        }
+    }
+
+    __aicore__ inline void EnqueueAWeight(
+        uint64_t weightBase,
+        uint32_t rankBase,
+        uint32_t rankBatch)
+    {
+        AscendC::LocalTensor<DataT> weightLocal =
+            dataQueue_.AllocTensor<DataT>();
+        AscendC::DataCopyExtParams copyParams{
+            static_cast<uint16_t>(rankBatch),
+            static_cast<uint32_t>(
+                inputHiddenDim_ * sizeof(DataT)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<DataT> padParams{
+            inputAlignedElements_ != inputHiddenDim_,
+            0,
+            static_cast<uint8_t>(
+                inputAlignedElements_ - inputHiddenDim_),
+            static_cast<DataT>(0)};
+        AscendC::DataCopyPad(
+            weightLocal,
+            aGm_[weightBase +
+                static_cast<uint64_t>(rankBase) * inputHiddenDim_],
+            copyParams,
+            padParams);
+        dataQueue_.EnQue(weightLocal);
+    }
+
+    template <uint32_t Rows>
+    __aicore__ inline void ComputeShrink(
+        uint32_t startRow,
+        uint64_t weightIndex)
+    {
+        CopyInX<Rows>(startRow);
+        AscendC::LocalTensor<float> xFp32 =
+            xFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> weightFp32 =
+            weightFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> productFp32 =
+            productFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> rankLocal =
+            rankBuffer_.Get<float>();
+        AscendC::LocalTensor<float> reduceTmp =
+            reduceTmpBuffer_.Get<float>();
+        const uint64_t weightBase =
+            weightIndex * singleAWeightElements_;
+        const uint32_t maxRankBatch =
+            kWeightTileElements / inputAlignedElements_;
+
+        uint32_t rankBase = 0;
+        uint32_t rankBatch =
+            kRank < maxRankBatch ? kRank : maxRankBatch;
+        EnqueueAWeight(weightBase, rankBase, rankBatch);
+        while (rankBase < kRank) {
+            const uint32_t batchElements =
+                rankBatch * inputAlignedElements_;
+            AscendC::LocalTensor<DataT> weightLocal =
+                dataQueue_.DeQue<DataT>();
+            CastToFp32(weightFp32, weightLocal, batchElements);
+            dataQueue_.FreeTensor(weightLocal);
+
+            const uint32_t nextRankBase = rankBase + rankBatch;
+            uint32_t nextRankBatch = 0;
+            if (nextRankBase < kRank) {
+                const uint32_t remainingRanks =
+                    kRank - nextRankBase;
+                nextRankBatch = remainingRanks < maxRankBatch
+                    ? remainingRanks : maxRankBatch;
+                EnqueueAWeight(
+                    weightBase, nextRankBase, nextRankBatch);
+            }
+
+            for (uint32_t batchRank = 0;
+                 batchRank < rankBatch;
+                 ++batchRank) {
+                const uint32_t rankIndex = rankBase + batchRank;
+                AscendC::LocalTensor<float> currentWeight =
+                    weightFp32[batchRank * inputAlignedElements_];
+                for (uint32_t localRow = 0;
+                     localRow < Rows;
+                     ++localRow) {
+                    MulContiguous(
+                        productFp32,
+                        xFp32[localRow * inputAlignedElements_],
+                        currentWeight,
+                        inputHiddenDim_);
+                    AscendC::ReduceSum<float>(
+                        rankLocal[localRow * kRank + rankIndex],
+                        productFp32,
+                        reduceTmp,
+                        inputHiddenDim_);
+                    AscendC::PipeBarrier<PIPE_V>();
+                }
+            }
+            rankBase = nextRankBase;
+            rankBatch = nextRankBatch;
+        }
+
+        AscendC::Muls(
+            rankLocal,
+            rankLocal,
+            scale_,
+            Rows * kRank);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void DuplicateRank(
+        AscendC::LocalTensor<float> rankDup,
+        AscendC::LocalTensor<float> rankLocal)
+    {
+        constexpr uint8_t repeatTime =
+            static_cast<uint8_t>(kVectorElements / kRank);
+        constexpr uint16_t dstRepeatStride =
+            static_cast<uint16_t>(kRank / kBlocksPerRepeat);
+        AscendC::Copy(
+            rankDup,
+            rankLocal,
+            kRank,
+            repeatTime,
+            {1, 1, dstRepeatStride, 0});
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline void ZeroPad(
+        AscendC::LocalTensor<float> tensor,
+        uint32_t validElements,
+        uint32_t paddedElements)
+    {
+        if (paddedElements > validElements) {
+            AscendC::Duplicate(
+                tensor[validElements],
+                0.0f,
+                paddedElements - validElements);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+    }
+
+    __aicore__ inline void ReduceExpandTile(
+        AscendC::LocalTensor<float> output,
+        AscendC::LocalTensor<float> product,
+        uint32_t weightElements)
+    {
+        const uint32_t blockReduceRepeats =
+            (weightElements + kVectorElements - 1) /
+            kVectorElements;
+        ZeroPad(
+            product,
+            weightElements,
+            blockReduceRepeats * kVectorElements);
+
+        if constexpr (kRank == 8) {
+            AscendC::BlockReduceSum(
+                output,
+                product,
+                static_cast<uint8_t>(blockReduceRepeats),
+                kVectorElements,
+                reduceSumParams_.dstRepStride,
+                reduceSumParams_.srcBlkStride,
+                reduceSumParams_.srcRepStride);
+            AscendC::PipeBarrier<PIPE_V>();
+            return;
+        }
+
+        AscendC::BlockReduceSum(
+            product,
+            product,
+            static_cast<uint8_t>(blockReduceRepeats),
+            kVectorElements,
+            reduceSumParams_.dstRepStride,
+            reduceSumParams_.srcBlkStride,
+            reduceSumParams_.srcRepStride);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        const uint32_t blockOutputs =
+            blockReduceRepeats * kBlocksPerRepeat;
+        const uint32_t pairReduce16Repeats =
+            (blockOutputs + kVectorElements - 1) /
+            kVectorElements;
+        ZeroPad(
+            product,
+            blockOutputs,
+            pairReduce16Repeats * kVectorElements);
+
+        if constexpr (kRank == 32) {
+            AscendC::PairReduceSum(
+                product,
+                product,
+                static_cast<uint8_t>(pairReduce16Repeats),
+                kVectorElements,
+                reduceSumParams_.dstRepStride,
+                reduceSumParams_.srcBlkStride,
+                reduceSumParams_.srcRepStride);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            const uint32_t pair16Outputs =
+                pairReduce16Repeats * (kVectorElements / 2);
+            const uint32_t pairReduce32Repeats =
+                (pair16Outputs + kVectorElements - 1) /
+                kVectorElements;
+            ZeroPad(
+                product,
+                pair16Outputs,
+                pairReduce32Repeats * kVectorElements);
+            AscendC::PairReduceSum(
+                output,
+                product,
+                static_cast<uint8_t>(pairReduce32Repeats),
+                kVectorElements,
+                reduceSumParams_.dstRepStride,
+                reduceSumParams_.srcBlkStride,
+                reduceSumParams_.srcRepStride);
+            AscendC::PipeBarrier<PIPE_V>();
+        } else {
+            AscendC::BlockReduceSum(
+                output,
+                product,
+                static_cast<uint8_t>(pairReduce16Repeats),
+                kVectorElements,
+                reduceSumParams_.dstRepStride,
+                reduceSumParams_.srcBlkStride,
+                reduceSumParams_.srcRepStride);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+    }
+
+    __aicore__ inline void EnqueueBWeight(
+        uint64_t weightBase,
+        uint32_t outputBegin,
+        uint32_t outputElements)
+    {
+        const uint32_t weightElements = outputElements * kRank;
+        AscendC::LocalTensor<DataT> weightLocal =
+            dataQueue_.AllocTensor<DataT>();
+        AscendC::DataCopyExtParams copyParams{
+            1,
+            static_cast<uint32_t>(
+                weightElements * sizeof(DataT)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<DataT> padParams{
+            false, 0, 0, static_cast<DataT>(0)};
+        AscendC::DataCopyPad(
+            weightLocal,
+            bGm_[weightBase +
+                static_cast<uint64_t>(outputBegin) * kRank],
+            copyParams,
+            padParams);
+        dataQueue_.EnQue(weightLocal);
+    }
+
+    __aicore__ inline void AddToOutput(
+        uint32_t localRow,
+        uint32_t outputBegin,
+        uint32_t outputElements,
+        AscendC::LocalTensor<float> yAccumFp32,
+        AscendC::LocalTensor<float> yInputFp32,
+        AscendC::LocalTensor<DataT> yLocal)
+    {
+        const uint32_t yLocalOffset =
+            localRow * outputAlignedElements_ + outputBegin;
+        CastToFp32(
+            yInputFp32,
+            yLocal[yLocalOffset],
+            outputElements);
+        AscendC::Add(
+            yAccumFp32,
+            yAccumFp32,
+            yInputFp32,
+            outputElements);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Cast(
+            yLocal[yLocalOffset],
+            yAccumFp32,
+            AscendC::RoundMode::CAST_RINT,
+            outputElements);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    template <uint32_t Rows>
+    __aicore__ inline void ComputeExpand(
+        uint32_t startRow,
+        uint64_t weightIndex)
+    {
+        AscendC::LocalTensor<float> rankLocal =
+            rankBuffer_.Get<float>();
+        AscendC::LocalTensor<float> rankDup =
+            xFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> weightFp32 =
+            weightFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> productFp32 =
+            productFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> yInputFp32 =
+            yInputFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> yAccumFp32 =
+            yAccumFp32Buffer_.Get<float>();
+        const uint64_t weightBase =
+            weightIndex * singleBWeightElements_;
+        const uint64_t yOffset =
+            static_cast<uint64_t>(startRow) * outputFullDim_ +
+            sliceOffset_;
+        const uint32_t gmRowStrideBytes =
+            (outputFullDim_ - outputHiddenDim_) * sizeof(DataT);
+        AscendC::DataCopyExtParams yCopyInParams{
+            static_cast<uint16_t>(Rows),
+            static_cast<uint32_t>(
+                outputHiddenDim_ * sizeof(DataT)),
+            gmRowStrideBytes,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<DataT> yPadParams{
+            outputAlignedElements_ != outputHiddenDim_,
+            0,
+            static_cast<uint8_t>(
+                outputAlignedElements_ - outputHiddenDim_),
+            static_cast<DataT>(0)};
+        AscendC::LocalTensor<DataT> yLocal =
+            yQueue_.AllocTensor<DataT>();
+        AscendC::DataCopyPad(
+            yLocal, yGm_[yOffset], yCopyInParams, yPadParams);
+        yQueue_.EnQue<
+            AscendC::QuePosition::GM,
+            AscendC::QuePosition::VECIN,
+            DataT>(yLocal);
+
+        uint32_t outputBegin = 0;
+        uint32_t outputElements = outputHiddenDim_;
+        if (outputElements > kOutputTileElements) {
+            outputElements = kOutputTileElements;
+        }
+        EnqueueBWeight(weightBase, outputBegin, outputElements);
+
+        yLocal = yQueue_.DeQue<
+            AscendC::QuePosition::GM,
+            AscendC::QuePosition::VECIN,
+            DataT>();
+        while (outputBegin < outputHiddenDim_) {
+            const uint32_t weightElements =
+                outputElements * kRank;
+            AscendC::LocalTensor<DataT> weightLocal =
+                dataQueue_.DeQue<DataT>();
+            CastToFp32(
+                weightFp32, weightLocal, weightElements);
+            dataQueue_.FreeTensor(weightLocal);
+
+            const uint32_t nextOutputBegin =
+                outputBegin + outputElements;
+            uint32_t nextOutputElements = 0;
+            if (nextOutputBegin < outputHiddenDim_) {
+                nextOutputElements =
+                    outputHiddenDim_ - nextOutputBegin;
+                if (nextOutputElements > kOutputTileElements) {
+                    nextOutputElements = kOutputTileElements;
+                }
+                EnqueueBWeight(
+                    weightBase,
+                    nextOutputBegin,
+                    nextOutputElements);
+            }
+
+            const uint32_t fullRepeats =
+                weightElements / kVectorElements;
+            const uint32_t tailElements =
+                weightElements % kVectorElements;
+            for (uint32_t localRow = 0;
+                 localRow < Rows;
+                 ++localRow) {
+                DuplicateRank(
+                    rankDup,
+                    rankLocal[localRow * kRank]);
+                if (fullRepeats != 0) {
+                    AscendC::Mul(
+                        productFp32,
+                        rankDup,
+                        weightFp32,
+                        kVectorElements,
+                        static_cast<uint8_t>(fullRepeats),
+                        rankMulParams_);
+                }
+                if (tailElements != 0) {
+                    const uint32_t tailOffset =
+                        fullRepeats * kVectorElements;
+                    AscendC::Mul(
+                        productFp32[tailOffset],
+                        rankDup,
+                        weightFp32[tailOffset],
+                        tailElements);
+                }
+                AscendC::PipeBarrier<PIPE_V>();
+                ReduceExpandTile(
+                    yAccumFp32,
+                    productFp32,
+                    weightElements);
+                AddToOutput(
+                    localRow,
+                    outputBegin,
+                    outputElements,
+                    yAccumFp32,
+                    yInputFp32,
+                    yLocal);
+            }
+            outputBegin = nextOutputBegin;
+            outputElements = nextOutputElements;
+        }
+
+        yQueue_.EnQue<
+            AscendC::QuePosition::VECOUT,
+            AscendC::QuePosition::GM,
+            DataT>(yLocal);
+        yLocal = yQueue_.DeQue<
+            AscendC::QuePosition::VECOUT,
+            AscendC::QuePosition::GM,
+            DataT>();
+        AscendC::DataCopyExtParams yCopyOutParams{
+            static_cast<uint16_t>(Rows),
+            static_cast<uint32_t>(
+                outputHiddenDim_ * sizeof(DataT)),
+            0,
+            gmRowStrideBytes,
+            0};
+        AscendC::DataCopyPad(
+            yGm_[yOffset], yLocal, yCopyOutParams);
+        yQueue_.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe* pipe_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> indicesQueue_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> dataQueue_;
+    AscendC::TQueBind<
+        AscendC::QuePosition::VECIN,
+        AscendC::QuePosition::VECOUT,
+        1> yQueue_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> xFp32Buffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> weightFp32Buffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> productFp32Buffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> rankBuffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> reduceTmpBuffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC>
+        yInputFp32Buffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC>
+        yAccumFp32Buffer_;
+
+    AscendC::GlobalTensor<DataT> xGm_;
+    AscendC::GlobalTensor<DataT> aGm_;
+    AscendC::GlobalTensor<DataT> bGm_;
+    AscendC::GlobalTensor<index_t> indicesGm_;
+    AscendC::GlobalTensor<DataT> yGm_;
+
+    uint32_t numRows_;
+    uint32_t numWeights_;
+    uint32_t inputHiddenDim_;
+    uint32_t outputHiddenDim_;
+    uint32_t outputFullDim_;
+    uint32_t sliceOffset_;
+    uint32_t coreNum_;
+    uint32_t inputAlignedElements_;
+    uint32_t outputAlignedElements_;
     float scale_;
     uint64_t singleAWeightElements_;
     uint64_t singleBWeightElements_;
@@ -1348,14 +2181,16 @@ private:
         moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX##_##REUSE_SUFFIX##_##    \
             GROUP_SUFFIX(                                                    \
             GM_ADDR x, GM_ADDR loraA, GM_ADDR loraB, GM_ADDR indices,        \
-            GM_ADDR y, uint32_t numRows, uint32_t inputHiddenDim,            \
+            GM_ADDR y, uint32_t numRows, uint32_t numWeights,               \
+            uint32_t inputHiddenDim,                                         \
             uint32_t outputHiddenDim, uint32_t outputFullDim,                \
             uint32_t sliceOffset, uint32_t rowsPerCore, uint32_t coreNum,    \
             float scale)                                                     \
     {                                                                         \
         AscendC::TPipe pipe;                                                  \
         MoeLoraBgmvFused<TYPE, INDEX_TYPE, REUSE, GROUP_ROWS> op(&pipe);     \
-        op.Init(x, loraA, loraB, indices, y, numRows, inputHiddenDim,        \
+        op.Init(x, loraA, loraB, indices, y, numRows, numWeights,            \
+                inputHiddenDim,                                              \
                 outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,    \
                 coreNum, scale);                                              \
         op.Process();                                                         \
@@ -1385,7 +2220,8 @@ MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, true, reuse, 4, group4)
     extern "C" __global__ __aicore__ void                                  \
         moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX##_generic_r##RANK(      \
             GM_ADDR x, GM_ADDR loraA, GM_ADDR loraB, GM_ADDR indices,        \
-            GM_ADDR y, uint32_t numRows, uint32_t inputHiddenDim,            \
+            GM_ADDR y, uint32_t numRows, uint32_t numWeights,               \
+            uint32_t inputHiddenDim,                                         \
             uint32_t outputHiddenDim, uint32_t outputFullDim,                \
             uint32_t sliceOffset, uint32_t rowsPerCore, uint32_t coreNum,    \
             float scale)                                                     \
@@ -1393,7 +2229,8 @@ MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, true, reuse, 4, group4)
         (void)rowsPerCore;                                                    \
         AscendC::TPipe pipe;                                                  \
         MoeLoraBgmvFusedGeneric<TYPE, INDEX_TYPE, RANK> op(&pipe);           \
-        op.Init(x, loraA, loraB, indices, y, numRows, inputHiddenDim,        \
+        op.Init(x, loraA, loraB, indices, y, numRows, numWeights,            \
+                inputHiddenDim,                                              \
                 outputHiddenDim, outputFullDim, sliceOffset, coreNum,        \
                 scale);                                                       \
         op.Process();                                                         \
@@ -1418,6 +2255,49 @@ MOE_LORA_BGMV_FUSED_GENERIC_DECLARE(bfloat16_t, int64_t, int64, 32)
 MOE_LORA_BGMV_FUSED_GENERIC_DECLARE(bfloat16_t, int64_t, int64, 64)
 #endif
 
+#define MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(                        \
+    TYPE, INDEX_TYPE, INDEX_SUFFIX, RANK)                                    \
+    extern "C" __global__ __aicore__ void                                  \
+        moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX##_generic_grouped_r##RANK( \
+            GM_ADDR x, GM_ADDR loraA, GM_ADDR loraB, GM_ADDR indices,        \
+            GM_ADDR y, uint32_t numRows, uint32_t numWeights,               \
+            uint32_t inputHiddenDim,                                         \
+            uint32_t outputHiddenDim, uint32_t outputFullDim,                \
+            uint32_t sliceOffset, uint32_t rowsPerCore, uint32_t coreNum,    \
+            float scale)                                                     \
+    {                                                                         \
+        (void)rowsPerCore;                                                    \
+        AscendC::TPipe pipe;                                                  \
+        MoeLoraBgmvFusedGenericGrouped<                                      \
+            TYPE, INDEX_TYPE, RANK> op(&pipe);                               \
+        op.Init(x, loraA, loraB, indices, y, numRows, numWeights,            \
+                inputHiddenDim,                                              \
+                outputHiddenDim, outputFullDim, sliceOffset, coreNum,        \
+                scale);                                                       \
+        op.Process();                                                         \
+    }
+
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(half, int32_t, int32, 8)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(half, int32_t, int32, 32)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(half, int32_t, int32, 64)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(half, int64_t, int64, 8)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(half, int64_t, int64, 32)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(half, int64_t, int64, 64)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(
+    bfloat16_t, int32_t, int32, 8)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(
+    bfloat16_t, int32_t, int32, 32)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(
+    bfloat16_t, int32_t, int32, 64)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(
+    bfloat16_t, int64_t, int64, 8)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(
+    bfloat16_t, int64_t, int64, 32)
+MOE_LORA_BGMV_FUSED_GENERIC_GROUPED_DECLARE(
+    bfloat16_t, int64_t, int64, 64)
+#endif
+
 namespace vllm_ascend {
 
 namespace {
@@ -1425,6 +2305,15 @@ namespace {
 constexpr uint32_t kFp32ReuseMinRows = 2048;
 constexpr uint32_t kInplaceHiddenDim = 2048;
 constexpr uint32_t kWideInputThreshold = 2048;
+constexpr uint32_t kGroupedMaxOutputStrideElements = 0x7fffffffU;
+constexpr uint32_t kGroupedRank8MinRows = 512;
+constexpr uint32_t kGroupedRank32Or64MinRows = 384;
+
+bool HasEnoughRowsForGroupedGeneric(uint32_t rank, uint32_t numRows)
+{
+    return rank == 8 ? numRows >= kGroupedRank8MinRows :
+        numRows >= kGroupedRank32Or64MinRows;
+}
 
 }  // namespace
 
@@ -1437,6 +2326,7 @@ extern void moe_lora_bgmv_fused_impl(
     void* indices,
     void* y,
     uint32_t numRows,
+    uint32_t numWeights,
     uint32_t inputHiddenDim,
     uint32_t outputHiddenDim,
     uint32_t outputFullDim,
@@ -1451,6 +2341,13 @@ extern void moe_lora_bgmv_fused_impl(
     const bool useFastRank16 =
         rank == 16 && inputHiddenDim <= 4096 &&
         outputHiddenDim <= 4096;
+    const bool useGroupedGeneric =
+        !useFastRank16 &&
+        (rank == 8 || rank == 32 || rank == 64) &&
+        HasEnoughRowsForGroupedGeneric(rank, numRows) &&
+        inputHiddenDim <= 4096 && outputHiddenDim <= 4096 &&
+        outputFullDim - outputHiddenDim <=
+            kGroupedMaxOutputStrideElements;
     const bool reuseFp32Weight =
         numRows >= kFp32ReuseMinRows ||
         inputHiddenDim != kInplaceHiddenDim ||
@@ -1460,7 +2357,7 @@ extern void moe_lora_bgmv_fused_impl(
 
 #define MOE_LORA_BGMV_FUSED_LAUNCH(KERNEL)                                  \
     KERNEL<<<blockDim, nullptr, stream>>>(                                   \
-        x, loraA, loraB, indices, y, numRows, inputHiddenDim,                \
+        x, loraA, loraB, indices, y, numRows, numWeights, inputHiddenDim,    \
         outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore, coreNum,   \
         scale)
 
@@ -1487,7 +2384,49 @@ extern void moe_lora_bgmv_fused_impl(
         }                                                                     \
     } while (0)
 
+#define MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_GROUPED_SELECTED(                \
+    RANK8_KERNEL, RANK32_KERNEL, RANK64_KERNEL)                             \
+    do {                                                                      \
+        if (rank == 8) {                                                      \
+            MOE_LORA_BGMV_FUSED_LAUNCH(RANK8_KERNEL);                        \
+        } else if (rank == 32) {                                             \
+            MOE_LORA_BGMV_FUSED_LAUNCH(RANK32_KERNEL);                       \
+        } else if (rank == 64) {                                             \
+            MOE_LORA_BGMV_FUSED_LAUNCH(RANK64_KERNEL);                       \
+        }                                                                     \
+    } while (0)
+
     if (!useFastRank16) {
+        if (useGroupedGeneric) {
+            if (type == AscendType::FP16) {
+                if (indicesIsInt32) {
+                    MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_GROUPED_SELECTED(
+                        moe_lora_bgmv_fused_half_int32_generic_grouped_r8,
+                        moe_lora_bgmv_fused_half_int32_generic_grouped_r32,
+                        moe_lora_bgmv_fused_half_int32_generic_grouped_r64);
+                } else {
+                    MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_GROUPED_SELECTED(
+                        moe_lora_bgmv_fused_half_int64_generic_grouped_r8,
+                        moe_lora_bgmv_fused_half_int64_generic_grouped_r32,
+                        moe_lora_bgmv_fused_half_int64_generic_grouped_r64);
+                }
+            } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+                if (indicesIsInt32) {
+                    MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_GROUPED_SELECTED(
+                        moe_lora_bgmv_fused_bfloat16_t_int32_generic_grouped_r8,
+                        moe_lora_bgmv_fused_bfloat16_t_int32_generic_grouped_r32,
+                        moe_lora_bgmv_fused_bfloat16_t_int32_generic_grouped_r64);
+                } else {
+                    MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_GROUPED_SELECTED(
+                        moe_lora_bgmv_fused_bfloat16_t_int64_generic_grouped_r8,
+                        moe_lora_bgmv_fused_bfloat16_t_int64_generic_grouped_r32,
+                        moe_lora_bgmv_fused_bfloat16_t_int64_generic_grouped_r64);
+                }
+#endif
+            }
+            return;
+        }
         if (type == AscendType::FP16) {
             if (indicesIsInt32) {
                 MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_SELECTED(
@@ -1570,6 +2509,7 @@ extern void moe_lora_bgmv_fused_impl(
 #endif
     }
 
+#undef MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_GROUPED_SELECTED
 #undef MOE_LORA_BGMV_FUSED_LAUNCH_GENERIC_SELECTED
 #undef MOE_LORA_BGMV_FUSED_LAUNCH_SELECTED
 #undef MOE_LORA_BGMV_FUSED_LAUNCH

@@ -1,15 +1,15 @@
 # `moe_lora_bgmv_fused` 精度验证报告
 
 - 测试平台：Ascend 910B3。
-- 测试时间：2026-08-23T15:09:58+00:00
+- 测试时间：2026-08-23T17:20:52+00:00
 - 参考实现：PyTorch CPU FP32 两阶段 BMM，最终 Cast 回输出 dtype。
 
 ## 总览
 
 | 指标 | 值 |
 | --- | ---: |
-| 总用例数 | 86 |
-| 通过数 | 86 |
+| 总用例数 | 100 |
+| 通过数 | 100 |
 | 失败数 | 0 |
 | 通过率 | 100.00% |
 
@@ -70,57 +70,71 @@ slice 外数据必须逐元素不变。
 | 22 | Boundary | minimum valid weight | [9, 63, 65, 96] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
 | 23 | Boundary | maximum valid weight | [9, 63, 65, 96] | 16 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
 | 23 | Boundary | maximum valid weight | [9, 63, 65, 96] | 16 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 24 | Boundary | zero scale | [9, 63, 65, 96] | 16 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 24 | Boundary | zero scale | [9, 63, 65, 96] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 25 | Boundary | negative scale | [9, 63, 65, 96] | 16 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 25 | Boundary | negative scale | [9, 63, 65, 96] | 16 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 26 | Boundary | last valid slice | [9, 63, 33, 97] | 16 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 26 | Boundary | last valid slice | [9, 63, 33, 97] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 27 | Boundary | zero rows | [0, 64, 64, 64] | 8 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 27 | Boundary | zero rows | [0, 64, 64, 64] | 8 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 28 | Generic | rank8 H8191 O=P-1 | [2, 8191, 1023, 1030] | 8 | float16 | int32 | 3.334e-07 | 6.868e-04 | 1.953e-03 | True/True | PASS |
-| 28 | Generic | rank8 H8191 O=P-1 | [2, 8191, 1023, 1030] | 8 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 29 | Generic | rank8 H8192 O=P | [3, 8192, 1024, 1031] | 8 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 29 | Generic | rank8 H8192 O=P | [3, 8192, 1024, 1031] | 8 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 30 | Generic | rank8 H8193 O=P+1 | [5, 8193, 1025, 1032] | 8 | float16 | int32 | 5.244e-07 | 9.183e-04 | 4.883e-04 | True/True | PASS |
-| 30 | Generic | rank8 H8193 O=P+1 | [5, 8193, 1025, 1032] | 8 | bfloat16 | int32 | 2.577e-06 | 6.803e-03 | 3.906e-03 | True/True | PASS |
-| 31 | Generic | rank8 maximum H/O | [1, 16384, 16384, 16384] | 8 | float16 | int64 | 7.250e-07 | 9.470e-04 | 3.906e-03 | True/True | PASS |
-| 31 | Generic | rank8 maximum H/O | [1, 16384, 16384, 16384] | 8 | bfloat16 | int64 | 2.441e-07 | 4.000e-03 | 1.562e-02 | True/True | PASS |
-| 32 | Generic | rank16 H8191 O=P-1 | [2, 8191, 511, 518] | 16 | float16 | int32 | 8.243e-07 | 8.540e-04 | 3.906e-03 | True/True | PASS |
-| 32 | Generic | rank16 H8191 O=P-1 | [2, 8191, 511, 518] | 16 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 33 | Generic | rank16 H8192 O=P | [3, 8192, 512, 519] | 16 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 33 | Generic | rank16 H8192 O=P | [3, 8192, 512, 519] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 34 | Generic | rank16 H8193 O=P+1 | [5, 8193, 513, 520] | 16 | float16 | int32 | 5.173e-06 | 2.820e-03 | 1.221e-04 | True/True | PASS |
-| 34 | Generic | rank16 H8193 O=P+1 | [5, 8193, 513, 520] | 16 | bfloat16 | int32 | 7.852e-06 | 6.452e-03 | 4.883e-04 | True/True | PASS |
-| 35 | Generic | rank16 maximum H/O | [1, 16384, 16384, 16384] | 16 | float16 | int64 | 1.743e-07 | 9.452e-04 | 7.812e-03 | True/True | PASS |
-| 35 | Generic | rank16 maximum H/O | [1, 16384, 16384, 16384] | 16 | bfloat16 | int64 | 4.423e-07 | 7.246e-03 | 6.250e-02 | True/True | PASS |
-| 36 | Generic | rank32 H8191 O=P-1 | [2, 8191, 255, 262] | 32 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 36 | Generic | rank32 H8191 O=P-1 | [2, 8191, 255, 262] | 32 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 37 | Generic | rank32 H8192 O=P | [3, 8192, 256, 263] | 32 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 37 | Generic | rank32 H8192 O=P | [3, 8192, 256, 263] | 32 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 38 | Generic | rank32 H8193 O=P+1 | [5, 8193, 257, 264] | 32 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 38 | Generic | rank32 H8193 O=P+1 | [5, 8193, 257, 264] | 32 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 39 | Generic | rank32 maximum H/O | [1, 16384, 16384, 16384] | 32 | float16 | int64 | 1.926e-07 | 5.568e-04 | 7.812e-03 | True/True | PASS |
-| 39 | Generic | rank32 maximum H/O | [1, 16384, 16384, 16384] | 32 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 40 | Generic | rank64 H8191 O=P-1 | [2, 8191, 127, 134] | 64 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 40 | Generic | rank64 H8191 O=P-1 | [2, 8191, 127, 134] | 64 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 41 | Generic | rank64 H8192 O=P | [3, 8192, 128, 135] | 64 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 41 | Generic | rank64 H8192 O=P | [3, 8192, 128, 135] | 64 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 42 | Generic | rank64 H8193 O=P+1 | [5, 8193, 129, 136] | 64 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 42 | Generic | rank64 H8193 O=P+1 | [5, 8193, 129, 136] | 64 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
-| 43 | Generic | rank64 maximum H/O | [1, 16384, 16384, 16384] | 64 | float16 | int64 | 1.632e-07 | 5.621e-04 | 1.562e-02 | True/True | PASS |
-| 43 | Generic | rank64 maximum H/O | [1, 16384, 16384, 16384] | 64 | bfloat16 | int64 | 7.354e-07 | 4.049e-03 | 1.250e-01 | True/True | PASS |
+| 24 | Boundary | positive out-of-bounds index | [4, 64, 64, 64] | 32 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 24 | Boundary | positive out-of-bounds index | [4, 64, 64, 64] | 32 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 25 | Boundary | zero scale | [9, 63, 65, 96] | 16 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 25 | Boundary | zero scale | [9, 63, 65, 96] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 26 | Boundary | negative scale | [9, 63, 65, 96] | 16 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 26 | Boundary | negative scale | [9, 63, 65, 96] | 16 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 27 | Boundary | last valid slice | [9, 63, 33, 97] | 16 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 27 | Boundary | last valid slice | [9, 63, 33, 97] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 28 | Boundary | zero rows | [0, 64, 64, 64] | 8 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 28 | Boundary | zero rows | [0, 64, 64, 64] | 8 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 29 | GenericGrouped | rank8 maximum UB group4 | [520, 4096, 4096, 4096] | 8 | float16 | int64 | 1.214e-07 | 9.766e-04 | 1.953e-03 | True/True | PASS |
+| 29 | GenericGrouped | rank8 maximum UB group4 | [520, 4096, 4096, 4096] | 8 | bfloat16 | int64 | 1.029e-07 | 7.812e-03 | 1.562e-02 | True/True | PASS |
+| 30 | GenericGrouped | rank32 group2 | [400, 4096, 4096, 4096] | 32 | float16 | int32 | 8.402e-08 | 7.886e-04 | 1.953e-03 | True/True | PASS |
+| 30 | GenericGrouped | rank32 group2 | [400, 4096, 4096, 4096] | 32 | bfloat16 | int32 | 1.074e-07 | 5.952e-03 | 1.562e-02 | True/True | PASS |
+| 31 | GenericGrouped | rank64 group4 plus core tail | [401, 4095, 4096, 4128] | 64 | float16 | int64 | 1.843e-07 | 9.533e-04 | 1.953e-03 | True/True | PASS |
+| 31 | GenericGrouped | rank64 group4 plus core tail | [401, 4095, 4096, 4128] | 64 | bfloat16 | int64 | 1.672e-07 | 7.463e-03 | 1.562e-02 | True/True | PASS |
+| 32 | GenericGrouped | G4 G2 negative G1 mixed | [400, 257, 513, 577] | 32 | float16 | int64 | 4.023e-09 | 9.285e-04 | 9.766e-04 | True/True | PASS |
+| 32 | GenericGrouped | G4 G2 negative G1 mixed | [400, 257, 513, 577] | 32 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 33 | GenericGrouped | different negative indices | [400, 17, 129, 145] | 64 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 33 | GenericGrouped | different negative indices | [400, 17, 129, 145] | 64 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 34 | GenericGrouped | strided y O tail | [520, 4096, 4095, 4127] | 8 | float16 | int32 | 1.256e-07 | 9.766e-04 | 1.953e-03 | True/True | PASS |
+| 34 | GenericGrouped | strided y O tail | [520, 4096, 4095, 4127] | 8 | bfloat16 | int32 | 1.322e-07 | 7.812e-03 | 1.562e-02 | True/True | PASS |
+| 35 | Generic | rank8 H8191 O=P-1 | [2, 8191, 1023, 1030] | 8 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 35 | Generic | rank8 H8191 O=P-1 | [2, 8191, 1023, 1030] | 8 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 36 | Generic | rank8 H8192 O=P | [3, 8192, 1024, 1031] | 8 | float16 | int64 | 2.836e-07 | 8.772e-04 | 1.953e-03 | True/True | PASS |
+| 36 | Generic | rank8 H8192 O=P | [3, 8192, 1024, 1031] | 8 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 37 | Generic | rank8 H8193 O=P+1 | [5, 8193, 1025, 1032] | 8 | float16 | int32 | 1.455e-07 | 7.508e-04 | 4.883e-04 | True/True | PASS |
+| 37 | Generic | rank8 H8193 O=P+1 | [5, 8193, 1025, 1032] | 8 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 38 | Generic | rank8 maximum H/O | [1, 16384, 16384, 16384] | 8 | float16 | int64 | 3.051e-07 | 9.033e-04 | 3.906e-03 | True/True | PASS |
+| 38 | Generic | rank8 maximum H/O | [1, 16384, 16384, 16384] | 8 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 39 | Generic | rank16 H8191 O=P-1 | [2, 8191, 511, 518] | 16 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 39 | Generic | rank16 H8191 O=P-1 | [2, 8191, 511, 518] | 16 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 40 | Generic | rank16 H8192 O=P | [3, 8192, 512, 519] | 16 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 40 | Generic | rank16 H8192 O=P | [3, 8192, 512, 519] | 16 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 41 | Generic | rank16 H8193 O=P+1 | [5, 8193, 513, 520] | 16 | float16 | int32 | 6.054e-06 | 1.430e-03 | 1.221e-04 | True/True | PASS |
+| 41 | Generic | rank16 H8193 O=P+1 | [5, 8193, 513, 520] | 16 | bfloat16 | int32 | 3.626e-06 | 4.902e-03 | 2.441e-04 | True/True | PASS |
+| 42 | Generic | rank16 maximum H/O | [1, 16384, 16384, 16384] | 16 | float16 | int64 | 2.011e-07 | 9.690e-04 | 7.812e-03 | True/True | PASS |
+| 42 | Generic | rank16 maximum H/O | [1, 16384, 16384, 16384] | 16 | bfloat16 | int64 | 2.522e-07 | 4.132e-03 | 3.125e-02 | True/True | PASS |
+| 43 | Generic | rank32 H8191 O=P-1 | [2, 8191, 255, 262] | 32 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 43 | Generic | rank32 H8191 O=P-1 | [2, 8191, 255, 262] | 32 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 44 | Generic | rank32 H8192 O=P | [3, 8192, 256, 263] | 32 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 44 | Generic | rank32 H8192 O=P | [3, 8192, 256, 263] | 32 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 45 | Generic | rank32 H8193 O=P+1 | [5, 8193, 257, 264] | 32 | float16 | int32 | 8.426e-07 | 6.086e-04 | 4.883e-04 | True/True | PASS |
+| 45 | Generic | rank32 H8193 O=P+1 | [5, 8193, 257, 264] | 32 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 46 | Generic | rank32 maximum H/O | [1, 16384, 16384, 16384] | 32 | float16 | int64 | 9.448e-08 | 5.291e-04 | 7.812e-03 | True/True | PASS |
+| 46 | Generic | rank32 maximum H/O | [1, 16384, 16384, 16384] | 32 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 47 | Generic | rank64 H8191 O=P-1 | [2, 8191, 127, 134] | 64 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 47 | Generic | rank64 H8191 O=P-1 | [2, 8191, 127, 134] | 64 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 48 | Generic | rank64 H8192 O=P | [3, 8192, 128, 135] | 64 | float16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 48 | Generic | rank64 H8192 O=P | [3, 8192, 128, 135] | 64 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 49 | Generic | rank64 H8193 O=P+1 | [5, 8193, 129, 136] | 64 | float16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 49 | Generic | rank64 H8193 O=P+1 | [5, 8193, 129, 136] | 64 | bfloat16 | int32 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
+| 50 | Generic | rank64 maximum H/O | [1, 16384, 16384, 16384] | 64 | float16 | int64 | 3.899e-07 | 5.666e-04 | 1.562e-02 | True/True | PASS |
+| 50 | Generic | rank64 maximum H/O | [1, 16384, 16384, 16384] | 64 | bfloat16 | int64 | 0.000e+00 | 0.000e+00 | 0.000e+00 | True/True | PASS |
 
 ## 按 dtype 汇总
 
 | dtype | 用例数 | 通过数 | 失败数 |
 | --- | ---: | ---: | ---: |
-| bfloat16 | 43 | 43 | 0 |
-| float16 | 43 | 43 | 0 |
+| bfloat16 | 50 | 50 | 0 |
+| float16 | 50 | 50 | 0 |
 
 ## 关键发现
 
-1. 共 86 个 FP16/BF16 与 int32/int64 组合，覆盖 rank 8/16/32/64、M=0、1-row fallback、4/8-row 复用和尾块。
+1. 共 100 个 FP16/BF16 与 int32/int64 组合，覆盖 rank 8/16/32/64、M=0、1-row fallback、4/8-row 复用和尾块。
 2. expert-sorted 快速路径覆盖 38 例，mixed/alternating fallback 覆盖 14 例。
 3. 非 32B 对齐 H/O、8191/8192/8193/16384 边界、P-1/P/P+1、slice offset、负/零 scale、全 -1 index 和最大合法 index均纳入验证。
 4. 每个用例同时检查返回 alias 和 slice 外逐元素不变，避免只验证数值而漏掉 in-place 语义。

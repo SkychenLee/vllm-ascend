@@ -119,14 +119,36 @@ private:
     __aicore__ inline void CopyInX(const int64_t idx, int32_t colIdx, int32_t numElements = TILE_LENGTH)
     {
         AscendC::LocalTensor<X_T> xLocal = inQueueX_.AllocTensor<X_T>();
-        DataCopy(xLocal, xGm_[inputHiddenDim_ * idx + colIdx * TILE_LENGTH], numElements);
+        AscendC::DataCopyExtParams copyParams{
+            1,
+            static_cast<uint32_t>(numElements * sizeof(X_T)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<X_T> padParams{false, 0, 0, static_cast<X_T>(0)};
+        AscendC::DataCopyPad(
+            xLocal,
+            xGm_[inputHiddenDim_ * idx + colIdx * TILE_LENGTH],
+            copyParams,
+            padParams);
         inQueueX_.EnQue(xLocal);
     }
 
     __aicore__ inline void CopyInW(int32_t rowIdx, int32_t colIdx, int32_t numElements = TILE_LENGTH)
     {
         AscendC::LocalTensor<W_T> wLocal = inQueueW_.AllocTensor<W_T>();
-        DataCopy(wLocal, wGm_[reqLoRAWeightOffset_ + rowIdx * inputHiddenDim_ + colIdx * TILE_LENGTH], numElements);
+        AscendC::DataCopyExtParams copyParams{
+            1,
+            static_cast<uint32_t>(numElements * sizeof(W_T)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<W_T> padParams{false, 0, 0, static_cast<W_T>(0)};
+        AscendC::DataCopyPad(
+            wLocal,
+            wGm_[reqLoRAWeightOffset_ + rowIdx * inputHiddenDim_ + colIdx * TILE_LENGTH],
+            copyParams,
+            padParams);
         inQueueW_.EnQue(wLocal);
     }
 
@@ -188,7 +210,14 @@ private:
     __aicore__ inline void CopyOut(const int64_t idx)
     {
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.DeQue<Y_T>();
-        DataCopy(yOutGm_[maxLoRARank_ * idx], yOutLocal, maxLoRARank_);
+        AscendC::DataCopyExtParams copyParams{
+            1,
+            static_cast<uint32_t>(maxLoRARank_ * sizeof(Y_T)),
+            0,
+            0,
+            0};
+        AscendC::DataCopyPad(
+            yOutGm_[maxLoRARank_ * idx], yOutLocal, copyParams);
         outQueueY_.FreeTensor(yOutLocal);
     }
 

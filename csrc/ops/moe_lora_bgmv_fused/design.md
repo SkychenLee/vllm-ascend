@@ -14,18 +14,23 @@ y[row, slice] += rank_out[row] @ B[indices[row]].T
 
 当前两个 kernel 会把 FP32 rank 中间结果写入 GM，再由 expand 读回；并且每个
 token 都重新从 GM 搬入相同 expert/adapter 的 A/B 权重。融合实现把 rank 中间
-结果留在 UB，并采用三级路由：
+结果留在 UB，并采用四级路由：
 
 1. `rank == 16 && H <= 4096 && O <= 4096` 使用已实测的 fast 模板；连续
    8/4/2 行 index 相同时复用 A/B 权重，mixed index 使用 1-row 分支。
-2. `rank in {8, 16, 32, 64}`、`1 <= H/O <= 16384` 使用 group1 Generic 单
-   kernel；它不依赖 index 排序，覆盖 fast 之外的合法融合 shape。
-3. 不支持的 rank/dtype/shape，以及需要通信或中间 routed-weight multiply 的
+2. `rank in {8, 32, 64}` 且 `H/O <= 4096`，并满足实测 row crossover
+   （rank8 为 `M >= 512`，rank32/64 为 `M >= 384`）时使用独立
+   GenericGrouped 模板；连续 4/2 行相同非负 index 时复用 A/B 的 DataT 和
+   FP32 权重，mixed/负 index 按 1 行降级或跳过。
+3. `rank in {8, 16, 32, 64}`、`1 <= H/O <= 16384` 的其余组合使用 group1
+   Generic 单 kernel；它不依赖 index 排序，是融合算子的通用兜底。
+4. 不支持的 rank/dtype/shape，以及需要通信或中间 routed-weight multiply 的
    模式，保留现有 `bgmv_shrink + bgmv_expand_slice` split 路径。
 
 Fast 中 `H <= 2048` 使用 group8 模板；`2048 < H <= 4096` 使用 group4 模板，
-把 DeepSeek-V4-Flash 的宽输入控制在 910B 单核 UB 上限内。Generic 是覆盖兜底，
-不替代 fast，也不改变 split 路径承担的通信语义。
+把 DeepSeek-V4-Flash 的宽输入控制在 910B 单核 UB 上限内。GenericGrouped 只
+覆盖非 rank16 的 4K 内 shape；Generic group1 继续承担完整融合范围的通用兜底，
+两者都不改变 split 路径承担的通信语义。
 
 PyTorch 和 NumPy 没有同名接口。本算子是 vLLM-Ascend 内部 in-place 自定义算子，
 语义以本设计为准。
@@ -72,8 +77,10 @@ at::Tensor moe_lora_bgmv_fused(
 | `slice_size` | int64 | scalar | `== O`，`slice_offset + O <= Y` |
 | `scale` | double/float | scalar | Host 转为 FP32 左值后传入 kernel |
 
-Fast 固定 `R=16` 且 `H/O <= 4096`；Generic 对 `R` 做 8/16/32/64 四个编译期
-实例化，并支持 `H/O <= 16384`。以下条件由 Python 调用层直接回退到现有
+Fast 固定 `R=16` 且 `H/O <= 4096`；GenericGrouped 对 8/32/64 做 4K 内编译期
+实例化并应用上述 rank-specific M 门槛；门槛以下走 Generic group1。Generic
+group1 对 8/16/32/64 做完整编译期实例化，并支持
+`H/O <= 16384`。以下条件由 Python 调用层直接回退到现有
 `bgmv_shrink + 通信/权重乘 + bgmv_expand_slice` 路径：
 
 - `fully_sharded=True`；
@@ -132,7 +139,8 @@ if (H % 8 == 0 && indices[row:row+8] 全部相同) {
 
 该判断只影响性能，不改变结果；不要求 `indices` 全局有序。FP32 X 每行起始地址
 必须 32B 对齐，因此 `H` 不是 8 的倍数时也逐行处理。负 index 的整组直接跳过，
-mixed index 逐行处理。Generic 固定 group1，不执行相邻 index 探测。
+mixed index 逐行处理。Generic group1 不执行相邻 index 探测；GenericGrouped
+使用独立的 4/2/1 检测逻辑。
 
 ### 2.2 Fast AscendC API 序列
 
@@ -186,7 +194,29 @@ Mul/Reduce 结果写入独立的 FP32 product buffer。这样在额外使用 32 
 前提下保留现有 expand 归约顺序，并将 B 的 GM 流量和 Cast 指令最多降到原来的
 1/8。inplace variant 保留 8/4-row GM 权重复用，但每行重新 Cast。
 
-### 2.3 Generic 单 kernel API 序列
+### 2.3 GenericGrouped：4/2/1-row 权重复用
+
+`rank in {8, 32, 64}` 且 `H/O <= 4096` 时，Device 在每个 Core 的连续行范围内
+依次尝试 4/2/1 行。只有相邻 index 相同且非负时才进入 group4/group2；mixed
+index 处理首行后重新探测，负 index 逐行跳过，因此不要求 indices 全局有序。
+
+Grouped Shrink 先把各行 X 依次搬入同一个 DataT queue，并 Cast 到按行对齐的
+FP32 X buffer。随后以 A rank batch 为外循环：A 只搬入并 Cast 一次，immutable
+FP32 weight 在 4/2 行间保持，独立 product buffer 承接每行 Mul/Reduce。Grouped
+Expand 同样对每个 B tile 只搬入并 Cast 一次，再依次更新组内各行。
+
+X、A、B 的 DataT 生命周期互不重叠，共享一个 8192-element 单槽 queue。A/B
+都使用显式 prologue/steady-state/epilogue：当前 DataT weight Cast 完并释放 slot
+后，立即 EnQue 下一 rank batch/B tile，再执行当前 weight 的 Mul/Reduce，使下一
+片 MTE2 与当前 Vector 计算重叠；immutable weight 和 product 必须是两块独立
+FP32 buffer。
+
+y 使用一个 `TQueBind<VECIN,VECOUT,1>`，一次 strided `DataCopyPad` 搬入组内完整
+slice，UB 行 stride 为 `align_up(O * sizeof(DataT), 32)`；全部 B tile 更新完成后
+再用一次反向 strided `DataCopyPad` 写回。GM stride 使用字节，UB stride 使用
+32B DataBlock，尾行 padding 不参与计算。
+
+### 2.4 Generic group1 单 kernel API 序列
 
 Generic 使用 `K_TILE = 8192`、`B_TILE = 8192` 和
 `O_TILE = 8192 / R`，因此 `H/O <= 16384` 时 Shrink 最多两个 K tile，Expand
@@ -234,12 +264,14 @@ Expand 中 B 每片不超过 8192 个元素。rank 向量复制为 64-float patt
 Expand 时一次搬入完整 y slice，各 B tile 在 UB 内按偏移 Cast 到 FP32、Add、
 `CAST_RINT`，循环结束后一次搬回完整 slice，避免 rank32/64 的碎片化 y DMA。
 
-第一版所有 queue 都是真实单缓冲：`weightQueue` 的 slot 数为 1，完整 y slice
-使用单个 `TQueBind<VECIN, VECOUT, 1>` 原地复用。只有实现显式
-prologue/steady-state/epilogue 预取后，才对双缓冲版本单独做 profiler A/B；不能
-只把 queue 数改为 2 并宣称存在搬算重叠。
+所有 queue 都是真实单缓冲：`weightQueue` 的 slot 数为 1，完整 y slice 使用单个
+`TQueBind<VECIN, VECOUT, 1>` 原地复用。A/B 已实现显式
+prologue/steady-state/epilogue：当前 DataT weight Cast 完并释放单槽后，立即
+EnQue 下一 rank batch/B tile，再执行当前 FP32 buffer 上的 Mul/Reduce。该单槽
+look-ahead 不增加 UB；双缓冲版本仍须单独做 profiler A/B，不能只把 queue 数改为
+2 并宣称存在搬算重叠。
 
-### 2.4 实现路径选择
+### 2.5 实现路径选择
 
 - [x] AscendC Kernel（Vector + reduction）
 - [ ] CATLASS 模板库
@@ -247,9 +279,10 @@ prologue/steady-state/epilogue 预取后，才对双缓冲版本单独做 profil
 
 虽然数学上包含两个小矩阵乘，但每行动态选择不同权重，rank 最大仅 64，且需要
 in-place slice add。直接调用常规 GEMM 仍需先做动态分组、workspace permutation
-和 scatter。Fast 与 Generic 均采用 AscendC Vector kernel：Fast 利用
-expert-sorted 局部性，Generic 用 group1 保证通用覆盖。若大 M 分组场景仍达不到
-目标，再评估带显式 group offsets 的 CATLASS/Grouped GEMM v3。
+和 scatter。三层融合模板均采用 AscendC Vector kernel：Fast 利用 rank16 的
+expert-sorted 局部性，GenericGrouped 为 rank8/32/64 复用相邻行权重，Generic
+group1 保证完整通用覆盖。若大 M 分组场景仍达不到目标，再评估带显式 group
+offsets 的 CATLASS/Grouped GEMM v3。
 
 ## 3. Tiling 策略
 
@@ -265,7 +298,7 @@ struct MoeLoraBgmvFusedTilingData {
     uint32_t coreNum;
     uint32_t rowsPerCore;
     uint32_t blockDim;
-    uint32_t groupRows;          // fast 为 8/4，Generic 为 1
+    uint32_t groupRows;          // fast 为 8/4；Generic/Grouped launcher 忽略
     uint32_t outputTileRows;     // fast 为 512，Generic 为 8192/rank
     uint32_t rank;               // 8/16/32/64
     float scale;
@@ -299,8 +332,9 @@ rowsPerCore = align_up(ceil(M / desiredCoreNum), groupRows)
 blockDim = ceil(M / rowsPerCore)
 ```
 
-`M > 1024` 的 Generic 固定 `groupRows=1`，按连续 `rowsPerCore` 区间切分。所有
-策略都保证不同 Core 写入不同 y 行，不需要 atomic 或核间同步。
+`M > 1024` 的 Generic/GenericGrouped 均按连续 `rowsPerCore` 区间切分；Grouped
+只在单个 Core 的范围内探测 4/2 行，不跨 Core 边界复用。所有策略都保证不同
+Core 写入不同 y 行，不需要 atomic 或核间同步。
 
 AscendC launcher 在融合算子内部进一步选择编译期特化入口：
 
@@ -310,6 +344,9 @@ rank == 16 且 H/O <= 4096  -> fast
   2048 < H <= 4096        -> group4 template
   M < 2048 且 H == 2048   -> inplace variant，不分配 productFp32Buffer
   其它 fast shape          -> reuse variant，A/B 每组只 Cast 一次
+rank in {8,32,64} 且 H/O<=4096
+  且 rank8 M>=512 或 rank32/64 M>=384
+                            -> GenericGrouped 4/2/1-row template
 其它受支持 rank/H/O         -> Generic group1 template
 其它                         -> 不调用 fused op，由 Python 走 split
 ```
@@ -385,7 +422,7 @@ slot 数为 1，FP16/BF16 的元素大小相同，int32/int64 单个 index 对�
 其中 `A32(x) = align_up(x, 32)`。四个 rank 的各项天然满足 32B 对齐，总公式为：
 
 ```text
-genericUbBytes(rank, O) = 98,848 + 8 * rank + 8 * (8192 / rank) + 2 * O
+genericUbBytes(rank, O) = 98,848 + 8 * rank + 8 * (8192 / rank) + A32(2 * O)
 ```
 
 下表按最大 `O=16384` 计算；较小输出按实际 O 申请更少 UB：
@@ -398,9 +435,48 @@ genericUbBytes(rank, O) = 98,848 + 8 * rank + 8 * (8192 / rank) + 2 * O
 | 64 | 128 | 133,152 B | 63,456 B |
 
 Host 必须按该逐项公式检查 Generic UB，不能复用 fast 的 group4/group8 公式。
-单缓冲是第一版正式契约；双缓冲仅在实现真实预取流水并完成单独 A/B 后进入设计。
+正式契约仍为单槽 queue，但 A/B 已在 Cast 和 FreeTensor 后预取下一片，因此存在
+MTE2/Vector look-ahead 且不增加 UB。双缓冲仅在完成单独 A/B 后进入设计。
 
 所有 GM 到 UB、UB 到 GM 搬运使用 `DataCopyPad`，尾部不足 32B 时由 pad 参数处理。
+
+### 3.5 GenericGrouped UB 级切分
+
+GenericGrouped 固定最大组行数 `G=4`、`H/O<=4096`、B tile 8192 elements。
+令 `H_a=align_up(H,16)`、`O_a=align_up(O,16)`、`P=8192/rank`。int32/int64
+的 4 个 index 均在 32B 对齐后占 32B；FP16/BF16 公式相同：
+
+| Buffer | 数量 | 最大/实际字节 |
+|---|---:|---:|
+| `indicesQueue` | 1 | `A32(4 * sizeof(index_t)) = 32` |
+| shared `dataQueue`（X/A/B） | 1 | `8192 * 2 = 16,384` |
+| grouped `yQueue` (`TQueBind`) | 1 | `4 * O_a * 2` |
+| grouped `xFp32Buffer` | 1 | `4 * H_a * 4` |
+| immutable `weightFp32Buffer` | 1 | `8192 * 4 = 32,768` |
+| independent `productFp32Buffer` | 1 | `8192 * 4 = 32,768` |
+| `rankBuffer` | 1 | `4 * rank * 4` |
+| `reduceTmpBuffer` | 1 | `512` |
+| `yInputFp32Buffer` | 1 | `P * 4` |
+| `yAccumFp32Buffer` | 1 | `P * 4` |
+
+因此 Host 的精确公式为：
+
+```text
+groupedUbBytes(rank, H, O)
+  = 82,464 + 16*H_a + 8*O_a + 16*rank + 8*(8192/rank)
+```
+
+按 `H=O=4096` 的最大 grouped shape：
+
+| rank | `P` | 最大 Grouped UB | 距 192 KiB 余量 |
+|---:|---:|---:|---:|
+| 8 | 1024 | 189,088 B | 7,520 B |
+| 32 | 256 | 183,328 B | 13,280 B |
+| 64 | 128 | 182,816 B | 13,792 B |
+
+公式已包含最坏 int64 indices、所有 32B 对齐、完整 grouped y、immutable weight、
+independent product、TQue 单槽和全部 TBuf。A/B look-ahead 在 Cast 后复用同一个
+DataT slot，不增加 UB；不能把该单槽改成双缓冲，否则 rank8 最大 shape 会超限。
 
 ## 4. Workspace 与图捕获
 
@@ -431,18 +507,20 @@ W13 和 W2 分别比较，并继续运行完整 W13 -> SiLU/Mul -> W2 真实权�
 1. 取消 `[M, R]` FP32 rank tensor 的 GM 写回、读回和一次 kernel launch。
 2. 连续 8 行 index 相同时，A/B 权重 GM 搬运最多降到原来的 1/8；短分组保留
    4/2-row 路径。
-3. X 在 shrink 的 R 个 rank 归约中常驻 FP32 UB，不重复从 GM 搬运。
-4. Fast rank16 和 Generic rank8/16/32/64 都是编译期特化，移除 Device 热路径的
+3. GenericGrouped 的 4/2-row 路径把 rank8/32/64 的 A/B 权重 GM 搬运与 Cast
+   最多降到 group1 的 1/4 或 1/2，并用单槽 look-ahead 重叠下一片 MTE2。
+4. X 在 shrink 的 R 个 rank 归约中常驻 FP32 UB，不重复从 GM 搬运。
+5. Fast rank16 和 Generic rank8/16/32/64 都是编译期特化，移除 Device 热路径的
    runtime rank 分支。
-5. 小/中 M quotient/remainder 分核减少空闲 AIV；mixed index 和 Generic group1
+6. 小/中 M quotient/remainder 分核减少空闲 AIV；mixed index 和 Generic group1
    不额外构造 permutation/workspace。
-6. Generic 的 A rankBatch 减少窄 H 下的 DMA/Scalar 提交次数，8192-element K/B
+7. Generic 的 A rankBatch 减少窄 H 下的 DMA/Scalar 提交次数，8192-element K/B
    tile 控制 UB 峰值。
 
 ### 5.3 预期与门禁
 
-以下是 fast 第一阶段的历史基线与门禁，保留用于回归对照，不作为尚未实测
-Generic 的收益结论：
+以下是 fast 第一阶段的历史基线与门禁，保留用于回归对照；Generic 和
+GenericGrouped 的正式实测结果见 5.4：
 
 - 1024-token BGMV shrink+expand 基线：3121.991 us，占全路径 91.7%。
 - 第一阶段目标：BGMV 降低 10%--20%，即节省约 312--624 us。
@@ -457,8 +535,42 @@ Generic 的收益结论：
 
 预期是访存与 Vector 计算混合受限。8/4/2-row 路径主要减少 A/B GM 流量；Cast、
 Mul、Reduce 指令数量基本不变，因此权重流量下降不会线性转化为 kernel 加速。
-Generic 第一版保持单缓冲，后续双缓冲只有在 profiler 证明显式预取与 Vector
-计算重叠且端到端提升后才可合入。
+Generic group1 与 GenericGrouped 都保持单槽 queue，并且只在当前 weight Cast 后
+释放 DataT slot，再以同一单槽预取下一片；这不增加 UB。任何双槽版本仍须单独
+证明 UB、精度和收益。
+
+### 5.4 Generic/GenericGrouped 正式实测
+
+910B3 上使用 Qwen3.5-35B-A3B expert/router 真实权重数值代理，固定
+`warmup=5, active=5, repeat=1`，每条 fused/split 路径独立采集 3 轮并取中位数。
+W13 为 `4096->2048`，W2 为 `2048->4096`，rank 8/32/64，M 为
+48/384/3072；合计 18 个 case 全部优于 split：
+
+| Phase | Case 数 | fused 优于 split | 平均加速比 | 加速比范围 |
+|---|---:|---:|---:|---:|
+| W13 | 9 | 9/9 | 1.570x | 1.469x--1.750x |
+| W2 | 9 | 9/9 | 1.574x | 1.479x--1.760x |
+| 合计 | 18 | 18/18 | 1.572x | 1.469x--1.760x |
+
+其中 R64/M3072 的 W13 从 split 2876.833 us 降至 1643.465 us（1.750x），
+W2 从 2697.590 us 降至 1532.787 us（1.760x）。恢复最终源码后，同口径 W13
+复测为 1651.457/2862.321 us（1.733x），fused 与原正式值相差 0.49%。这些
+结果来自 Qwen checkpoint 数值驱动的 kernel proxy，不是 DeepSeek-V4-Flash
+checkpoint，也不是真实 LoRA adapter 或端到端 TP8/EP 实测。
+
+PMU 显示 M=3072 的 Vector ratio 为 0.817--0.906，MTE2 ratio 为
+0.125--0.172；MTE3 最高 0.044，大 shape 仅 0.002--0.025。当前大 shape 已由
+FP32 Cast/Mul/Reduce 主导，输出写回不是瓶颈。rank8 最大 Grouped UB 仅余
+7,520 B，不能直接改成常规双缓冲。
+
+### 5.5 未保留的 WholeReduceSum 实验
+
+曾把 rank64 Expand 的两次 `BlockReduceSum` 改为一次
+`WholeReduceSum(mask=64)`。编译及 12 个定向精度 case 均通过，但 W13 R64 的
+M=384 从 238.369 us 回退到 299.258 us（25.5%），M=3072 从 1643.465 us
+回退到 2119.926 us（29.0%），因此已完整撤销。910B3 上现有两级
+`BlockReduceSum` 更快；下一阶段若要取得两位数额外收益，需要评估
+Cube/CATLASS Grouped GEMM，而不是只减少表面归约指令数。
 
 ## 6. Kernel 实现要点
 
@@ -469,11 +581,13 @@ Generic 第一版保持单缓冲，后续双缓冲只有在 profiler 证明显�
    计算前重新 Cast，不复用被归约的 tensor。
 5. Fast Expand 复用现有 rank16 的 `BlockReduceSum + PairReduceSum`；Generic
    按 rank 使用 1--3 级归约，并在每一级显式补零尾部。
-6. Generic 所有显式 vector repeat 不超过 128，低于 uint8 的 255 上限。
-7. 不向 kernel 传右值；Host 将 `scale` 转为 FP32 局部变量后捕获并传入。
-8. `M<=1024` 使用 quotient/remainder 行范围；大 M fast 按 group 对齐。不同 Core
+6. GenericGrouped 的 strided y 搬运中 GM stride 使用字节、UB stride 使用 32B
+   DataBlock；4/2/1-row 均只访问各自有效行。
+7. Generic 所有显式 vector repeat 不超过 128，低于 uint8 的 255 上限。
+8. 不向 kernel 传右值；Host 将 `scale` 转为 FP32 局部变量后捕获并传入。
+9. `M<=1024` 使用 quotient/remainder 行范围；大 M fast 按 group 对齐。不同 Core
    不写同一行 y。
-9. shape/offset 乘法在 Host 先转为 uint64；正 index 范围由上游 combined-index
+10. shape/offset 乘法在 Host 先转为 uint64；正 index 范围由上游 combined-index
    契约保证，任意负 index 在 Device 跳过。
 
 ## 7. Python 集成策略
@@ -494,6 +608,11 @@ if not can_fuse_semantics:
     split
 elif full_rank == 16 and H <= 4096 and O <= 4096:
     fast
+elif (full_rank in {8, 32, 64}
+      and H <= 4096 and O <= 4096
+      and ((full_rank == 8 and M >= 512)
+           or (full_rank in {32, 64} and M >= 384))):
+    GenericGrouped 4/2/1
 elif (full_rank in {8, 16, 32, 64}
       and 1 <= H <= 16384 and 1 <= O <= 16384):
     Generic group1
@@ -501,8 +620,9 @@ else:
     split
 ```
 
-Fast/Generic 都直接更新 y slice。Split 保留 shrink 后的 TP 通信、routed-weight
-multiply 和 expand，因而是所有不支持 shape/模式的最终语义兜底。
+Fast、GenericGrouped 和 Generic group1 都直接更新 y slice。Split 保留 shrink
+后的 TP 通信、routed-weight multiply 和 expand，因而是所有不支持 shape/模式
+的最终语义兜底。
 
 历史生产路由对 fast 使用 `M>=512`，并对 `O>2048` 使用更保守的 `M>=1024`：
 910B3 的 256->4096 实测中，768 行融合慢于 split，960/1152 行开始略有收益。
@@ -519,11 +639,16 @@ msprof/ACL Graph 验证仍是生产放量门禁。旧门槛及其 768/960/1152 �
 - H 覆盖 1/8191/8192/8193/16384；O 对每个 rank 覆盖
   `O_TILE-1/O_TILE/O_TILE+1/16384`。
 - 全有效、全负、mixed、alternating、expert-sorted，以及连续 8/4/2 行相同 index。
+- GenericGrouped 对 rank8/32/64 分别覆盖纯 group4、group2+尾行、
+  `positive,negative,positive,positive`、不同负值、Core 边界截断和 M=1/2/3/4/5。
+- Grouped y strided 搬运覆盖 O=1/15/16/17/4095/4096、非零 slice offset、
+  `Y>O` 行 stride，以及 G4/G2/G1 三种 blockCount。
 - K/B tile 尾块逐级补零、非零 slice offset、in-place add、scale 为 0/负值。
 - 与 `bgmv_shrink + bgmv_expand` 严格 parity，并与 PyTorch FP32 参考做 allclose。
 - `fully_sharded`、`mul_routed_weight`、rank mismatch、unsupported dtype/shape 和
   fused op unavailable 必须断言走 split。
-- ACL Graph capture/replay 覆盖 fast/Generic；尾块单独运行 mssanitizer。
+- ACL Graph capture/replay 覆盖 fast/GenericGrouped/Generic group1；尾块单独运行
+  mssanitizer。
 
 ### 8.2 性能
 
@@ -534,6 +659,9 @@ msprof/ACL Graph 验证仍是生产放量门禁。旧门槛及其 768/960/1152 �
 - 每条路径独立 3 轮，奇偶轮交换顺序，以 msprof active step 中位数比较。
 - Generic 对 rank8/16/32/64 分别覆盖 K/B 整 tile 和尾 tile；M 覆盖
   1/48/512/1024/3072，并与同 shape split 路径逐项 A/B。
+- GenericGrouped 单独记录 group4/group2/group1 的实际行数和权重加载次数；
+  rank8/32/64 在 4096->2048、2048->4096、4096->4096 上与 Generic group1
+  ybind 和 single-slot look-ahead 做同 case 对比。
 - 分别记录 MTE2、Vector、Scalar 时间；只有明确实现
   prologue/steady-state/epilogue 后才增加双缓冲候选，且必须与单缓冲比较。
 
@@ -551,8 +679,15 @@ msprof/ACL Graph 验证仍是生产放量门禁。旧门槛及其 768/960/1152 �
 - [x] Fast 至少 30 项精度测试通过（52/52）。
 - [x] Fast 真实权重 torch_npu.profiler 门禁通过（22 case；生产路由 19 fused、
   3 fallback、0 回退）。
-- [ ] Generic Host/Kernel/路由实现、编译与完整矩阵精度测试通过。
-- [ ] Generic mssanitizer、ACL Graph capture/replay 和真实权重 profiler A/B 通过。
+- [x] Generic group1 与 GenericGrouped Host/Kernel/路由源码已实现。
+- [x] GenericGrouped 编译、100/100 完整精度与 18/18 性能门禁通过。
+- [x] Generic/GenericGrouped 定向 plain memcheck 通过；race/init/sync 因产物未使用
+  `--cce-enable-sanitizer` 被工具忽略，明确记为不可判定而非通过。
+- [x] Fast/GenericGrouped/Generic group1 ACL Graph capture 及各 3 次 replay 通过，
+  Graph 与 eager 最大差为 0。
+- [x] rank8/32/64 路由边界 profiler 6/6、fully-sharded shrink 12/12 通过。
+- [x] Generic/GenericGrouped 真实权重 proxy profiler A/B 通过；18/18 case 优于
+  split，平均 1.572x。
 
 ## 10. 参考实现
 

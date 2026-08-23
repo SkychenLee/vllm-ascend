@@ -27,10 +27,11 @@
   上限仅余 9,408 B，不适合再引入常规 double buffer。
 - mixed/alternating index 只能走 1-row fallback。进一步优化需要显式 group
   offsets 或 Grouped GEMM/CATLASS，属于接口和数据流扩展，未纳入本次三轮迭代。
-- EP、`fully_sharded=True`、routed-weight multiply 和 rank != 16 继续走原有
-  shrink/expand 路径，本算子不改变这些语义。
+- EP/通信语义、`fully_sharded=True`、routed-weight multiply 和
+  `local_rank != full_rank` 继续走原有 shrink/expand。rank8/32/64 在无上述
+  语义时已由 Generic/GenericGrouped 覆盖。
 
-## 测试口径
+## 前三轮 fast 历史测试口径
 
 - 硬件：同一张空闲 Ascend 910B3（物理 NPU 0）。
 - checkpoint：`/home/models/Qwen3.5-35B-A3B`。
@@ -173,6 +174,106 @@ DeepSeek-V4-Flash 目标 shape；它们不是 DeepSeek LoRA adapter。
   为 1.274x，且无回退 case。
 - 全部 22 个新旧性能 case 的生产路由平均有效加速比为 1.459x。
 
+## Generic/GenericGrouped 通用模板扩展
+
+### 最终路由范围
+
+1. rank16、`H/O<=4096` 使用 fast 8/4/2/1-row 模板。
+2. rank8 在 `M>=512`、rank32/64 在 `M>=384`，且 `H/O<=4096` 时使用
+   GenericGrouped 4/2/1-row 模板。
+3. rank8/16/32/64、`H/O<=16384` 的其余融合 shape 使用 Generic group1。
+4. fully-sharded、routed-weight multiply、通信/rank mismatch 及不支持 shape
+   继续使用 split BGMV 通用兜底。
+
+Generic 与 GenericGrouped 的 A/B 都使用 single-slot look-ahead：当前 DataT
+weight Cast 并释放 slot 后，立即预取下一片，再执行当前 FP32 buffer 的
+Mul/Reduce。Grouped y 在 UB 中保留完整 slice，最后一次 strided DMA 写回。
+
+### 正式性能口径
+
+- 硬件：隔离 Ascend 910B3，物理 NPU 0。
+- 数据：`/home/models/Qwen3.5-35B-A3B` expert/router 真实 checkpoint 数值代理。
+- Router fingerprint：`d55bd73f2cfdb0bd`；W13 A/B：
+  `d8293de58e3a1efc`/`09e023844d1a2266`；W2 A/B：
+  `a5a7f635bab26b2a`/`d13c3b33dde439ab`。
+- A/B 按目标 H/O/rank 裁剪或周期重复；不是 DeepSeek-V4-Flash checkpoint，
+  也不是真实 LoRA adapter。
+- fused 与 NPU split `bgmv_shrink + bgmv_expand` 分别采集 3 轮并交换顺序，
+  固定 `warmup=5, active=5, repeat=1`，取 `op_statistic.csv` active step 中位数。
+
+### W13：4096 -> 2048
+
+| Rank | M | 路由 | Fused(us) | Split(us) | 加速比 |
+|---:|---:|---|---:|---:|---:|
+| 8 | 48 | generic | 11.380 | 16.844 | 1.480x |
+| 8 | 384 | generic | 38.021 | 58.437 | 1.537x |
+| 8 | 3072 | grouped | 232.529 | 380.376 | 1.636x |
+| 32 | 48 | generic | 29.457 | 43.273 | 1.469x |
+| 32 | 384 | grouped | 125.803 | 192.440 | 1.530x |
+| 32 | 3072 | grouped | 853.393 | 1438.073 | 1.685x |
+| 64 | 48 | generic | 52.777 | 78.338 | 1.484x |
+| 64 | 384 | grouped | 238.369 | 371.347 | 1.558x |
+| 64 | 3072 | grouped | 1643.465 | 2876.833 | 1.750x |
+
+W13 为 9/9 优于 split，平均加速比 1.570x。恢复最终源码后，R64/M3072
+同口径复测为 1651.457/2862.321 us（1.733x）；fused 与正式值相差 0.49%。
+
+### W2：2048 -> 4096
+
+| Rank | M | 路由 | Fused(us) | Split(us) | 加速比 |
+|---:|---:|---|---:|---:|---:|
+| 8 | 48 | generic | 10.452 | 16.492 | 1.578x |
+| 8 | 384 | generic | 36.353 | 55.561 | 1.528x |
+| 8 | 3072 | grouped | 222.460 | 355.367 | 1.597x |
+| 32 | 48 | generic | 27.877 | 41.365 | 1.484x |
+| 32 | 384 | grouped | 119.938 | 179.716 | 1.498x |
+| 32 | 3072 | grouped | 808.164 | 1326.031 | 1.641x |
+| 64 | 48 | generic | 49.525 | 73.258 | 1.479x |
+| 64 | 384 | grouped | 225.685 | 360.663 | 1.598x |
+| 64 | 3072 | grouped | 1532.787 | 2697.590 | 1.760x |
+
+W2 为 9/9 优于 split，平均加速比 1.574x。两阶段合计 18/18 优于 split，
+平均加速比 1.572x，范围 1.469x--1.760x。
+
+### PMU 瓶颈
+
+| 场景 | Vector ratio | MTE2 ratio | MTE3 ratio |
+|---|---:|---:|---:|
+| M=3072 全部 case | 0.817--0.906 | 0.125--0.172 | 0.002--0.025 |
+| W13 R64/M3072 | 0.906 | 0.142 | 0.002 |
+| W2 R64/M3072 | 0.884 | 0.162 | 0.004 |
+
+- 大 shape 已由 FP32 Cast/Mul/Reduce 主导，MTE2 被 single-slot look-ahead
+  部分覆盖，MTE3 写回不是主要瓶颈。
+- rank8、H=O=4096 的 Grouped UB 使用 189,088 B，距 192 KiB 仅余
+  7,520 B，常规双缓冲会超限。
+- 隔离 R64/M3072 benchmark 的 underfeed 约 8.38%，未发现明显 Host/device
+  idle；继续只削减 GM 流量很难获得两位数收益。
+
+### 未保留实验：WholeReduceSum
+
+rank64 Expand 曾从两次 `BlockReduceSum` 改为一次
+`WholeReduceSum(mask=64)`。编译及 12 个 rank64 定向精度 case 全部通过，
+但正式 profiler 明显回退：
+
+| Case | 当前两级 BlockReduceSum | WholeReduceSum | 回退 |
+|---|---:|---:|---:|
+| W13 R64/M384 | 238.369 us | 299.258 us | 25.5% |
+| W13 R64/M3072 | 1643.465 us | 2119.926 us | 29.0% |
+
+该修改已完整撤销并重新编译。910B3 上当前两级 BlockReduceSum 更快；若继续追求
+两位数提升，需要 Cube/CATLASS Grouped GEMM 级架构改造。
+
+### 最终验证
+
+- 完整精度：100/100（FP16 50/50、BF16 50/50）。
+- fully-sharded shrink：12/12；路由边界 profiler kernel 名：6/6。
+- ACL Graph：fast/grouped/generic 3/3 capture，每条 3 次 replay；Graph 与 eager
+  最大差为 0，alias、slice 外和负索引行语义通过。
+- mssanitizer plain memcheck：generic/grouped 两个目标 kernel 均实际启动且
+  No error detected。race/init/sync 因未用 `--cce-enable-sanitizer` 编译被工具
+  ignored，记为不可判定，不计作通过。
+
 ## 结论
 
 1. 该算子是权重搬运、FP32 Cast 和 Vector Mul/Reduce 混合受限；同一 expert
@@ -187,3 +288,7 @@ DeepSeek-V4-Flash 目标 shape；它们不是 DeepSeek LoRA adapter。
    需要扩大接口与上游路由数据流，不能由现有 kernel 内局部调优安全解决。
 6. DeepSeek-V4-Flash TP8 的 `4096->256` 与 `256->4096` 已进入可控路由范围；
    生产规模 `M=3072` 分别达到 1.608x 和 1.480x，小宽输出继续通用兜底。
+7. rank8/32/64 的通用模板在 W13/W2 正式矩阵中 18/18 优于 split，平均
+   1.572x；小 M 由 Generic group1 保证覆盖，大 M 由 GenericGrouped 复用权重。
+8. PMU 表明大 shape 已是 Vector 主导；当前模板已接近 Vector 实现的局部优化
+   上限，下一阶段应以 grouped Cube/CATLASS 原型和端到端 TP8 验证为主。

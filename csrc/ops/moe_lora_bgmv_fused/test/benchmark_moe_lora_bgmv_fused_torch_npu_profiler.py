@@ -32,6 +32,34 @@ from moe_lora_bgmv_fused_profiler_common import (
 
 FUSED_BGMV_FAST_MAX_DIM = 4096
 FUSED_BGMV_MAX_DIM = 16384
+GROUPED_RANK8_MIN_ROWS = 512
+GROUPED_RANK32_OR_64_MIN_ROWS = 384
+
+
+def classify_kernel_route(rank: int, rows: int, hidden: int, output: int) -> str:
+    if (
+        rank == 16
+        and hidden <= FUSED_BGMV_FAST_MAX_DIM
+        and output <= FUSED_BGMV_FAST_MAX_DIM
+    ):
+        return "fast"
+    grouped_min_rows = (
+        GROUPED_RANK8_MIN_ROWS if rank == 8 else GROUPED_RANK32_OR_64_MIN_ROWS
+    )
+    if (
+        rank in (8, 32, 64)
+        and rows >= grouped_min_rows
+        and hidden <= FUSED_BGMV_FAST_MAX_DIM
+        and output <= FUSED_BGMV_FAST_MAX_DIM
+    ):
+        return "grouped"
+    if (
+        rank in SUPPORTED_RANKS
+        and hidden <= FUSED_BGMV_MAX_DIM
+        and output <= FUSED_BGMV_MAX_DIM
+    ):
+        return "generic"
+    return "split"
 
 
 def make_state(
@@ -171,12 +199,11 @@ def make_state(
     if tuple(a.shape) != expected_a_shape or tuple(b.shape) != expected_b_shape:
         raise ValueError("real weight shape does not match performance case")
     output_size = int(b.shape[1])
-    kernel_route = (
-        "fast"
-        if rank == 16
-        and x.shape[1] <= FUSED_BGMV_FAST_MAX_DIM
-        and output_size <= FUSED_BGMV_FAST_MAX_DIM
-        else "generic"
+    kernel_route = classify_kernel_route(
+        rank,
+        rows,
+        int(x.shape[1]),
+        output_size,
     )
     return {
         "x": x,
@@ -200,11 +227,7 @@ def make_state(
             or expected_a_shape != tuple(getattr(weights, f"{phase}_a").shape)
             or expected_b_shape != tuple(getattr(weights, f"{phase}_b").shape)
         ),
-        "production_fused": (
-            rank in SUPPORTED_RANKS
-            and x.shape[1] <= FUSED_BGMV_MAX_DIM
-            and output_size <= FUSED_BGMV_MAX_DIM
-        ),
+        "production_fused": kernel_route != "split",
     }
 
 
@@ -454,20 +477,23 @@ def render_report(
     fallback_cases = ", ".join(
         f"{result['case']} ({result['shape']})" for result in fallback_results
     ) or "无"
-    fast_count = sum(result["kernel_route"] == "fast" for result in results)
-    generic_count = sum(result["kernel_route"] == "generic" for result in results)
+    route_counts = {
+        route: sum(result["kernel_route"] == route for result in results)
+        for route in ("fast", "grouped", "generic", "split")
+    }
     lines.extend(
         [
             "",
             "## 生产路由汇总",
             "",
-            "直接 kernel 对比表按三级路由契约标记 fast、generic 与 split 兜底。",
+            "直接 kernel 对比表按四级路由契约标记 fast、grouped、generic 与 split 兜底。",
             "",
             "| 指标 | 值 |",
             "| ---- | -- |",
-            f"| 选择 fast kernel | {fast_count} |",
-            f"| 选择 generic kernel | {generic_count} |",
-            f"| 选择通用 BGMV 兜底 | {len(fallback_results)} |",
+            f"| 选择 fast kernel | {route_counts['fast']} |",
+            f"| 选择 grouped kernel | {route_counts['grouped']} |",
+            f"| 选择 generic kernel | {route_counts['generic']} |",
+            f"| 选择 split BGMV 兜底 | {route_counts['split']} |",
             f"| 路由后平均有效加速比 | {sum(routed_ratios) / len(routed_ratios):.3f} |",
             f"| 兜底 case | {fallback_cases} |",
         ]
@@ -478,7 +504,7 @@ def render_report(
             "## 简短分析",
             "",
             "- 融合路径取消 FP32 rank 中间结果的 GM 往返和一次 kernel launch。",
-            "- rank16 且 H/O<=4096 使用 8/4-row fast 模板；其余受支持 rank/shape 使用 group1 generic 模板。",
+            "- rank16 且 H/O<=4096 使用 fast；rank8 在 M>=512、rank32/64 在 M>=384 且 H/O<=4096 使用 grouped；其余受支持 shape 使用 group1 generic。",
             "- 数据和索引 dtype 单独参数化，表中 DType 使用 `data/index` 形式，便于观察 int32/int64 搬运差异。",
             "- 结果只代表 Qwen expert 权重 proxy 下 fused 对 split 的 kernel crossover；不能外推为 DeepSeek 或真实 LoRA adapter 的端到端收益。",
             "",

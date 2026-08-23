@@ -44,10 +44,108 @@ BASE_PRECISION_CASES = (
     ("Boundary", "all disabled indices", 9, 63, 65, 96, 7, torch.int32, "single", 1.0, "all_negative"),
     ("Boundary", "minimum valid weight", 9, 63, 65, 96, 7, torch.int64, "single", 1.0, "minimum_index"),
     ("Boundary", "maximum valid weight", 9, 63, 65, 96, 7, torch.int32, "single", 1.0, "maximum_index"),
+    (
+        "Boundary",
+        "positive out-of-bounds index",
+        4,
+        64,
+        64,
+        64,
+        0,
+        torch.int64,
+        "single",
+        1.0,
+        "positive_out_of_bounds",
+        32,
+    ),
     ("Boundary", "zero scale", 9, 63, 65, 96, 7, torch.int64, "expert_sorted", 0.0, None),
     ("Boundary", "negative scale", 9, 63, 65, 96, 7, torch.int32, "expert_sorted", -0.5, None),
     ("Boundary", "last valid slice", 9, 63, 33, 97, 64, torch.int64, "expert_sorted", 1.0, None),
     ("Boundary", "zero rows", 0, 64, 64, 64, 0, torch.int32, "single", 1.0, None, 8),
+    (
+        "GenericGrouped",
+        "rank8 maximum UB group4",
+        520,
+        4096,
+        4096,
+        4096,
+        0,
+        torch.int64,
+        "group4_same",
+        1.0,
+        None,
+        8,
+    ),
+    (
+        "GenericGrouped",
+        "rank32 group2",
+        400,
+        4096,
+        4096,
+        4096,
+        0,
+        torch.int32,
+        "group2_same",
+        0.5,
+        None,
+        32,
+    ),
+    (
+        "GenericGrouped",
+        "rank64 group4 plus core tail",
+        401,
+        4095,
+        4096,
+        4128,
+        16,
+        torch.int64,
+        "group4_same",
+        -0.5,
+        None,
+        64,
+    ),
+    (
+        "GenericGrouped",
+        "G4 G2 negative G1 mixed",
+        400,
+        257,
+        513,
+        577,
+        32,
+        torch.int64,
+        "grouped_mixed",
+        0.25,
+        None,
+        32,
+    ),
+    (
+        "GenericGrouped",
+        "different negative indices",
+        400,
+        17,
+        129,
+        145,
+        8,
+        torch.int32,
+        "mixed_negative",
+        1.0,
+        None,
+        64,
+    ),
+    (
+        "GenericGrouped",
+        "strided y O tail",
+        520,
+        4096,
+        4095,
+        4127,
+        16,
+        torch.int32,
+        "group4_same",
+        1.0,
+        None,
+        8,
+    ),
 )
 
 
@@ -149,6 +247,19 @@ def build_indices(rows: int, pattern: str, dtype: torch.dtype) -> torch.Tensor:
         values = torch.full((rows,), -1, dtype=torch.int64)
     elif pattern == "group4_same":
         values = torch.arange((rows + 3) // 4).repeat_interleave(4)[:rows]
+    elif pattern == "group2_same":
+        values = torch.arange((rows + 1) // 2).repeat_interleave(2)[:rows]
+    elif pattern == "grouped_mixed":
+        template = torch.tensor(
+            [0, 0, 0, 0, 1, 1, -1, 2, 3, 4, 4, 5, 5, 5, 5, -2],
+            dtype=torch.int64,
+        )
+        values = template.repeat((rows + template.numel() - 1) // template.numel())[:rows]
+    elif pattern == "mixed_negative":
+        template = torch.tensor(
+            [0, -1, 1, -2, 2, 2, -3, 3], dtype=torch.int64
+        )
+        values = template.repeat((rows + template.numel() - 1) // template.numel())[:rows]
     elif pattern == "alternating":
         values = torch.arange(rows, dtype=torch.int64).remainder(4)
     elif pattern == "mixed_within4":
@@ -195,6 +306,9 @@ def make_inputs(
     elif boundary == "maximum_index":
         num_weights = 5
         indices.fill_(num_weights - 1)
+    elif boundary == "positive_out_of_bounds":
+        num_weights = 5
+        indices.fill_(num_weights)
 
     generator = torch.Generator().manual_seed(20260823 + case_id)
     rank = int(case[11]) if len(case) > 11 else 16
@@ -225,8 +339,8 @@ def reference(inputs: dict[str, Any], chunk_rows: int = 64) -> torch.Tensor:
     for begin in range(0, x.shape[0], chunk_rows):
         end = min(begin + chunk_rows, x.shape[0])
         index_chunk = indices[begin:end].to(torch.int64)
-        valid = index_chunk >= 0
-        safe_indices = index_chunk.clamp_min(0)
+        valid = (index_chunk >= 0) & (index_chunk < a.shape[0])
+        safe_indices = index_chunk.clamp(0, a.shape[0] - 1)
         selected_a = a[safe_indices].float()
         rank_out = torch.bmm(
             x[begin:end].float().unsqueeze(1), selected_a.transpose(1, 2)
@@ -301,9 +415,14 @@ def evaluate_case(
     if end < actual.shape[1]:
         outside_equal &= torch.equal(actual[:, end:], inputs["y"][:, end:])
     alias_preserved = returned.data_ptr() == y_npu.data_ptr()
+    invalid_indices_unchanged = (
+        case[10] != "positive_out_of_bounds"
+        or torch.equal(actual, inputs["y"])
+    )
     passed = (
         alias_preserved
         and outside_equal
+        and invalid_indices_unchanged
         and metrics["MERE"] < threshold
         and metrics["MARE"] < 10 * threshold
     )
@@ -321,6 +440,7 @@ def evaluate_case(
         "threshold": threshold,
         "alias_preserved": alias_preserved,
         "outside_slice_equal": outside_equal,
+        "invalid_indices_unchanged": invalid_indices_unchanged,
         **metrics,
         "passed": passed,
     }

@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import torch
 from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
@@ -31,9 +32,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if get_ascend_device_type() == AscendDeviceType._310P or (
+        self._bgmv_uses_torch_ops = get_ascend_device_type() == AscendDeviceType._310P or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
+        )
+        if self._bgmv_uses_torch_ops:
             moe_lora_bgmv_fused = None
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
@@ -402,6 +404,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
+        if not lora_a_stacked or len(lora_a_stacked) != len(lora_b_stacked):
+            raise ValueError("MoE LoRA requires the same nonzero number of A and B slices.")
+        if any(a.ndim != 4 or b.ndim != 4 for a, b in zip(lora_a_stacked, lora_b_stacked)):
+            raise ValueError("MoE LoRA A and B weights must be 4D tensors.")
+        weight_group_shape = lora_a_stacked[0].shape[:-2]
+        if any(size <= 0 for size in weight_group_shape):
+            raise ValueError("MoE LoRA weight group dimensions must be positive.")
+        num_weight_groups = weight_group_shape[0] * weight_group_shape[1]
         num_experts = lora_a_stacked[0].shape[1]
         if combined_indices is not None:
             if expert_ids is not None or token_lora_mapping is not None:
@@ -414,52 +424,170 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 raise ValueError("expert_ids are required when combined_indices are not provided.")
             if token_lora_mapping is None:
                 token_lora_mapping = self.token_lora_indices
-            expert_idx = expert_ids.view(-1).to(torch.long)
-            lora_idx_safe = token_lora_mapping.clamp(min=0)
-            enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+            if expert_ids.dtype not in (torch.int32, torch.int64):
+                raise TypeError("MoE LoRA expert_ids must be int32 or int64.")
+            if token_lora_mapping.dtype not in (torch.int32, torch.int64):
+                raise TypeError("MoE LoRA token_lora_mapping must be int32 or int64.")
+            if expert_ids.device != x2d.device or token_lora_mapping.device != x2d.device:
+                raise ValueError("MoE LoRA routing metadata must be on the same device as x.")
+            if adapter_enabled.device != x2d.device:
+                raise ValueError("MoE LoRA adapter_enabled must be on the same device as x.")
+            if adapter_enabled.ndim != 1 or adapter_enabled.numel() == 0:
+                raise ValueError("MoE LoRA adapter_enabled must be a nonempty 1D tensor.")
+            expert_idx = expert_ids.reshape(-1).to(torch.long)
+            lora_idx = token_lora_mapping.reshape(-1)
+            if expert_idx.numel() != x2d.shape[0] or lora_idx.numel() != x2d.shape[0]:
+                raise ValueError("MoE LoRA routing metadata size must match the number of rows.")
+            valid_lora = (lora_idx >= 0) & (lora_idx < adapter_enabled.numel())
+            valid_expert = (expert_idx >= 0) & (expert_idx < num_experts)
+            lora_idx_safe = lora_idx.clamp(min=0, max=adapter_enabled.numel() - 1)
+            enabled = valid_lora & valid_expert & adapter_enabled[lora_idx_safe].bool()
             combined_idx = torch.where(
                 enabled,
                 lora_idx_safe * num_experts + expert_idx,
-                torch.full_like(token_lora_mapping, -1),
+                torch.full_like(lora_idx, -1),
             ).contiguous()
         if combined_idx.numel() != x2d.shape[0]:
             raise ValueError(
                 "MoE LoRA routing size mismatch: "
                 f"got {combined_idx.numel()} indices for {x2d.shape[0]} rows."
             )
+        bgmv_uses_torch_ops = getattr(self, "_bgmv_uses_torch_ops", False)
+        topk_weights_fp32 = None
+        if mul_routed_weight and topk_weights is None:
+            raise ValueError("topk_weights are required when mul_routed_weight is enabled.")
+        if mul_routed_weight:
+            if topk_weights.numel() != x2d.shape[0]:
+                raise ValueError(
+                    "MoE LoRA topk_weights size must match the number of rows."
+                )
+            if topk_weights.device != x2d.device:
+                raise ValueError("MoE LoRA topk_weights must be on the same device as x.")
+            if not topk_weights.is_floating_point():
+                raise TypeError("MoE LoRA topk_weights must have a floating-point dtype.")
+        if x2d.shape[0] != y2d.shape[0]:
+            raise ValueError("MoE LoRA x and y row counts must match.")
+        if combined_idx.device != x2d.device:
+            raise ValueError("MoE LoRA routing indices must be on the same device as x.")
+        if not bgmv_uses_torch_ops:
+            if x2d.dtype not in MOE_LORA_FUSED_BGMV_SUPPORTED_DTYPES or y2d.dtype != x2d.dtype:
+                raise TypeError("MoE LoRA x and y must have the same float16 or bfloat16 dtype.")
+            if not x2d.is_contiguous() or not y2d.is_contiguous():
+                raise ValueError("Native MoE LoRA x and y must be contiguous.")
 
-        cur_offset = offset
-        for slice_idx in range(len(lora_a_stacked)):
-            # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
-            # Flattening the leading two dims turns "gather by (lora, expert)"
-            # into "the plain per-row gather" to reuse bgmv_shrink/bgmv_expand.
-            a = lora_a_stacked[slice_idx]
-            b = lora_b_stacked[slice_idx]
+        slice_specs = []
+        tp_world_size = None
+        final_offset = offset
+        for slice_idx, (a, b) in enumerate(zip(lora_a_stacked, lora_b_stacked)):
             local_rank = a.shape[-2]
             full_rank = b.shape[-1]
             out_size = b.shape[-2]
-            a_flat = a.view(-1, local_rank, a.shape[-1])
+            if not bgmv_uses_torch_ops and (a.dtype != x2d.dtype or b.dtype != x2d.dtype):
+                raise TypeError(
+                    "MoE LoRA x, y, lora_a and lora_b must have the same "
+                    f"float16 or bfloat16 dtype; slice {slice_idx} does not."
+                )
+            if full_rank <= 0:
+                raise ValueError(f"MoE LoRA B rank must be positive; slice {slice_idx} has rank {full_rank}.")
+            if not bgmv_uses_torch_ops and full_rank not in MOE_LORA_FUSED_BGMV_SUPPORTED_RANKS:
+                raise ValueError(
+                    "MoE LoRA B rank must be one of 8, 16, 32 or 64; "
+                    f"slice {slice_idx} has rank {full_rank}."
+                )
+            if local_rank <= 0:
+                raise ValueError(f"MoE LoRA A rank must be positive; slice {slice_idx} has rank {local_rank}.")
+            if fully_sharded and (local_rank > full_rank or full_rank % local_rank != 0):
+                raise ValueError(
+                    "MoE LoRA fully_sharded rank mismatch: "
+                    f"A rank {local_rank} must not exceed and must divide B rank {full_rank}."
+                )
+            if fully_sharded and local_rank < full_rank:
+                if tp_world_size is None:
+                    tp_world_size = get_tensor_model_parallel_world_size()
+                if local_rank * tp_world_size != full_rank:
+                    raise ValueError(
+                        "MoE LoRA fully_sharded rank mismatch: "
+                        f"A rank {local_rank} across TP world size {tp_world_size} "
+                        f"does not reconstruct B rank {full_rank}."
+                    )
+            if not fully_sharded and local_rank != full_rank:
+                raise ValueError(
+                    "MoE LoRA rank mismatch without fully_sharded: "
+                    f"A projection has rank {local_rank}, but LoRA B expects rank {full_rank}."
+                )
+            if a.shape[-1] != x2d.shape[1]:
+                raise ValueError(
+                    f"MoE LoRA A input dimension for slice {slice_idx} must match x."
+                )
+            if a.shape[:-2] != b.shape[:-2]:
+                raise ValueError(
+                    f"MoE LoRA A and B weight groups for slice {slice_idx} must match."
+                )
+            if a.shape[:-2] != weight_group_shape:
+                raise ValueError("MoE LoRA weight groups must match across all slices.")
+            if a.shape[1] != num_experts:
+                raise ValueError(
+                    f"MoE LoRA expert count for slice {slice_idx} must match the first slice."
+                )
+            if out_size <= 0 or final_offset < 0 or out_size > y2d.shape[1] - final_offset:
+                raise ValueError(f"MoE LoRA output slice {slice_idx} is out of range.")
+            if a.device != x2d.device or b.device != x2d.device or y2d.device != x2d.device:
+                raise ValueError(f"MoE LoRA tensors for slice {slice_idx} must be on the same device.")
+            if not bgmv_uses_torch_ops and (not a.is_contiguous() or not b.is_contiguous()):
+                raise ValueError(f"Native MoE LoRA weights for slice {slice_idx} must be contiguous.")
 
-            fused_dtype_supported = (
-                x2d.dtype in MOE_LORA_FUSED_BGMV_SUPPORTED_DTYPES
-                and x2d.dtype == a.dtype == b.dtype == y2d.dtype
-            )
+            if bgmv_uses_torch_ops:
+                a_flat = a.reshape(-1, local_rank, a.shape[-1])
+                b_flat = b.reshape(-1, out_size, full_rank)
+            else:
+                a_flat = a.view(-1, local_rank, a.shape[-1])
+                b_flat = b.view(-1, out_size, full_rank)
+
             fused_dims_supported = (
                 MOE_LORA_FUSED_BGMV_MIN_DIM <= x2d.shape[1] <= MOE_LORA_FUSED_BGMV_MAX_DIM
                 and MOE_LORA_FUSED_BGMV_MIN_DIM <= out_size <= MOE_LORA_FUSED_BGMV_MAX_DIM
             )
-
             use_fused_bgmv = (
-                getattr(self, "moe_lora_bgmv_fused", None) is not None
+                not bgmv_uses_torch_ops
+                and getattr(self, "moe_lora_bgmv_fused", None) is not None
                 and not fully_sharded
                 and not mul_routed_weight
                 and local_rank == full_rank
-                and local_rank in MOE_LORA_FUSED_BGMV_SUPPORTED_RANKS
-                and fused_dtype_supported
                 and fused_dims_supported
             )
+            if not bgmv_uses_torch_ops and not use_fused_bgmv:
+                if x2d.shape[1] <= local_rank:
+                    raise ValueError(
+                        "Native split MoE LoRA input dimension must be greater than A rank; "
+                        f"slice {slice_idx} has H={x2d.shape[1]} and rank={local_rank}."
+                    )
+                if out_size < full_rank:
+                    raise ValueError(
+                        "Native split MoE LoRA output dimension must be at least B rank; "
+                        f"slice {slice_idx} has O={out_size} and rank={full_rank}."
+                    )
+
+            slice_specs.append((a_flat, b_flat, local_rank, full_rank, out_size, use_fused_bgmv))
+            final_offset += out_size
+
+        if x2d.shape[0] == 0:
+            return
+
+        if mul_routed_weight:
+            assert topk_weights is not None
+            topk_weights_fp32 = topk_weights.reshape(-1).to(dtype=torch.float32).contiguous()
+
+        split_indices = combined_idx
+        torch_invalid_rows = None
+        if bgmv_uses_torch_ops:
+            # Torch indexing maps -1 to the last weight and raises on a high
+            # index; native kernels treat either case as a disabled row.
+            torch_invalid_rows = (combined_idx < 0) | (combined_idx >= num_weight_groups)
+            split_indices = combined_idx.clamp(min=0, max=num_weight_groups - 1).contiguous()
+
+        cur_offset = offset
+        for a_flat, b_flat, local_rank, full_rank, out_size, use_fused_bgmv in slice_specs:
             if use_fused_bgmv:
-                b_flat = b.view(-1, out_size, full_rank)
                 self.moe_lora_bgmv_fused(
                     x2d,
                     a_flat,
@@ -481,7 +609,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 device=x2d.device,
             )
 
-            self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+            self.bgmv_shrink(x2d, a_flat, shrink_out, split_indices, 1.0)
+            if torch_invalid_rows is not None:
+                shrink_out.masked_fill_(torch_invalid_rows.view(-1, 1), 0.0)
 
             if fully_sharded:
                 if local_rank == full_rank:
@@ -495,13 +625,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                     f"A projection has rank {shrink_out.shape[-1]}, "
                     f"but LoRA B expects rank {full_rank}."
                 )
-            b_flat = b.view(-1, out_size, full_rank)
 
             delta = shrink_out
-            if mul_routed_weight and topk_weights is not None:
-                delta = shrink_out * topk_weights.view(-1, 1)
+            if mul_routed_weight:
+                assert topk_weights_fp32 is not None
+                delta = shrink_out * topk_weights_fp32.view(-1, 1)
 
-            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            self.bgmv_expand_slice(delta, b_flat, y2d, split_indices, cur_offset, out_size, add_inputs=True)
             cur_offset += out_size
 
     def add_lora_logits(
