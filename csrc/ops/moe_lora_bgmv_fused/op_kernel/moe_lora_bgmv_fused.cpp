@@ -37,6 +37,8 @@ public:
         kVectorBytes / sizeof(float);
     static constexpr uint32_t kFloatElementsPerBlock =
         32 / sizeof(float);
+    static constexpr uint32_t kDataElementsPerBlock =
+        32 / sizeof(DataT);
     static constexpr uint32_t kBlocksPerRepeat = 8;
     static constexpr uint32_t kReduceTmpBytes = 256;
 
@@ -137,48 +139,59 @@ public:
             AscendC::LocalTensor<index_t> indicesLocal =
                 CopyInIndices(row, currentRows);
 
-            if (currentRows >= kFallbackGroupRows &&
+            if (currentRows >= 2 &&
                 inputHiddenDim_ % kFloatElementsPerBlock == 0) {
                 const int64_t index0 =
                     static_cast<int64_t>(indicesLocal.GetValue(0));
                 const int64_t index1 =
                     static_cast<int64_t>(indicesLocal.GetValue(1));
-                const int64_t index2 =
-                    static_cast<int64_t>(indicesLocal.GetValue(2));
-                const int64_t index3 =
-                    static_cast<int64_t>(indicesLocal.GetValue(3));
-                if constexpr (kGroupRows == 8) {
-                    if (currentRows == kGroupRows) {
-                        const int64_t index4 =
-                            static_cast<int64_t>(indicesLocal.GetValue(4));
-                        const int64_t index5 =
-                            static_cast<int64_t>(indicesLocal.GetValue(5));
-                        const int64_t index6 =
-                            static_cast<int64_t>(indicesLocal.GetValue(6));
-                        const int64_t index7 =
-                            static_cast<int64_t>(indicesLocal.GetValue(7));
-                        if (index0 == index1 && index0 == index2 &&
-                            index0 == index3 && index0 == index4 &&
-                            index0 == index5 && index0 == index6 &&
-                            index0 == index7) {
-                            indicesQueue_.FreeTensor(indicesLocal);
-                            if (index0 >= 0) {
-                                ProcessGroup<kGroupRows>(
-                                    row, static_cast<uint64_t>(index0));
+                if (currentRows >= kFallbackGroupRows) {
+                    const int64_t index2 =
+                        static_cast<int64_t>(indicesLocal.GetValue(2));
+                    const int64_t index3 =
+                        static_cast<int64_t>(indicesLocal.GetValue(3));
+                    if constexpr (kGroupRows == 8) {
+                        if (currentRows == kGroupRows) {
+                            const int64_t index4 =
+                                static_cast<int64_t>(indicesLocal.GetValue(4));
+                            const int64_t index5 =
+                                static_cast<int64_t>(indicesLocal.GetValue(5));
+                            const int64_t index6 =
+                                static_cast<int64_t>(indicesLocal.GetValue(6));
+                            const int64_t index7 =
+                                static_cast<int64_t>(indicesLocal.GetValue(7));
+                            if (index0 == index1 && index0 == index2 &&
+                                index0 == index3 && index0 == index4 &&
+                                index0 == index5 && index0 == index6 &&
+                                index0 == index7) {
+                                indicesQueue_.FreeTensor(indicesLocal);
+                                if (index0 >= 0) {
+                                    ProcessGroup<kGroupRows>(
+                                        row, static_cast<uint64_t>(index0));
+                                }
+                                row += kGroupRows;
+                                continue;
                             }
-                            row += kGroupRows;
-                            continue;
                         }
                     }
+                    if (index0 == index1 && index0 == index2 &&
+                        index0 == index3) {
+                        indicesQueue_.FreeTensor(indicesLocal);
+                        if (index0 >= 0) {
+                            ProcessGroup<kFallbackGroupRows>(
+                                row, static_cast<uint64_t>(index0));
+                        }
+                        row += kFallbackGroupRows;
+                        continue;
+                    }
                 }
-                if (index0 == index1 && index0 == index2 &&
-                    index0 == index3) {
+                if (index0 == index1) {
                     indicesQueue_.FreeTensor(indicesLocal);
                     if (index0 >= 0) {
-                        ProcessGroup<kFallbackGroupRows>(
+                        ProcessGroup<2>(
                             row, static_cast<uint64_t>(index0));
                     }
-                    row += kFallbackGroupRows;
+                    row += 2;
                     continue;
                 }
 
@@ -283,12 +296,26 @@ private:
             reduceTmpBuffer_.Get<float>();
         const uint64_t weightBase = weightIndex * singleAWeightElements_;
 
-        for (uint32_t rank = 0; rank < kRank; ++rank) {
+        for (uint32_t rankBase = 0; rankBase < kRank;) {
+            const uint32_t remainingRanks = kRank - rankBase;
+            uint32_t rankBatch = 1;
+            if (inputHiddenDim_ % kDataElementsPerBlock == 0) {
+                rankBatch = kWeightTileElements / inputHiddenDim_;
+                if (rankBatch == 0) {
+                    rankBatch = 1;
+                }
+                if (rankBatch > remainingRanks) {
+                    rankBatch = remainingRanks;
+                }
+            }
+            const uint32_t batchWeightElements =
+                rankBatch * inputHiddenDim_;
             AscendC::LocalTensor<DataT> weightLocal =
                 weightQueue_.AllocTensor<DataT>();
             AscendC::DataCopyExtParams copyParams{
                 1,
-                static_cast<uint32_t>(inputHiddenDim_ * sizeof(DataT)),
+                static_cast<uint32_t>(
+                    batchWeightElements * sizeof(DataT)),
                 0,
                 0,
                 0};
@@ -297,44 +324,64 @@ private:
             AscendC::DataCopyPad(
                 weightLocal,
                 aGm_[weightBase +
-                    static_cast<uint64_t>(rank) * inputHiddenDim_],
+                    static_cast<uint64_t>(rankBase) * inputHiddenDim_],
                 copyParams,
                 padParams);
             weightQueue_.EnQue(weightLocal);
             weightLocal = weightQueue_.DeQue<DataT>();
 
             if constexpr (reuse_fp32_weight) {
-                AscendC::Cast(
-                    weightFp32,
-                    weightLocal,
-                    AscendC::RoundMode::CAST_NONE,
-                    inputHiddenDim_);
-                AscendC::PipeBarrier<PIPE_V>();
-            }
-
-            for (uint32_t localRow = 0; localRow < Rows; ++localRow) {
-                if constexpr (!reuse_fp32_weight) {
+                if (rankBatch == 1) {
                     AscendC::Cast(
                         weightFp32,
                         weightLocal,
                         AscendC::RoundMode::CAST_NONE,
                         inputHiddenDim_);
                     AscendC::PipeBarrier<PIPE_V>();
+                } else {
+                    CastWeight(
+                        weightFp32, weightLocal, batchWeightElements);
                 }
-                AscendC::Mul(
-                    productFp32,
-                    xFp32[localRow * inputHiddenDim_],
-                    weightFp32,
-                    inputHiddenDim_);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::ReduceSum<float>(
-                    rankLocal[localRow * kRank + rank],
-                    productFp32,
-                    reduceTmp,
-                    inputHiddenDim_);
-                AscendC::PipeBarrier<PIPE_V>();
+            }
+
+            for (uint32_t batchRank = 0;
+                 batchRank < rankBatch;
+                 ++batchRank) {
+                const uint32_t rank = rankBase + batchRank;
+                AscendC::LocalTensor<float> currentWeightFp32 =
+                    weightFp32;
+                if constexpr (reuse_fp32_weight) {
+                    currentWeightFp32 =
+                        weightFp32[batchRank * inputHiddenDim_];
+                }
+                for (uint32_t localRow = 0;
+                     localRow < Rows;
+                     ++localRow) {
+                    if constexpr (!reuse_fp32_weight) {
+                        AscendC::Cast(
+                            weightFp32,
+                            weightLocal[
+                                batchRank * inputHiddenDim_],
+                            AscendC::RoundMode::CAST_NONE,
+                            inputHiddenDim_);
+                        AscendC::PipeBarrier<PIPE_V>();
+                    }
+                    AscendC::Mul(
+                        productFp32,
+                        xFp32[localRow * inputHiddenDim_],
+                        currentWeightFp32,
+                        inputHiddenDim_);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::ReduceSum<float>(
+                        rankLocal[localRow * kRank + rank],
+                        productFp32,
+                        reduceTmp,
+                        inputHiddenDim_);
+                    AscendC::PipeBarrier<PIPE_V>();
+                }
             }
             weightQueue_.FreeTensor(weightLocal);
+            rankBase += rankBatch;
         }
 
         AscendC::Muls(
