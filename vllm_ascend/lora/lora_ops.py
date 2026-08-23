@@ -32,6 +32,28 @@ def moe_lora_build_combined_idx(
     )
 
 
+def moe_lora_bgmv_fused(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    output_tensor: torch.Tensor,
+    slice_offset: int,
+    slice_size: int,
+    scaling: float = 1.0,
+) -> torch.Tensor:
+    return torch.ops._C_ascend.moe_lora_bgmv_fused(
+        inputs,
+        lora_a_weights,
+        lora_b_weights,
+        lora_indices_tensor,
+        output_tensor,
+        slice_offset,
+        slice_size,
+        scaling,
+    )
+
+
 def bgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,

@@ -2148,6 +2148,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         torch::kPrivateUse1,
         &vllm_ascend::moe_lora_build_combined_idx);
 
+    ops.def(
+        "moe_lora_bgmv_fused(Tensor x, Tensor lora_a, Tensor lora_b, "
+        "Tensor indices, Tensor(a!) y, int slice_offset, int slice_size, "
+        "float scale=1.0) -> Tensor(a!)");
+    ops.impl(
+        "moe_lora_bgmv_fused",
+        torch::kPrivateUse1,
+        &vllm_ascend::moe_lora_bgmv_fused);
+
     ops.def("sgmv_shrink(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y, float scale) -> ()");
     ops.impl("sgmv_shrink", torch::kPrivateUse1, &vllm_ascend::sgmv_shrink);
 

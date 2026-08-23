@@ -77,6 +77,33 @@ namespace vllm_ascend {
         const at::Tensor &adapter_enabled,
         int64_t num_experts);
 
+    extern void moe_lora_bgmv_fused_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *lora_a,
+        void *lora_b,
+        void *indices,
+        void *y,
+        uint32_t num_rows,
+        uint32_t input_hidden_dim,
+        uint32_t output_hidden_dim,
+        uint32_t output_full_dim,
+        uint32_t slice_offset,
+        uint32_t rows_per_core,
+        float scale,
+        bool indices_is_int32);
+
+    at::Tensor moe_lora_bgmv_fused(
+        const at::Tensor &x,
+        const at::Tensor &lora_a,
+        const at::Tensor &lora_b,
+        const at::Tensor &indices,
+        at::Tensor &y,
+        int64_t slice_offset,
+        int64_t slice_size,
+        double scale);
+
     extern void sgmv_shrink_impl(
         AscendType type,
         void *stream,

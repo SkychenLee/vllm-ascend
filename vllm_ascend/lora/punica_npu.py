@@ -12,6 +12,8 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+MOE_LORA_FUSED_BGMV_MIN_ROWS = 512
+
 
 # The platforms that are compatible with the PyTorch-native implementation can
 # inherit this class
@@ -29,6 +31,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if get_ascend_device_type() == AscendDeviceType._310P or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
+            moe_lora_bgmv_fused = None
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
@@ -42,6 +45,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 bgmv_expand,
                 bgmv_expand_slice,
                 bgmv_shrink,
+                moe_lora_bgmv_fused,
                 sgmv_expand,
                 sgmv_expand_slice,
                 sgmv_shrink,
@@ -49,6 +53,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.bgmv_expand = bgmv_expand
         self.bgmv_expand_slice = bgmv_expand_slice
         self.bgmv_shrink = bgmv_shrink
+        self.moe_lora_bgmv_fused = moe_lora_bgmv_fused
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
@@ -431,6 +436,31 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             full_rank = b.shape[-1]
             out_size = b.shape[-2]
             a_flat = a.view(-1, local_rank, a.shape[-1])
+
+            use_fused_bgmv = (
+                getattr(self, "moe_lora_bgmv_fused", None) is not None
+                and not fully_sharded
+                and not mul_routed_weight
+                and local_rank == 16
+                and full_rank == 16
+                and x2d.shape[0] >= MOE_LORA_FUSED_BGMV_MIN_ROWS
+                and x2d.shape[1] <= 2048
+                and out_size <= 2048
+            )
+            if use_fused_bgmv:
+                b_flat = b.view(-1, out_size, full_rank)
+                self.moe_lora_bgmv_fused(
+                    x2d,
+                    a_flat,
+                    b_flat,
+                    combined_idx,
+                    y2d,
+                    cur_offset,
+                    out_size,
+                    1.0,
+                )
+                cur_offset += out_size
+                continue
 
             # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
             # (its X_T), so the shrink buffer is fp32.

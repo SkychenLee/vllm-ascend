@@ -62,6 +62,18 @@ at::Tensor moe_lora_build_combined_idx_meta(
         expanded_row_idx.options().dtype(at::kInt));
 }
 
+at::Tensor moe_lora_bgmv_fused_meta(
+    const at::Tensor &x,
+    const at::Tensor &lora_a,
+    const at::Tensor &lora_b,
+    const at::Tensor &indices,
+    at::Tensor &y,
+    int64_t slice_offset,
+    int64_t slice_size,
+    double scale) {
+    return y;
+}
+
 at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
                         at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -1566,6 +1578,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl(
         "moe_lora_build_combined_idx",
         &vllm_ascend::meta::moe_lora_build_combined_idx_meta);
+    // Fuse one MoE LoRA A/B projection pair and update y in place.
+    ops.impl(
+        "moe_lora_bgmv_fused",
+        &vllm_ascend::meta::moe_lora_bgmv_fused_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
