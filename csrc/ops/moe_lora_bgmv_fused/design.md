@@ -96,7 +96,8 @@ index0 = indices[row + 0];
 index1 = indices[row + 1];
 index2 = indices[row + 2];
 index3 = indices[row + 3];
-if (index0 == index1 && index0 == index2 && index0 == index3) {
+if (H % 8 == 0 &&
+    index0 == index1 && index0 == index2 && index0 == index3) {
     if (index0 >= 0) {
         ProcessGroup<4>(row, index0);  // A/B 每个 tile 只从 GM 搬一次
     }
@@ -107,8 +108,9 @@ if (index0 == index1 && index0 == index2 && index0 == index3) {
 }
 ```
 
-该判断只影响性能，不改变结果；不要求 `indices` 全局有序。`-1` 的 4-row group
-直接跳过，mixed index 逐行处理。
+该判断只影响性能，不改变结果；不要求 `indices` 全局有序。FP32 X 每行起始地址
+必须 32B 对齐，因此 `H` 不是 8 的倍数时也逐行处理。`-1` 的 4-row group 直接
+跳过，mixed index 逐行处理。
 
 ### 2.2 AscendC API 序列
 
@@ -227,27 +229,29 @@ weightTileElements = 512 * 16 = 8192
 
 | Buffer | 单位大小 | 数量 | 最大字节 | 阶段复用 |
 |---|---:|---:|---:|---|
+| `indicesQueue` | `4 * sizeof(index_t)` | 1 | 32 | 搬入 int32/int64 index |
 | `xQueue` | `4 * H_a * 2` | 1 | 16,384 | 搬入 4 行 FP16/BF16 X |
 | `weightQueue` | `W_t * 2` | 1 | 16,384 | A rank row / B output tile |
 | `xFp32Buffer` | `4 * H_a * 4` | 1 | 32,768 | shrink X；expand rank duplicate |
 | `weightFp32Buffer` | `W_t * 4` | 1 | 32,768 | A/B Cast、Mul、Reduce |
 | `rankBuffer` | `4 * 16 * 4` | 1 | 256 | FP32 shrink 中间结果 |
+| `reduceTmpBuffer` | 256 | 1 | 256 | FP32 `ReduceSum` 临时区 |
 | `yInputQueue` | `O_t * 2` | 1 | 1,024 | 原 y slice |
 | `yOutputQueue` | `O_t * 2` | 1 | 1,024 | 更新后的 y slice |
 | `yInputFp32` | `O_t * 4` | 1 | 2,048 | y 升精度 |
 | `yAccumFp32` | `O_t * 4` | 1 | 2,048 | expand 归约结果 + y |
-| **总计** |  |  | **104,704** | 小于 910B 每核 UB |
+| **总计** |  |  | **104,992** | 小于 910B 每核 UB |
 
 FP16 和 BF16 的元素大小相同，因此 UB 公式一致：
 
 ```text
-ubBytes = 24 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 256
+ubBytes = 24 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 544
 bufferCoefficient(FP16) = 24 bytes/input-column + 12 bytes/output-element
 bufferCoefficient(BF16) = 24 bytes/input-column + 12 bytes/output-element
-fixed/reusable weight region = 6 * max(H_a, 8192) + 256 bytes
+fixed/reusable weight region = 6 * max(H_a, 8192) + 544 bytes
 ```
 
-最大 shape `H=2048, O_t=512` 使用 104,704 bytes。Host 查询
+最大 shape `H=2048, O_t=512` 使用 104,992 bytes。Host 查询
 `ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE`；当 CANN 9.0 在 910B3 返回 0 时，不把 0
 当成真实容量，而依赖上述已封顶的 shape/UB 证明。若平台返回非零 UB，则必须验证
 `ubBytes <= queriedUbBytes`，否则拒绝调用并由 Python 回退旧路径。
@@ -354,9 +358,9 @@ routed-weight multiply 和 expand 路径。该策略不改变 `fully_sharded` �
 - [x] Block/UB 两级 tiling、UB 分配表和 coefficient 已推导。
 - [x] FP16/BF16 FP32 计算路径已定义。
 - [x] 无 workspace、静态 shape、ACL Graph 约束已定义。
-- [ ] 统一测试用例文档已生成。
-- [ ] Host、Kernel、注册和 Python wrapper 已实现。
-- [ ] 编译与基本功能测试通过。
+- [x] 统一测试用例文档已生成。
+- [x] Host、Kernel、注册和 Python wrapper 已实现。
+- [x] 编译与基本功能测试通过。
 - [ ] 中文接口 README 已生成。
 - [ ] 至少 30 项精度测试通过。
 - [ ] 真实权重 msprof 门禁通过。

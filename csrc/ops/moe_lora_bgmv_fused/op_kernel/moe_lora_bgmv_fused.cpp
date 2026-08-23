@@ -30,6 +30,8 @@ public:
     static constexpr uint32_t kVectorBytes = 256;
     static constexpr uint32_t kFloatElementsPerRepeat =
         kVectorBytes / sizeof(float);
+    static constexpr uint32_t kFloatElementsPerBlock =
+        32 / sizeof(float);
     static constexpr uint32_t kBlocksPerRepeat = 8;
     static constexpr uint32_t kReduceTmpBytes = 256;
 
@@ -123,7 +125,8 @@ public:
             AscendC::LocalTensor<index_t> indicesLocal =
                 CopyInIndices(row, currentRows);
 
-            if (currentRows == kGroupRows) {
+            if (currentRows == kGroupRows &&
+                inputHiddenDim_ % kFloatElementsPerBlock == 0) {
                 const int64_t index0 =
                     static_cast<int64_t>(indicesLocal.GetValue(0));
                 const int64_t index1 =
@@ -351,11 +354,10 @@ private:
         AscendC::LocalTensor<float> rankDup,
         AscendC::LocalTensor<float> rankSource)
     {
-        constexpr uint32_t elementsPerBlock = 32 / sizeof(float);
         constexpr uint8_t repeatTime =
             kFloatElementsPerRepeat / kRank;
         constexpr uint16_t dstRepeatStride =
-            kRank / elementsPerBlock;
+            kRank / kFloatElementsPerBlock;
         AscendC::Copy(
             rankDup,
             rankSource,
