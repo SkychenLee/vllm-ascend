@@ -1,7 +1,7 @@
 # `moe_lora_bgmv_fused` 精度验证报告
 
-- 测试平台：Ascend 910B3（物理 NPU 7）
-- 测试时间：2026-08-23T09:23:17+00:00
+- 测试平台：Ascend 910B3。
+- 测试时间：2026-08-23T10:22:42+00:00
 - 参考实现：PyTorch CPU FP32 两阶段 BMM，最终 Cast 回输出 dtype。
 
 ## 总览

@@ -133,7 +133,8 @@ Muls(rankLocal, rankLocal, scale, R * 16);
 
 `R` 为 8、4 或 1。X 每行只从 GM 搬一次；分组快速路径中每个 A rank row 每组
 只从 GM 搬一次并 Cast 一次。独立的 `productFp32` 接收 Mul 和 Reduce 结果，保留
-`weightFp32` 供组内后续行复用。
+`weightFp32` 供组内后续行复用。仅 `M < 2048 && H == 2048` 使用不分配 product
+buffer 的 inplace variant，每行重新 Cast 权重，以降低 shrink-heavy 小规模开销。
 
 #### Expand 阶段
 
@@ -162,7 +163,7 @@ for (output_begin = 0; output_begin < O; output_begin += 512) {
 B 的 BF16/FP16 local tensor 和 FP32 Cast 结果在 8 行或 4 行之间保留；每行只把
 Mul/Reduce 结果写入独立的 FP32 product buffer。这样在额外使用 32 KiB UB 的
 前提下保留现有 expand 归约顺序，并将 B 的 GM 流量和 Cast 指令最多降到原来的
-1/8。
+1/8。inplace variant 保留 8/4-row GM 权重复用，但每行重新 Cast。
 
 ### 2.3 实现路径选择
 
@@ -215,6 +216,13 @@ Python 集成层仅在 `M >= 512` 时选择新算子；小 shape 继续走现有
 8/4-row 分组判断和更大 UB 初始化增加 decode 延迟。该阈值是命名常量，最终根据
 1/2/8/32/128/256/512/1024-token msprof 结果调整。
 
+AscendC launcher 在融合算子内部进一步按行数选择编译期特化入口：
+
+```text
+M < 2048 且 H == 2048 -> inplace variant，UB 154,432 B，不分配 productFp32Buffer
+其它 shape             -> reuse variant，UB 187,200 B，A/B 每组只 Cast 一次
+```
+
 ### 3.3 UB 级切分
 
 第一版约束 `H <= 2048`、`O <= 2048`。Shrink 一次保存最多 8 行 X；Expand 将
@@ -237,26 +245,28 @@ weightTileElements = 512 * 16 = 8192
 | `weightQueue` | `W_t * 2` | 1 | 16,384 | A rank row / B output tile |
 | `xFp32Buffer` | `8 * H_a * 4` | 1 | 65,536 | shrink X；expand rank duplicate |
 | `weightFp32Buffer` | `W_t * 4` | 1 | 32,768 | 组内复用 A/B FP32 权重 |
-| `productFp32Buffer` | `W_t * 4` | 1 | 32,768 | Mul 与 Reduce scratch |
+| `productFp32Buffer` | `W_t * 4` | 1 | 32,768 | 仅 reuse variant：Mul 与 Reduce scratch |
 | `rankBuffer` | `8 * 16 * 4` | 1 | 512 | FP32 shrink 中间结果 |
 | `reduceTmpBuffer` | 256 | 1 | 256 | FP32 `ReduceSum` 临时区 |
 | `yInputQueue` | `O_t * 2` | 1 | 1,024 | 原 y slice |
 | `yOutputQueue` | `O_t * 2` | 1 | 1,024 | 更新后的 y slice |
 | `yInputFp32` | `O_t * 4` | 1 | 2,048 | y 升精度 |
 | `yAccumFp32` | `O_t * 4` | 1 | 2,048 | expand 归约结果 + y |
-| **总计** |  |  | **187,200** | 小于 910B 每核 192 KiB UB |
+| **inplace 总计** |  |  | **154,432** | `M < 2048 && H == 2048` |
+| **reuse 总计** |  |  | **187,200** | 其它 shape，小于 910B 每核 192 KiB UB |
 
 FP16 和 BF16 的元素大小相同，因此 UB 公式一致：
 
 ```text
-ubBytes(int64 index) = 48 * H_a + 10 * max(H_a, 8192) + 12 * O_t + 832
+inplaceUbBytes(int64 index) = 48 * H_a + 6 * max(H_a, 8192) + 12 * O_t + 832
+reuseUbBytes(int64 index) = 48 * H_a + 10 * max(H_a, 8192) + 12 * O_t + 832
 bufferCoefficient(FP16) = 48 bytes/input-column + 12 bytes/output-element
 bufferCoefficient(BF16) = 48 bytes/input-column + 12 bytes/output-element
-fixed/reusable weight region = 10 * max(H_a, 8192) + 832 bytes
 ```
 
-最大 shape `H=2048, O_t=512`、int64 index 使用 187,200 bytes；int32 index 使用
-187,168 bytes，距离 192 KiB UB 上限分别剩余 9,408/9,440 bytes。Host 查询
+最大 shape `H=2048, O_t=512` 时，inplace variant 的 int64/int32 index 分别使用
+154,432/154,400 bytes；reuse variant 分别使用 187,200/187,168 bytes，距离
+192 KiB UB 上限分别剩余 9,408/9,440 bytes。Host 按 `M/H` 选择对应公式并查询
 `ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE`；当 CANN 9.0 在 910B3 返回 0 时，不把 0
 当成真实容量，而依赖上述已封顶的 shape/UB 证明。若平台返回非零 UB，则必须验证
 `ubBytes <= queriedUbBytes`，否则拒绝调用并由 Python 回退旧路径。
@@ -314,7 +324,8 @@ Mul、Reduce 指令数量基本不变，因此权重流量下降不会线性转�
 1. `TPipe` 在 kernel 入口创建并以指针传入类，避免 Scalar 常量折叠受阻。
 2. `DataCopyPad` 的长度和 repeat 参数均由 Host 已验证的 uint32 shape 派生。
 3. FP16/BF16 在 `Mul`、`ReduceSum` 和 `Add` 前 Cast 到 FP32。
-4. `ReduceSum` 使用独立 product tensor，保留 Cast 后的 weight tensor供组内复用。
+4. reuse variant 的 `ReduceSum` 使用独立 product tensor；inplace variant 在每行
+   计算前重新 Cast，不复用被归约的 tensor。
 5. Expand 复用现有 rank=16 的 `BlockReduceSum + PairReduceSum` 指令组合。
 6. 高维 `Copy` 的 `repeatTime <= 4`，不会超过 255。
 7. 不向 kernel 传右值；Host 将 `scale` 转为 FP32 局部变量后捕获并传入。
@@ -369,8 +380,8 @@ routed-weight multiply 和 expand 路径。该策略不改变 `fully_sharded` �
 - [x] Host、Kernel、注册和 Python wrapper 已实现。
 - [x] 编译与基本功能测试通过。
 - [ ] 中文接口 README 已生成。
-- [ ] 至少 30 项精度测试通过。
-- [ ] 真实权重 msprof 门禁通过。
+- [x] 至少 30 项精度测试通过（44/44）。
+- [x] 真实权重 torch_npu.profiler 门禁通过（10/10 优于 separate）。
 
 ## 10. 参考实现
 

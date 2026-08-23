@@ -35,6 +35,7 @@ constexpr uint32_t kGroupRows = 8;
 constexpr uint32_t kOutputTileElements = 512;
 constexpr uint32_t kWeightTileElements = kOutputTileElements * kRank;
 constexpr uint32_t kMaxHiddenDim = 2048;
+constexpr uint32_t kFp32ReuseMinRows = 2048;
 
 struct BgmvFusedDeviceResources {
     uint32_t vectorCoreNum;
@@ -81,7 +82,8 @@ uint64_t AlignUp32Bytes(uint64_t bytes)
 uint64_t CalculateUbBytes(
     uint32_t inputHiddenDim,
     uint32_t indexElementBytes,
-    uint32_t dataElementBytes)
+    uint32_t dataElementBytes,
+    bool reuseFp32Weight)
 {
     const uint32_t weightBufferElements = std::max(
         inputHiddenDim, kWeightTileElements);
@@ -97,8 +99,10 @@ uint64_t CalculateUbBytes(
     bytes += AlignUp32Bytes(
         static_cast<uint64_t>(kGroupRows) * inputHiddenDim *
         sizeof(float));
-    bytes += AlignUp32Bytes(
-        static_cast<uint64_t>(weightBufferElements) * sizeof(float));
+    if (reuseFp32Weight) {
+        bytes += AlignUp32Bytes(
+            static_cast<uint64_t>(weightBufferElements) * sizeof(float));
+    }
     bytes += AlignUp32Bytes(
         static_cast<uint64_t>(weightBufferElements) * sizeof(float));
     bytes += AlignUp32Bytes(kGroupRows * kRank * sizeof(float));
@@ -205,7 +209,9 @@ at::Tensor moe_lora_bgmv_fused(
     const uint64_t requiredUbBytes = CalculateUbBytes(
         static_cast<uint32_t>(x.size(1)),
         indexElementBytes,
-        static_cast<uint32_t>(x.element_size()));
+        static_cast<uint32_t>(x.element_size()),
+        numRows64 >= kFp32ReuseMinRows ||
+            x.size(1) < kMaxHiddenDim);
     if (resources.ubBytes != 0) {
         TORCH_CHECK(
             requiredUbBytes <= resources.ubBytes,

@@ -17,7 +17,7 @@
 #include "kernel_operator.h"
 #include "../../../kernels/types.h"
 
-template <typename scalar_t, typename index_t>
+template <typename scalar_t, typename index_t, bool reuse_fp32_weight>
 class MoeLoraBgmvFused {
 public:
     using DataT = scalar_t;
@@ -99,9 +99,11 @@ public:
         pipe_->InitBuffer(
             weightFp32Buffer_,
             weightBufferElements * sizeof(float));
-        pipe_->InitBuffer(
-            productFp32Buffer_,
-            weightBufferElements * sizeof(float));
+        if constexpr (reuse_fp32_weight) {
+            pipe_->InitBuffer(
+                productFp32Buffer_,
+                weightBufferElements * sizeof(float));
+        }
         pipe_->InitBuffer(
             rankBuffer_, kGroupRows * kRank * sizeof(float));
         pipe_->InitBuffer(reduceTmpBuffer_, kReduceTmpBytes);
@@ -264,8 +266,10 @@ private:
         AscendC::LocalTensor<float> xFp32 = xFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> weightFp32 =
             weightFp32Buffer_.Get<float>();
-        AscendC::LocalTensor<float> productFp32 =
-            productFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> productFp32 = weightFp32;
+        if constexpr (reuse_fp32_weight) {
+            productFp32 = productFp32Buffer_.Get<float>();
+        }
         AscendC::LocalTensor<float> rankLocal = rankBuffer_.Get<float>();
         AscendC::LocalTensor<float> reduceTmp =
             reduceTmpBuffer_.Get<float>();
@@ -291,14 +295,24 @@ private:
             weightQueue_.EnQue(weightLocal);
             weightLocal = weightQueue_.DeQue<DataT>();
 
-            AscendC::Cast(
-                weightFp32,
-                weightLocal,
-                AscendC::RoundMode::CAST_NONE,
-                inputHiddenDim_);
-            AscendC::PipeBarrier<PIPE_V>();
+            if constexpr (reuse_fp32_weight) {
+                AscendC::Cast(
+                    weightFp32,
+                    weightLocal,
+                    AscendC::RoundMode::CAST_NONE,
+                    inputHiddenDim_);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
 
             for (uint32_t localRow = 0; localRow < Rows; ++localRow) {
+                if constexpr (!reuse_fp32_weight) {
+                    AscendC::Cast(
+                        weightFp32,
+                        weightLocal,
+                        AscendC::RoundMode::CAST_NONE,
+                        inputHiddenDim_);
+                    AscendC::PipeBarrier<PIPE_V>();
+                }
                 AscendC::Mul(
                     productFp32,
                     xFp32[localRow * inputHiddenDim_],
@@ -333,8 +347,10 @@ private:
         AscendC::LocalTensor<float> rankDup = xFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> weightFp32 =
             weightFp32Buffer_.Get<float>();
-        AscendC::LocalTensor<float> productFp32 =
-            productFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> productFp32 = weightFp32;
+        if constexpr (reuse_fp32_weight) {
+            productFp32 = productFp32Buffer_.Get<float>();
+        }
         AscendC::LocalTensor<float> yInputFp32 =
             yInputFp32Buffer_.Get<float>();
         AscendC::LocalTensor<float> yAccumFp32 =
@@ -366,9 +382,14 @@ private:
                 weightPadParams);
             weightQueue_.EnQue(weightLocal);
             weightLocal = weightQueue_.DeQue<DataT>();
-            CastWeight(weightFp32, weightLocal, weightElements);
+            if constexpr (reuse_fp32_weight) {
+                CastWeight(weightFp32, weightLocal, weightElements);
+            }
 
             for (uint32_t localRow = 0; localRow < Rows; ++localRow) {
+                if constexpr (!reuse_fp32_weight) {
+                    CastWeight(weightFp32, weightLocal, weightElements);
+                }
                 DuplicateRank(
                     rankDup,
                     rankLocal[localRow * kRank]);
@@ -608,30 +629,42 @@ private:
         {1, 1, 1, 8, 0, 8};
 };
 
-#define MOE_LORA_BGMV_FUSED_DECLARE(TYPE, INDEX_TYPE, INDEX_SUFFIX)           \
+#define MOE_LORA_BGMV_FUSED_DECLARE(                                         \
+    TYPE, INDEX_TYPE, INDEX_SUFFIX, REUSE, REUSE_SUFFIX)                     \
     extern "C" __global__ __aicore__ void                                   \
-        moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX(                         \
+        moe_lora_bgmv_fused_##TYPE##_##INDEX_SUFFIX##_##REUSE_SUFFIX(        \
             GM_ADDR x, GM_ADDR loraA, GM_ADDR loraB, GM_ADDR indices,        \
             GM_ADDR y, uint32_t numRows, uint32_t inputHiddenDim,            \
             uint32_t outputHiddenDim, uint32_t outputFullDim,                \
             uint32_t sliceOffset, uint32_t rowsPerCore, float scale)         \
     {                                                                         \
         AscendC::TPipe pipe;                                                  \
-        MoeLoraBgmvFused<TYPE, INDEX_TYPE> op(&pipe);                        \
+        MoeLoraBgmvFused<TYPE, INDEX_TYPE, REUSE> op(&pipe);                 \
         op.Init(x, loraA, loraB, indices, y, numRows, inputHiddenDim,        \
                 outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,    \
                 scale);                                                       \
         op.Process();                                                         \
     }
 
-MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32)
-MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, false, inplace)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int32_t, int32, true, reuse)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, false, inplace)
+MOE_LORA_BGMV_FUSED_DECLARE(half, int64_t, int64, true, reuse)
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32)
-MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, false, inplace)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int32_t, int32, true, reuse)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, false, inplace)
+MOE_LORA_BGMV_FUSED_DECLARE(bfloat16_t, int64_t, int64, true, reuse)
 #endif
 
 namespace vllm_ascend {
+
+namespace {
+
+constexpr uint32_t kFp32ReuseMinRows = 2048;
+constexpr uint32_t kInplaceHiddenDim = 2048;
+
+}  // namespace
 
 extern void moe_lora_bgmv_fused_impl(
     AscendType type,
@@ -652,30 +685,69 @@ extern void moe_lora_bgmv_fused_impl(
 {
     const uint32_t blockDim =
         (numRows + rowsPerCore - 1) / rowsPerCore;
+    const bool reuseFp32Weight =
+        numRows >= kFp32ReuseMinRows ||
+        inputHiddenDim < kInplaceHiddenDim;
     if (type == AscendType::FP16) {
         if (indicesIsInt32) {
-            moe_lora_bgmv_fused_half_int32<<<blockDim, nullptr, stream>>>(
-                x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,
-                scale);
+            if (reuseFp32Weight) {
+                moe_lora_bgmv_fused_half_int32_reuse
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            } else {
+                moe_lora_bgmv_fused_half_int32_inplace
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            }
         } else {
-            moe_lora_bgmv_fused_half_int64<<<blockDim, nullptr, stream>>>(
-                x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,
-                scale);
+            if (reuseFp32Weight) {
+                moe_lora_bgmv_fused_half_int64_reuse
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            } else {
+                moe_lora_bgmv_fused_half_int64_inplace
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            }
         }
     } else if (type == AscendType::BF16) {
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
         if (indicesIsInt32) {
-            moe_lora_bgmv_fused_bfloat16_t_int32<<<blockDim, nullptr, stream>>>(
-                x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,
-                scale);
+            if (reuseFp32Weight) {
+                moe_lora_bgmv_fused_bfloat16_t_int32_reuse
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            } else {
+                moe_lora_bgmv_fused_bfloat16_t_int32_inplace
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            }
         } else {
-            moe_lora_bgmv_fused_bfloat16_t_int64<<<blockDim, nullptr, stream>>>(
-                x, loraA, loraB, indices, y, numRows, inputHiddenDim,
-                outputHiddenDim, outputFullDim, sliceOffset, rowsPerCore,
-                scale);
+            if (reuseFp32Weight) {
+                moe_lora_bgmv_fused_bfloat16_t_int64_reuse
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            } else {
+                moe_lora_bgmv_fused_bfloat16_t_int64_inplace
+                    <<<blockDim, nullptr, stream>>>(
+                        x, loraA, loraB, indices, y, numRows, inputHiddenDim,
+                        outputHiddenDim, outputFullDim, sliceOffset,
+                        rowsPerCore, scale);
+            }
         }
 #endif
     }

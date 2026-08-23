@@ -38,7 +38,7 @@ def render_markdown(results: list[dict]) -> str:
     lines = [
         "# `moe_lora_bgmv_fused` 精度验证报告",
         "",
-        "- 测试平台：Ascend 910B3（物理 NPU 7）",
+        "- 测试平台：Ascend 910B3。",
         f"- 测试时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "- 参考实现：PyTorch CPU FP32 两阶段 BMM，最终 Cast 回输出 dtype。",
         "",
