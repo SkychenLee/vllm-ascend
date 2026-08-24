@@ -206,6 +206,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     mxfp_use_bf16=False,
                     w1_scale=[torch.randn(1)],
                     w2_scale=[torch.randn(1)],
+                    expert_map=torch.tensor([0, 1], dtype=torch.int32),
                 )
                 token_dispatch_output = MoETokenDispatchOutput(
                     hidden_states=torch.randn(4, 8, dtype=torch.bfloat16),
@@ -237,6 +238,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertEqual(mlp_compute_input.quant.mxfp.scale_dtype, torch.float32)
                 self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
                 self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
+                self.assertIs(mlp_compute_input.expert_map, fused_experts_input.routing.expert_map)
 
     def test_build_fused_experts_input_constructs_internal_mxfp_leaf_from_primitives(self):
         for quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP):

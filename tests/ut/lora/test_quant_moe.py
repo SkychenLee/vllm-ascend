@@ -105,6 +105,7 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
             mlp_input.lora_context,
             mlp_input.expanded_row_idx,
             mlp_input.topk_ids,
+            expert_map=mlp_input.expert_map,
         )
         recover_all2all.assert_not_called()
     else:
@@ -186,6 +187,23 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
     apply_w13.assert_not_called()
     apply_w2.assert_not_called()
     reset_indices.assert_called_once_with(lora_context)
+
+
+def test_dynamic_int8_disables_lora_gmm_fast_paths_for_ep() -> None:
+    lora_context = SimpleNamespace(use_ep=True)
+
+    assert not _can_use_single_lora_gmm(
+        lora_context,
+        hidden_states=torch.randn(16, 4, dtype=torch.bfloat16),
+        group_list=torch.tensor([8, 8]),
+        group_list_type=1,
+    )
+    assert not _can_use_composite_lora_gmm(
+        lora_context,
+        hidden_states=torch.randn(16, 4, dtype=torch.bfloat16),
+        group_list=torch.tensor([8, 8]),
+        group_list_type=1,
+    )
 
 
 def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:

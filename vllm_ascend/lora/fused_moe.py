@@ -20,7 +20,7 @@ publishes the resulting LoRA context through Ascend's MoERunner pipeline rather
 than the GPU modular kernel. Unquantized LoRA keeps the existing AllGather and
 AlltoAll implementations. Quantized backends inject deltas at their floating
 point GMM boundaries; the first implementation supports W8A8_DYNAMIC with
-AllGather TP and AlltoAll EP execution.
+AllGather TP/EP and AlltoAll EP execution.
 
 Shared experts remain ordinary dense LoRA layers. This module preserves their
 module hierarchy and selects a compatible NPU dense expand implementation when
@@ -45,18 +45,30 @@ _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
     "permuted_lora_indices",
     "exchanged_lora_indices",
+    "allgather_lora_indices",
 )
 
 
 def has_lora(lora_context) -> bool:
-    """Return whether the current batch contains at least one LoRA token."""
-    return lora_context is not None and not lora_context.punica_wrapper.no_lora
+    """Return whether this rank must execute the LoRA-aware MoE path."""
+    return lora_context is not None and (
+        getattr(lora_context, "allgather_lora_indices", None) is not None
+        or not lora_context.punica_wrapper.no_lora
+    )
 
 
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         if hasattr(lora_context, field):
             delattr(lora_context, field)
+
+
+def get_allgather_lora_indices(lora_context) -> torch.Tensor:
+    """Return token-to-LoRA indices aligned with AllGather input rows."""
+    gathered_indices = getattr(lora_context, "allgather_lora_indices", None)
+    if gathered_indices is not None:
+        return gathered_indices
+    return lora_context.punica_wrapper.token_lora_indices
 
 
 def prepare_lora_indices(
@@ -187,27 +199,65 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
         )
 
 
-def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids):
+def _recover_moe_lora_routing_allgather(
+    lora_context,
+    expanded_row_idx,
+    topk_ids,
+    expert_map: torch.Tensor | None = None,
+):
     """Recover per-permuted-row (expert_id, lora_slot) for the dispatched rows.
 
     npu_moe_init_routing semantics (verified empirically): ``expanded_row_idx``
     is indexed by the ORIGINAL flat (token, k) position and gives where that
-    pair landed in the expert-sorted array -- not the reverse. So recovering
-    "which (token, k) pair does sorted row i hold" needs the inverse permutation
-    of ``expanded``, not a direct gather by it. ``argsort`` output shape ==
-    input shape (value-independent), so this stays graph-capturable -- no
-    ``.item()``/data-dependent host sync.
+    pair landed in the expert-sorted array -- not the reverse. Without EP, the
+    full mapping is a permutation and can be inverted with ``argsort``. With
+    EP, only destinations for this rank's active expert range are valid, so
+    local metadata is scattered into those destinations instead. Both paths
+    keep static shapes and avoid ``.item()`` or other host synchronization.
     """
     top_k = lora_context.top_k
-    expanded = torch.abs(expanded_row_idx)
+    expanded = expanded_row_idx.to(torch.long).abs()
+    flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
+    token_lora_indices = get_allgather_lora_indices(lora_context)
+
+    if expert_map is not None:
+        # With active_expert_range, init-routing only guarantees that the
+        # local rows at the start of expanded_x are valid; mapping entries for
+        # non-local rows may be repeated or otherwise invalid. Scatter the
+        # original pair metadata into its destination instead of inverting the
+        # full mapping. Non-local pairs contribute zero, so collisions cannot
+        # overwrite a valid local row.
+        local_expert_ids = expert_map[flat_expert_ids].to(torch.long)
+        is_local = local_expert_ids >= 0
+        destination = expanded.clamp_(max=max(flat_expert_ids.numel() - 1, 0))
+
+        encoded_expert_ids = torch.where(
+            is_local,
+            local_expert_ids + 1,
+            torch.zeros_like(local_expert_ids),
+        )
+        expert_per_row = torch.zeros_like(encoded_expert_ids)
+        expert_per_row.scatter_add_(0, destination, encoded_expert_ids)
+        expert_per_row.sub_(1).clamp_min_(0)
+
+        lora_per_pair = token_lora_indices[: topk_ids.shape[0]].repeat_interleave(top_k)
+        encoded_lora_ids = torch.where(
+            is_local & (lora_per_pair >= 0),
+            lora_per_pair + 1,
+            torch.zeros_like(lora_per_pair),
+        )
+        lora_per_row = torch.zeros_like(encoded_lora_ids)
+        lora_per_row.scatter_add_(0, destination, encoded_lora_ids)
+        lora_per_row.sub_(1)
+        return expert_per_row, lora_per_row
+
     inv_perm = torch.argsort(expanded)
-    expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
+    expert_per_row = flat_expert_ids[inv_perm]
 
     # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
     # (host-known constant). Clamping defensively to the last index is a no-op
     # in normal operation but keeps the gather graph-safe.
     orig_token = inv_perm // top_k
-    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
     orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
     lora_per_row = token_lora_indices[orig_token]
     return expert_per_row, lora_per_row

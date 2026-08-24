@@ -259,6 +259,7 @@ def build_mlp_compute_input(
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
         lora_context=fused_experts_input.lora_context,
+        expert_map=fused_experts_input.routing.expert_map,
     )
 
 

@@ -209,6 +209,29 @@ def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:
     assert torch.equal(lora_slots, torch.tensor([0, -1, 0, -1, 1, 1]))
 
 
+def test_allgather_ep_routing_uses_gathered_adapters_and_local_experts() -> None:
+    context = SimpleNamespace(
+        top_k=2,
+        allgather_lora_indices=torch.tensor([1, 2]),
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([9, 9])),
+    )
+    topk_ids = torch.tensor([[0, 2], [3, 1]])
+    # Only the two local pairs have valid destinations (0 and 1). Non-local
+    # pairs use repeated invalid entries, matching active_expert_range output.
+    expanded_row_idx = torch.tensor([-1, 0, 1, -1])
+    expert_map = torch.tensor([-1, -1, 0, 1])
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_allgather(
+        context,
+        expanded_row_idx,
+        topk_ids,
+        expert_map=expert_map,
+    )
+
+    assert torch.equal(expert_ids, torch.tensor([0, 1, 0, 0]))
+    assert torch.equal(lora_slots, torch.tensor([1, 2, -1, -1]))
+
+
 def test_all2all_routing_uses_local_experts_and_exchanged_adapters() -> None:
     context = SimpleNamespace(
         local_num_experts=3,
@@ -228,6 +251,12 @@ def test_has_lora_follows_batch_metadata() -> None:
     assert not has_lora(None)
     assert not has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)))
     assert has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
+    assert has_lora(
+        SimpleNamespace(
+            allgather_lora_indices=torch.tensor([-1]),
+            punica_wrapper=SimpleNamespace(no_lora=True),
+        )
+    )
 
 
 @pytest.mark.parametrize(

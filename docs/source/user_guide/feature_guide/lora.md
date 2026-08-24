@@ -27,11 +27,37 @@ vllm serve meta-llama/Llama-2-7b \
 
 - We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the `csrc/kernels` directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).
 
-- You can enable LoRA with dense or mixture-of-experts (MoE) models now ([PR #10977](https://github.com/vllm-project/vllm-ascend/pull/10977)). Dynamic W8A8 MoE supports LoRA on the AllGather TP and AlltoAll EP paths. MC2, FusedMC2, and dynamic EPLB are not supported for quantized MoE LoRA.
+- You can enable LoRA with dense or mixture-of-experts (MoE) models now
+  ([PR #10977](https://github.com/vllm-project/vllm-ascend/pull/10977)).
+  Dynamic W8A8 MoE supports LoRA on the AllGather TP/EP and AlltoAll EP
+  paths. Select AllGather EP with
+  `--all2all-backend allgather_reducescatter`. MC2, FusedMC2, and dynamic
+  EPLB are not supported for quantized MoE LoRA.
+
+For routed-expert LoRA with expert parallelism, the AllGather backend gathers
+the token-to-LoRA mapping together with the MoE activations and converts global
+expert IDs to this rank's local expert slots before applying LoRA:
+
+```shell
+VLLM_ASCEND_ENABLE_FUSED_MC2=0 vllm serve Qwen/Qwen3-30B-A3B \
+    --tensor-parallel-size 2 \
+    --enable-expert-parallel \
+    --all2all-backend allgather_reducescatter \
+    --enable-lora \
+    --lora-modules '{"name": "sql-lora", "path": "/path/to/lora"}'
+```
+
+For W8A8 MoE, use the same flags together with `--quantization ascend` and a
+compatible quantized checkpoint. LoRA activations remain BF16/FP16 across the
+AllGather and are dynamically quantized only for the base expert GMMs.
 
 ### Fully sharded LoRA with W8A8 MoE
 
-Dynamic W8A8 MoE can use `--fully-sharded-loras` together with tensor parallelism. Fully sharded MoE LoRA and expert parallelism partition the same TP group in incompatible ways, so do not combine `--fully-sharded-loras` with `--enable-expert-parallel`.
+Dynamic W8A8 MoE can use `--fully-sharded-loras` together with tensor
+parallelism. Fully sharded MoE LoRA and expert parallelism partition the same
+TP group in incompatible ways, so do not combine `--fully-sharded-loras` with
+`--enable-expert-parallel`. AllGather EP currently supports non-fully-sharded
+LoRA only.
 
 ```shell
 VLLM_ASCEND_ENABLE_FUSED_MC2=0 vllm serve vllm-ascend/Qwen3-30B-A3B-W8A8 \

@@ -98,6 +98,35 @@ def test_qwen3moe_w8a8_fully_sharded_lora_tp2(qwen3moe_lora_files):
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
 
 
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="lora,expert_parallel",
+    parallel="EP",
+    deploy="pd_mix",
+    hardware="A2,A3",
+    quantization="W8A8",
+    graph_mode="eager",
+)
+def test_qwen3moe_w8a8_lora_allgather_ep(qwen3moe_lora_files):
+    llm = vllm.LLM(
+        W8A8_MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=16,
+        fully_sharded_loras=False,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        all2all_backend="allgather_reducescatter",
+        quantization="ascend",
+    )
+
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+
+
 def test_qwen3moe_lora_ep(qwen3moe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -109,16 +138,16 @@ def test_qwen3moe_lora_ep(qwen3moe_lora_files):
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
+        all2all_backend="allgather_reducescatter",
     )
 
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
 
 
 def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
-    """Test multiple different LoRA IDs (-1, 1, 2) in a single batch on EP path.
+    """Test multiple different LoRA IDs in one AllGather EP batch.
 
-    This exercises the AlltoAll + LoRA routing where different tokens carry
-    different lora_id values, including -1 for no-LoRA.
+    Different tokens carry different lora_id values, including -1 for no-LoRA.
     """
     # Per-prompt LoRA assignment: lora_id=1 / -1 / 2 / -1
     prompts = [
@@ -144,6 +173,7 @@ def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
+        all2all_backend="allgather_reducescatter",
     )
 
     outputs = llm.generate(prompts, sampling_params, lora_request=lora_requests)

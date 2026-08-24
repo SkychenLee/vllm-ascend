@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -9,6 +10,7 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -205,3 +207,87 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass", return_value=False)
+    def test_allgather_prepare_gathers_lora_indices_with_dp_padding(
+        self,
+        mock_enable_sp_by_pass,
+        mock_enable_sp,
+        mock_get_forward_context,
+    ):
+        mock_context = MagicMock()
+        mock_context.max_tokens_across_dp = 4
+        mock_get_forward_context.return_value = mock_context
+
+        mock_dp_group = MagicMock()
+        mock_dp_group.all_gather.side_effect = lambda tensor, dim: torch.cat([tensor, tensor], dim=dim)
+        self.moe_config.dp_size = 2
+        self.moe_config.dp_group = mock_dp_group
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        layer.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(
+                    no_lora=False,
+                    token_lora_indices=torch.tensor([2, -1, 1]),
+                )
+            )
+        )
+
+        layer.prepare(torch.randn(3, 8), torch.randn(3, 2))
+
+        expected = torch.tensor([2, -1, 1, -1, 2, -1, 1, -1])
+        self.assertTrue(torch.equal(layer.lora_context.allgather_lora_indices, expected))
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_allgather_ep_w8a8_lora_defers_quantization(
+        self,
+        mock_get_forward_context,
+        mock_tp_rank,
+        mock_tp_size,
+    ):
+        mock_context = MagicMock()
+        mock_context.num_tokens = 2
+        mock_context.padded_num_tokens = 2
+        mock_get_forward_context.return_value = mock_context
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        layer.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(
+                    no_lora=True,
+                    token_lora_indices=torch.tensor([-1, -1]),
+                ),
+                use_ep=True,
+            )
+        )
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+
+        with (
+            patch.object(
+                torch.ops.vllm,
+                "maybe_all_gather_and_maybe_unpad",
+                side_effect=lambda tensor, *args: tensor,
+                create=True,
+            ),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant") as dynamic_quant,
+        ):
+            output = layer._prepare_with_ep_group(
+                hidden_states,
+                torch.randn(2, 2),
+                quant_type=QuantType.W8A8,
+            )
+
+        dynamic_quant.assert_not_called()
+        self.assertIs(output.hidden_states, hidden_states)
+        self.assertIsNone(output.pertoken_scale)
+        self.assertTrue(
+            torch.equal(
+                layer.lora_context.allgather_lora_indices,
+                torch.tensor([-1, -1]),
+            )
+        )

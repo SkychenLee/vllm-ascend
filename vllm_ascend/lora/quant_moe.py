@@ -37,6 +37,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
+    get_allgather_lora_indices,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
     reset_lora_indices,
@@ -175,6 +176,8 @@ def _can_use_single_lora_gmm(
     group_list_type: int,
 ) -> bool:
     """Return whether one active adapter can use expert-grouped GMM."""
+    if getattr(lora_context, "use_ep", False):
+        return False
     punica_wrapper = getattr(lora_context, "punica_wrapper", None)
     if punica_wrapper is None:
         return False
@@ -215,6 +218,8 @@ def _can_use_composite_lora_gmm(
     group_list_type: int,
 ) -> bool:
     """Return whether mixed requests can use ``(slot, expert)`` GMM."""
+    if getattr(lora_context, "use_ep", False):
+        return False
     punica_wrapper = getattr(lora_context, "punica_wrapper", None)
     if (
         punica_wrapper is None
@@ -255,7 +260,7 @@ def _build_single_lora_gmm_routing(
     topk_ids: torch.Tensor,
 ) -> _SingleLoraGMMRouting:
     """Select one adapter and align its active/base mask to dispatched rows."""
-    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    token_lora_indices = get_allgather_lora_indices(lora_context)
     token_lora_slots = token_lora_indices[: topk_ids.shape[0]]
     max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
     safe_token_lora_slots = token_lora_slots.clamp(min=0, max=max_loras - 1)
@@ -279,7 +284,7 @@ def _build_composite_lora_gmm_routing(
     num_experts: int,
 ) -> _CompositeLoraGMMRouting:
     """Group dispatched rows by ``(LoRA slot, expert)`` without host sync."""
-    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    token_lora_indices = get_allgather_lora_indices(lora_context)
     token_lora_slots = token_lora_indices[: topk_ids.shape[0]]
 
     max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
@@ -447,7 +452,7 @@ def _apply_dynamic_int8_moe_lora(
     comm_type = _EXTRA_CTX.moe_comm_type
     if comm_type not in {MoECommType.ALLGATHER, MoECommType.ALLTOALL}:
         raise NotImplementedError(
-            "Ascend quantized MoE LoRA currently supports the AllGather TP and AlltoAll EP paths; "
+            "Ascend quantized MoE LoRA currently supports AllGather TP/EP and AlltoAll EP paths; "
             "MC2 and FusedMC2 are unsupported."
         )
     lora_context = mlp_compute_input.lora_context
@@ -558,6 +563,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             mlp_compute_input.expanded_row_idx,
             mlp_compute_input.topk_ids,
+            expert_map=mlp_compute_input.expert_map,
         )
     else:
         lora_routing = _recover_moe_lora_routing_all2all(

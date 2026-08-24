@@ -153,6 +153,8 @@ class MoEMlpComputeInput:
     topk_ids: torch.Tensor | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
+    # Global logical-expert to local physical-expert mapping for EP.
+    expert_map: torch.Tensor | None = None
 
 
 __all__ = [

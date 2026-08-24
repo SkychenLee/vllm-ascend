@@ -148,6 +148,26 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
 
 
 @pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        ("allgather_reducescatter", MoECommType.ALLGATHER),
+        ("naive", MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_honors_lora_ep_backend(monkeypatch, backend, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        ep_world_size=2,
+    )
+    vllm_config = _make_vllm_config(enable_expert_parallel=True)
+    vllm_config.lora_config = SimpleNamespace()
+    vllm_config.parallel_config.all2all_backend = backend
+
+    assert afc.select_moe_comm_method(16, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
     ("num_tokens", "expected"),
     [
         (128, MoECommType.MC2),
