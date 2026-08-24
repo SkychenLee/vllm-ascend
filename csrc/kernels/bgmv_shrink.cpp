@@ -17,6 +17,134 @@
 #include "kernel_operator.h"
 #include "types.h"
 
+// Rank-16 is the dominant MoE LoRA decode shape.  The generic kernel assigns
+// one token to one vector core and computes all rank rows serially.  Decode
+// usually has only a handful of routed rows, so most vector cores stay idle.
+// Split the rank into two 32-byte-aligned groups.  Each task owns one output
+// group, which avoids atomics and keeps GM writes naturally aligned.
+template <typename scalar_t>
+class BGMVShrinkRank16 {
+public:
+    using X_T = scalar_t;
+    using W_T = scalar_t;
+    using Y_T = float;
+
+    static constexpr uint32_t MAX_HIDDEN_DIM = 4096;
+    static constexpr uint32_t RANK = 16;
+    static constexpr uint32_t RANKS_PER_TASK = 8;
+    static constexpr uint32_t TASKS_PER_TOKEN = RANK / RANKS_PER_TASK;
+
+    __aicore__ inline BGMVShrinkRank16(AscendC::TPipe* pipe) : pipe_(pipe) {}
+
+    __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,
+                                uint32_t indicesSize, __gm__ void* y, uint32_t batchSize,
+                                uint32_t blockDim, uint32_t inputHiddenDim, float scale)
+    {
+        batchSize_ = batchSize;
+        blockDim_ = blockDim;
+        inputHiddenDim_ = inputHiddenDim;
+        scale_ = scale;
+        singleLoRAWeightLen_ = static_cast<uint64_t>(inputHiddenDim_) * RANK;
+
+        xGm_.SetGlobalBuffer((__gm__ X_T*)x);
+        wGm_.SetGlobalBuffer((__gm__ W_T*)weight);
+        indicesGm_.SetGlobalBuffer((__gm__ int64_t*)indices, indicesSize);
+        yOutGm_.SetGlobalBuffer((__gm__ Y_T*)y);
+
+        pipe_->InitBuffer(indexQueue_, 1, 32);
+        pipe_->InitBuffer(xQueue_, 1, MAX_HIDDEN_DIM * sizeof(X_T));
+        pipe_->InitBuffer(wQueue_, 1, MAX_HIDDEN_DIM * sizeof(W_T));
+        pipe_->InitBuffer(xFp32Buffer_, MAX_HIDDEN_DIM * sizeof(float));
+        pipe_->InitBuffer(wFp32Buffer_, MAX_HIDDEN_DIM * sizeof(float));
+        pipe_->InitBuffer(outQueue_, 1, RANKS_PER_TASK * sizeof(Y_T));
+    }
+
+    __aicore__ inline void Process()
+    {
+        const uint32_t totalTasks = batchSize_ * TASKS_PER_TOKEN;
+        for (uint32_t task = AscendC::GetBlockIdx(); task < totalTasks; task += blockDim_) {
+            const uint32_t tokenIdx = task / TASKS_PER_TOKEN;
+            const uint32_t rankStart = (task % TASKS_PER_TOKEN) * RANKS_PER_TASK;
+            const int64_t loraIdx = CopyInIndex(tokenIdx);
+            if (loraIdx < 0) {
+                continue;
+            }
+            CopyInX(tokenIdx);
+            ComputeAndCopyOut(tokenIdx, rankStart, loraIdx);
+        }
+    }
+
+private:
+    __aicore__ inline int64_t CopyInIndex(uint32_t tokenIdx)
+    {
+        AscendC::LocalTensor<int64_t> indexLocal = indexQueue_.AllocTensor<int64_t>();
+        DataCopyPad(indexLocal, indicesGm_[tokenIdx], {1, static_cast<uint16_t>(sizeof(int64_t)), 0, 0}, {});
+        indexQueue_.EnQue(indexLocal);
+        indexLocal = indexQueue_.DeQue<int64_t>();
+        const int64_t loraIdx = indexLocal.GetValue(0);
+        indexQueue_.FreeTensor(indexLocal);
+        return loraIdx;
+    }
+
+    __aicore__ inline void CopyInX(uint32_t tokenIdx)
+    {
+        AscendC::LocalTensor<X_T> xLocal = xQueue_.AllocTensor<X_T>();
+        DataCopy(xLocal, xGm_[static_cast<uint64_t>(tokenIdx) * inputHiddenDim_], inputHiddenDim_);
+        xQueue_.EnQue(xLocal);
+        xLocal = xQueue_.DeQue<X_T>();
+        AscendC::LocalTensor<float> xFp32 = xFp32Buffer_.Get<float>();
+        Cast(xFp32, xLocal, AscendC::RoundMode::CAST_NONE, inputHiddenDim_);
+        AscendC::PipeBarrier<PIPE_V>();
+        xQueue_.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void ComputeAndCopyOut(uint32_t tokenIdx, uint32_t rankStart, int64_t loraIdx)
+    {
+        AscendC::LocalTensor<float> outLocal = outQueue_.AllocTensor<float>();
+        AscendC::LocalTensor<float> xFp32 = xFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> wFp32 = wFp32Buffer_.Get<float>();
+        const uint64_t loraOffset = static_cast<uint64_t>(loraIdx) * singleLoRAWeightLen_;
+
+        for (uint32_t rankOffset = 0; rankOffset < RANKS_PER_TASK; ++rankOffset) {
+            const uint32_t rankIdx = rankStart + rankOffset;
+            AscendC::LocalTensor<W_T> wLocal = wQueue_.AllocTensor<W_T>();
+            DataCopy(wLocal, wGm_[loraOffset + static_cast<uint64_t>(rankIdx) * inputHiddenDim_], inputHiddenDim_);
+            wQueue_.EnQue(wLocal);
+            wLocal = wQueue_.DeQue<W_T>();
+            Cast(wFp32, wLocal, AscendC::RoundMode::CAST_NONE, inputHiddenDim_);
+            AscendC::PipeBarrier<PIPE_V>();
+            wQueue_.FreeTensor(wLocal);
+
+            Mul(wFp32, xFp32, wFp32, inputHiddenDim_);
+            AscendC::PipeBarrier<PIPE_V>();
+            ReduceSum<float>(wFp32, wFp32, wFp32, inputHiddenDim_);
+            AscendC::PipeBarrier<PIPE_V>();
+            outLocal.SetValue(rankOffset, wFp32.GetValue(0) * scale_);
+        }
+
+        outQueue_.EnQue(outLocal);
+        outLocal = outQueue_.DeQue<float>();
+        const uint64_t outputOffset = static_cast<uint64_t>(tokenIdx) * RANK + rankStart;
+        DataCopy(yOutGm_[outputOffset], outLocal, RANKS_PER_TASK);
+        outQueue_.FreeTensor(outLocal);
+    }
+
+private:
+    AscendC::TPipe* pipe_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> indexQueue_, xQueue_, wQueue_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> outQueue_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> xFp32Buffer_, wFp32Buffer_;
+    AscendC::GlobalTensor<X_T> xGm_;
+    AscendC::GlobalTensor<W_T> wGm_;
+    AscendC::GlobalTensor<int64_t> indicesGm_;
+    AscendC::GlobalTensor<Y_T> yOutGm_;
+    uint32_t batchSize_;
+    uint32_t blockDim_;
+    uint32_t inputHiddenDim_;
+    float scale_;
+    uint64_t singleLoRAWeightLen_;
+};
+
 template <typename scalar_t>
 class BGMVShrink {
 public:
@@ -230,11 +358,43 @@ BGMV_SHRINK_TYPE_DECLARE(half)
     BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 #endif
 
+#define BGMV_SHRINK_RANK16_TYPE_DECLARE(TYPE)                                                                          \
+    extern "C" __global__ __aicore__ void bgmv_shrink_rank16_##TYPE(                                                  \
+        __gm__ void* x, __gm__ void* weight, __gm__ void* indices, uint32_t indicesSize, __gm__ void* y,              \
+        uint32_t batchSize, uint32_t blockDim, uint32_t inputHiddenDim, float scale)                                  \
+    {                                                                                                                   \
+        AscendC::TPipe pipe;                                                                                            \
+        BGMVShrinkRank16<TYPE> op(&pipe);                                                                               \
+        op.Init(x, weight, indices, indicesSize, y, batchSize, blockDim, inputHiddenDim, scale);                       \
+        op.Process();                                                                                                   \
+    }
+
+BGMV_SHRINK_RANK16_TYPE_DECLARE(half)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+    BGMV_SHRINK_RANK16_TYPE_DECLARE(bfloat16_t)
+#endif
+
 namespace vllm_ascend {
 extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* y, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
-                             uint32_t maxLoRARank, float scale)
+                             uint32_t maxLoRARank, float scale, uint32_t aivNum)
 {
+    if (maxLoRARank == 16 && inputHiddenDim <= BGMVShrinkRank16<half>::MAX_HIDDEN_DIM &&
+        inputHiddenDim % 16 == 0) {
+        const uint32_t totalTasks = batchSize * BGMVShrinkRank16<half>::TASKS_PER_TOKEN;
+        const uint32_t blockDim = totalTasks < aivNum ? totalTasks : aivNum;
+        if (type == AscendType::FP16) {
+            bgmv_shrink_rank16_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize,
+                                                                  blockDim, inputHiddenDim, scale);
+        } else if (type == AscendType::BF16) {
+            #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+            bgmv_shrink_rank16_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize,
+                                                                        blockDim, inputHiddenDim, scale);
+            #endif
+        }
+        return;
+    }
+
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
         bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 

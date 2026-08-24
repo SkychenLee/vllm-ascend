@@ -504,15 +504,16 @@ def unquant_apply_mlp(
     lora_routing = None
     if lora_context is not None:  # LoRA applied
         from vllm_ascend.lora.fused_moe import (
+            _prepare_moe_lora_routing_allgather_indices,
+            _prepare_moe_lora_routing_indices,
             _recover_moe_lora_routing_all2all,
-            _recover_moe_lora_routing_allgather,
             moe_lora_apply_w2,
             moe_lora_apply_w13,
         )
 
         if expanded_row_idx is not None and topk_ids is not None:
             # AllGather path: use npu_moe_init_routing's expanded_row_idx.
-            lora_routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
+            lora_routing = _prepare_moe_lora_routing_allgather_indices(lora_context, expanded_row_idx, topk_ids)
         elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
             # AlltoAll path: tokens already sorted by expert after exchange.
             # Build per-row (expert_id, lora_id) directly from group_list.
@@ -520,6 +521,7 @@ def unquant_apply_mlp(
                 lora_context,
                 group_list=group_list,
             )
+            lora_routing = _prepare_moe_lora_routing_indices(lora_context, lora_routing)
         else:
             raise AssertionError(
                 "MoE LoRA requires either expanded_row_idx+topk_ids "

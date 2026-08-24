@@ -17,6 +17,171 @@
 #include "kernel_operator.h"
 #include "types.h"
 
+// Rank-16 decode specialization.  The generic implementation assigns one
+// complete output row to one vector core.  For MoE decode that leaves most
+// cores idle while a single core streams 2K/4K output elements.  Here each
+// task owns a 512-element output tile, so routed rows expose enough parallel
+// work without atomics or overlapping writes.
+template <typename scalar_t>
+class BGMVExpandRank16 {
+public:
+    using X_T = float;
+    using W_T = scalar_t;
+    using Y_T = scalar_t;
+
+    static constexpr uint32_t RANK = 16;
+    static constexpr uint32_t OUTPUT_TILE = 512;
+    static constexpr uint32_t NUM_ELEMENTS_PER_REPEAT = 64;
+    static constexpr uint32_t NUM_BLOCKS_PER_REPEAT = 8;
+    static constexpr uint32_t W_TILE = OUTPUT_TILE * RANK;
+    static constexpr uint32_t BLOCK_REDUCE_REPEATS = W_TILE / NUM_ELEMENTS_PER_REPEAT;
+    static constexpr uint32_t PAIR_REDUCE_REPEATS =
+        (BLOCK_REDUCE_REPEATS * NUM_BLOCKS_PER_REPEAT + NUM_ELEMENTS_PER_REPEAT - 1) /
+        NUM_ELEMENTS_PER_REPEAT;
+
+    __aicore__ inline BGMVExpandRank16(AscendC::TPipe* pipe) : pipe_(pipe) {}
+
+    __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,
+                                uint32_t indicesSize, __gm__ void* yIn, __gm__ void* yOut,
+                                uint32_t batchSize, uint32_t blockDim, uint32_t outputHiddenDim,
+                                uint32_t sliceOffset, uint32_t outputFullDim)
+    {
+        batchSize_ = batchSize;
+        blockDim_ = blockDim;
+        outputHiddenDim_ = outputHiddenDim;
+        sliceOffset_ = sliceOffset;
+        outputFullDim_ = outputFullDim;
+        tilesPerToken_ = outputHiddenDim_ / OUTPUT_TILE;
+        singleLoRAWeightLen_ = static_cast<uint64_t>(RANK) * outputHiddenDim_;
+
+        xGm_.SetGlobalBuffer((__gm__ X_T*)x);
+        wGm_.SetGlobalBuffer((__gm__ W_T*)weight);
+        indicesGm_.SetGlobalBuffer((__gm__ int64_t*)indices, indicesSize);
+        yInGm_.SetGlobalBuffer((__gm__ Y_T*)yIn);
+        yOutGm_.SetGlobalBuffer((__gm__ Y_T*)yOut);
+
+        pipe_->InitBuffer(indexQueue_, 1, 32);
+        pipe_->InitBuffer(xQueue_, 1, RANK * sizeof(X_T));
+        pipe_->InitBuffer(wQueue_, 1, W_TILE * sizeof(W_T));
+        pipe_->InitBuffer(yQueue_, 1, OUTPUT_TILE * sizeof(Y_T));
+        pipe_->InitBuffer(outQueue_, 1, OUTPUT_TILE * sizeof(Y_T));
+        pipe_->InitBuffer(xDupBuffer_, NUM_ELEMENTS_PER_REPEAT * sizeof(float));
+        pipe_->InitBuffer(wFp32Buffer_, W_TILE * sizeof(float));
+        pipe_->InitBuffer(productBuffer_, OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(yFp32Buffer_, OUTPUT_TILE * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        const uint32_t totalTasks = batchSize_ * tilesPerToken_;
+        for (uint32_t task = AscendC::GetBlockIdx(); task < totalTasks; task += blockDim_) {
+            const uint32_t tokenIdx = task / tilesPerToken_;
+            const uint32_t tileIdx = task % tilesPerToken_;
+            const int64_t loraIdx = CopyInIndex(tokenIdx);
+            if (loraIdx < 0) {
+                continue;
+            }
+            CopyInX(tokenIdx);
+            ComputeTile(tokenIdx, tileIdx, loraIdx);
+        }
+    }
+
+private:
+    __aicore__ inline int64_t CopyInIndex(uint32_t tokenIdx)
+    {
+        AscendC::LocalTensor<int64_t> indexLocal = indexQueue_.AllocTensor<int64_t>();
+        DataCopyPad(indexLocal, indicesGm_[tokenIdx], {1, static_cast<uint16_t>(sizeof(int64_t)), 0, 0}, {});
+        indexQueue_.EnQue(indexLocal);
+        indexLocal = indexQueue_.DeQue<int64_t>();
+        const int64_t loraIdx = indexLocal.GetValue(0);
+        indexQueue_.FreeTensor(indexLocal);
+        return loraIdx;
+    }
+
+    __aicore__ inline void CopyInX(uint32_t tokenIdx)
+    {
+        AscendC::LocalTensor<X_T> xLocal = xQueue_.AllocTensor<X_T>();
+        DataCopy(xLocal, xGm_[static_cast<uint64_t>(tokenIdx) * RANK], RANK);
+        xQueue_.EnQue(xLocal);
+        xLocal = xQueue_.DeQue<X_T>();
+        AscendC::LocalTensor<float> xDup = xDupBuffer_.Get<float>();
+        for (uint32_t offset = 0; offset < NUM_ELEMENTS_PER_REPEAT; offset += RANK) {
+            for (uint32_t rankIdx = 0; rankIdx < RANK; ++rankIdx) {
+                xDup.SetValue(offset + rankIdx, xLocal.GetValue(rankIdx));
+            }
+        }
+        xQueue_.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void ComputeTile(uint32_t tokenIdx, uint32_t tileIdx, int64_t loraIdx)
+    {
+        const uint64_t weightOffset = static_cast<uint64_t>(loraIdx) * singleLoRAWeightLen_ +
+                                      static_cast<uint64_t>(tileIdx) * W_TILE;
+        AscendC::LocalTensor<W_T> wLocal = wQueue_.AllocTensor<W_T>();
+        DataCopy(wLocal, wGm_[weightOffset], W_TILE);
+        wQueue_.EnQue(wLocal);
+        wLocal = wQueue_.DeQue<W_T>();
+
+        AscendC::LocalTensor<float> wFp32 = wFp32Buffer_.Get<float>();
+        AscendC::LocalTensor<float> xDup = xDupBuffer_.Get<float>();
+        AscendC::LocalTensor<float> product = productBuffer_.Get<float>();
+        Cast(wFp32, wLocal, AscendC::RoundMode::CAST_NONE, NUM_ELEMENTS_PER_REPEAT,
+             BLOCK_REDUCE_REPEATS, castParams_);
+        AscendC::PipeBarrier<PIPE_V>();
+        wQueue_.FreeTensor(wLocal);
+        Mul(wFp32, xDup, wFp32, NUM_ELEMENTS_PER_REPEAT, BLOCK_REDUCE_REPEATS, dotProductParams_);
+        AscendC::PipeBarrier<PIPE_V>();
+        BlockReduceSum(wFp32, wFp32, BLOCK_REDUCE_REPEATS, NUM_ELEMENTS_PER_REPEAT,
+                       reduceParams_.dstRepStride, reduceParams_.srcBlkStride, reduceParams_.srcRepStride);
+        AscendC::PipeBarrier<PIPE_V>();
+        PairReduceSum(product, wFp32, PAIR_REDUCE_REPEATS, NUM_ELEMENTS_PER_REPEAT,
+                      reduceParams_.dstRepStride, reduceParams_.srcBlkStride, reduceParams_.srcRepStride);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        const uint64_t yOffset = static_cast<uint64_t>(tokenIdx) * outputFullDim_ + sliceOffset_ +
+                                 static_cast<uint64_t>(tileIdx) * OUTPUT_TILE;
+        AscendC::LocalTensor<Y_T> yLocal = yQueue_.AllocTensor<Y_T>();
+        DataCopy(yLocal, yInGm_[yOffset], OUTPUT_TILE);
+        yQueue_.EnQue(yLocal);
+        yLocal = yQueue_.DeQue<Y_T>();
+        AscendC::LocalTensor<float> yFp32 = yFp32Buffer_.Get<float>();
+        Cast(yFp32, yLocal, AscendC::RoundMode::CAST_NONE, OUTPUT_TILE);
+        AscendC::PipeBarrier<PIPE_V>();
+        yQueue_.FreeTensor(yLocal);
+        Add(product, product, yFp32, OUTPUT_TILE);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::LocalTensor<Y_T> outLocal = outQueue_.AllocTensor<Y_T>();
+        Cast(outLocal, product, AscendC::RoundMode::CAST_RINT, OUTPUT_TILE);
+        AscendC::PipeBarrier<PIPE_V>();
+        outQueue_.EnQue(outLocal);
+        outLocal = outQueue_.DeQue<Y_T>();
+        DataCopy(yOutGm_[yOffset], outLocal, OUTPUT_TILE);
+        outQueue_.FreeTensor(outLocal);
+    }
+
+private:
+    AscendC::TPipe* pipe_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> indexQueue_, xQueue_, wQueue_, yQueue_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> outQueue_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> xDupBuffer_, wFp32Buffer_, productBuffer_, yFp32Buffer_;
+    AscendC::GlobalTensor<X_T> xGm_;
+    AscendC::GlobalTensor<W_T> wGm_;
+    AscendC::GlobalTensor<int64_t> indicesGm_;
+    AscendC::GlobalTensor<Y_T> yInGm_, yOutGm_;
+    uint32_t batchSize_;
+    uint32_t blockDim_;
+    uint32_t outputHiddenDim_;
+    uint32_t sliceOffset_;
+    uint32_t outputFullDim_;
+    uint32_t tilesPerToken_;
+    uint64_t singleLoRAWeightLen_;
+
+    AscendC::UnaryRepeatParams castParams_ = {1, 1, 8, 4};
+    AscendC::UnaryRepeatParams reduceParams_ = {1, 1, 1, 8};
+    AscendC::BinaryRepeatParams dotProductParams_ = {1, 1, 1, 8, 0, 8};
+};
+
 template <typename scalar_t>
 class BGMVExpand {
 public:
@@ -346,11 +511,48 @@ BGMV_EXPAND_TYPE_DECLARE(half)
     BGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
 #endif
 
+#define BGMV_EXPAND_RANK16_TYPE_DECLARE(TYPE)                                                                          \
+    extern "C" __global__ __aicore__ void bgmv_expand_rank16_##TYPE(                                                  \
+        __gm__ void* x, __gm__ void* weight, __gm__ void* indices, uint32_t indicesSize, __gm__ void* yIn,            \
+        __gm__ void* yOut, uint32_t batchSize, uint32_t blockDim, uint32_t outputHiddenDim,                           \
+        uint32_t sliceOffset, uint32_t outputFullDim)                                                                   \
+    {                                                                                                                   \
+        AscendC::TPipe pipe;                                                                                            \
+        BGMVExpandRank16<TYPE> op(&pipe);                                                                               \
+        op.Init(x, weight, indices, indicesSize, yIn, yOut, batchSize, blockDim, outputHiddenDim,                     \
+                sliceOffset, outputFullDim);                                                                            \
+        op.Process();                                                                                                   \
+    }
+
+BGMV_EXPAND_RANK16_TYPE_DECLARE(half)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+    BGMV_EXPAND_RANK16_TYPE_DECLARE(bfloat16_t)
+#endif
+
 namespace vllm_ascend {
 extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* yIn, void* yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
-                             uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
+                             uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim, uint32_t aivNum)
 {
+    if (maxLoRARank == BGMVExpandRank16<half>::RANK &&
+        outputHiddenDim >= BGMVExpandRank16<half>::OUTPUT_TILE &&
+        outputHiddenDim % BGMVExpandRank16<half>::OUTPUT_TILE == 0) {
+        const uint32_t tilesPerToken = outputHiddenDim / BGMVExpandRank16<half>::OUTPUT_TILE;
+        const uint32_t totalTasks = batchSize * tilesPerToken;
+        const uint32_t blockDim = totalTasks < aivNum ? totalTasks : aivNum;
+        if (type == AscendType::FP16) {
+            bgmv_expand_rank16_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
+                                                                  blockDim, outputHiddenDim, sliceOffset, outputFullDim);
+        } else if (type == AscendType::BF16) {
+            #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+            bgmv_expand_rank16_bfloat16_t<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, yIn, yOut, batchSize, blockDim, outputHiddenDim, sliceOffset,
+                outputFullDim);
+            #endif
+        }
+        return;
+    }
+
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
         bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore,

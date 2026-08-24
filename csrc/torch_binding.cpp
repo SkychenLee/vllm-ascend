@@ -18,14 +18,18 @@
 #include <torch/library.h>
 #include <torch/version.h>
 #include <torch/torch.h>
+#include <algorithm>
+#include <cstdint>
 #include <ATen/core/Formatting.h>
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
+#include "tiling/platform/platform_ascendc.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
+#include "moe_lora_prefill_tiling.h"
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
@@ -62,6 +66,32 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+namespace {
+
+MoeLoraPrefillHostTiling make_moe_lora_prefill_tiling(
+    uint32_t num_groups, uint32_t group_pitch, uint32_t num_cores,
+    uint32_t index_bytes,
+    uint32_t enabled_bytes, uint32_t data_bytes, uint32_t route_extent,
+    uint32_t input_width, uint32_t delta_width)
+{
+    uint64_t ub_size = 0;
+    auto* platform = platform_ascendc::PlatformAscendCManager::GetInstance();
+    platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
+    TORCH_CHECK(ub_size >= 32U * 1024U,
+                "moe_lora_prefill requires at least 32 KiB UB");
+    const auto tiling = make_moe_lora_prefill_host_tiling({
+        ub_size, num_groups, group_pitch, num_cores, index_bytes, enabled_bytes,
+        data_bytes, route_extent, input_width, delta_width});
+    TORCH_CHECK(tiling.valid,
+                "moe_lora_prefill Host tiling does not fit UB: ub=", ub_size,
+                ", Gp=", group_pitch, ", cores=", num_cores,
+                ", route_extent=", route_extent, ", input_width=", input_width,
+                ", delta_width=", delta_width);
+    return tiling;
+}
+
+}  // namespace
 
 namespace {
 
@@ -335,21 +365,15 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     uint32_t lora_rank = y.size(1);
     float scale_f = static_cast<float>(scale);
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at_npu::native::OpCommand cmd;
-    cmd.Name("bgmv_shrink");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, input_hidden_token,
-                          lora_rank, scale_f]() -> int {
-        auto dtype = get_dtype_from_torch(scalar_type);
-        int device_id = 0;
-        int64_t aiv_num = 0;
-        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
-        int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
-        TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, num_tokens_per_core,
-                         input_hidden_token, lora_rank, scale_f);
-        return 0;
-    });
-    cmd.Run();
+    auto dtype = get_dtype_from_torch(scalar_type);
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS);
+    TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
+    int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+    TORCH_CHECK(num_tokens_per_core != 0, "num_tokens_per_core should not be 0");
+    bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size,
+                     num_tokens_per_core, input_hidden_token, lora_rank, scale_f, static_cast<uint32_t>(aiv_num));
     return;
 }
 
@@ -381,22 +405,526 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     int lora_rank = x.size(1);
     int output_full_dim = y.size(1);
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at_npu::native::OpCommand cmd;
-    cmd.Name("bgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size, lora_rank,
-                          slice_offset, slice_size, output_full_dim]() -> int {
-        auto dtype = get_dtype_from_torch(scalar_type);
-        int device_id = 0;
-        int64_t aiv_num = 0;
-        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
-        int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
-        TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
-                         num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
-        return 0;
-    });
-    cmd.Run();
+    auto dtype = get_dtype_from_torch(scalar_type);
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS);
+    TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
+    int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+    TORCH_CHECK(num_tokens_per_core != 0, "num_tokens_per_core should not be 0");
+    bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
+                     num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim,
+                     static_cast<uint32_t>(aiv_num));
     return y_out;
+}
+
+at::Tensor bgmv_moe_w13(at::Tensor &x, at::Tensor &weight_a0, at::Tensor &weight_a1,
+                        at::Tensor &weight_b0, at::Tensor &weight_b1, at::Tensor &indices,
+                        at::Tensor &workspace, at::Tensor &y, int64_t slice_offset, double scale)
+{
+    const at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16,
+                "bgmv_moe_w13 only supports fp16 and bf16");
+    TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
+    TORCH_CHECK(weight_a0.dim() == 3 && weight_a1.dim() == 3,
+                "LoRA A weights should be [num_loras, 16, hidden_in]");
+    TORCH_CHECK(weight_b0.dim() == 3 && weight_b1.dim() == 3,
+                "LoRA B weights should be [num_loras, output_slice, 16]");
+    TORCH_CHECK(indices.dim() == 1 && indices.scalar_type() == torch::kLong,
+                "indices should be an int64 tensor of shape [batch_size]");
+    TORCH_CHECK(workspace.dim() == 3 && workspace.scalar_type() == torch::kFloat,
+                "workspace should be fp32 [2, batch_size, 16]");
+    TORCH_CHECK(y.dim() == 2 && y.scalar_type() == scalar_type,
+                "y should be [batch_size, output_full_dim] with the same dtype as x");
+    TORCH_CHECK(weight_a0.scalar_type() == scalar_type && weight_a1.scalar_type() == scalar_type &&
+                    weight_b0.scalar_type() == scalar_type && weight_b1.scalar_type() == scalar_type,
+                "all LoRA weights should have the same dtype as x");
+    TORCH_CHECK(x.is_contiguous() && weight_a0.is_contiguous() && weight_a1.is_contiguous() &&
+                    weight_b0.is_contiguous() && weight_b1.is_contiguous() && indices.is_contiguous() &&
+                    workspace.is_contiguous() && y.is_contiguous(),
+                "bgmv_moe_w13 inputs should be contiguous");
+
+    const int64_t batch_size = x.size(0);
+    const int64_t input_hidden_dim = x.size(1);
+    const int64_t output_slice_dim = weight_b0.size(1);
+    TORCH_CHECK(batch_size > 0, "batch_size should be greater than 0");
+    TORCH_CHECK(input_hidden_dim > 0 && input_hidden_dim <= 4096 && input_hidden_dim % 16 == 0,
+                "input hidden dimension should be aligned to 16 and no greater than 4096");
+    TORCH_CHECK(weight_a0.size(1) == 16 && weight_a1.size(1) == 16 &&
+                    weight_a0.size(2) == input_hidden_dim && weight_a1.sizes() == weight_a0.sizes(),
+                "both LoRA A weights should have shape [num_loras, 16, hidden_in]");
+    TORCH_CHECK(weight_b0.size(2) == 16 && weight_b1.sizes() == weight_b0.sizes(),
+                "both LoRA B weights should have shape [num_loras, output_slice, 16]");
+    TORCH_CHECK(weight_b0.size(0) == weight_a0.size(0),
+                "LoRA A and B should have the same flattened adapter count");
+    TORCH_CHECK(output_slice_dim > 0 && output_slice_dim % 512 == 0,
+                "output slice dimension should be a positive multiple of 512");
+    TORCH_CHECK(indices.size(0) == batch_size && y.size(0) == batch_size,
+                "x, indices, and y should have the same batch size");
+    TORCH_CHECK(workspace.size(0) == 2 && workspace.size(1) == batch_size && workspace.size(2) == 16,
+                "workspace should have shape [2, batch_size, 16]");
+    TORCH_CHECK(slice_offset >= 0 && slice_offset + 2 * output_slice_dim <= y.size(1),
+                "the two W13 slices should fit in y starting at slice_offset");
+
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS, "failed to query the current NPU device");
+    TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS,
+                "failed to query the number of NPU vector cores");
+    TORCH_CHECK(aiv_num > 0, "the current NPU reports no vector cores");
+
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    bgmv_moe_w13_impl(
+        get_dtype_from_torch(scalar_type), stream, x.data_ptr(), weight_a0.data_ptr(), weight_a1.data_ptr(),
+        weight_b0.data_ptr(), weight_b1.data_ptr(), indices.data_ptr(), static_cast<uint32_t>(indices.size(0)),
+        workspace.data_ptr(), y.data_ptr(), static_cast<uint32_t>(batch_size),
+        static_cast<uint32_t>(input_hidden_dim), static_cast<uint32_t>(output_slice_dim),
+        static_cast<uint32_t>(slice_offset), static_cast<uint32_t>(y.size(1)), static_cast<float>(scale),
+        static_cast<uint32_t>(aiv_num));
+    return y;
+}
+
+at::Tensor moe_lora_routing(at::Tensor &expanded_row_idx, at::Tensor &topk_ids,
+                            at::Tensor &token_lora_indices, at::Tensor &adapter_enabled,
+                            at::Tensor &combined_indices, int64_t top_k, int64_t num_experts)
+{
+    const at::ScalarType index_type = expanded_row_idx.scalar_type();
+    const at::ScalarType enabled_type = adapter_enabled.scalar_type();
+    TORCH_CHECK(index_type == torch::kInt || index_type == torch::kLong,
+                "expanded_row_idx should be int32 or int64");
+    TORCH_CHECK(topk_ids.scalar_type() == index_type,
+                "topk_ids and expanded_row_idx should have the same dtype");
+    TORCH_CHECK(token_lora_indices.scalar_type() == torch::kLong,
+                "token_lora_indices should be int64");
+    TORCH_CHECK(enabled_type == torch::kBool || enabled_type == torch::kInt || enabled_type == torch::kLong,
+                "adapter_enabled should be bool, int32, or int64");
+    TORCH_CHECK(combined_indices.scalar_type() == torch::kLong,
+                "combined_indices should be int64");
+    TORCH_CHECK(expanded_row_idx.is_contiguous() && topk_ids.is_contiguous() &&
+                    token_lora_indices.is_contiguous() && adapter_enabled.is_contiguous() &&
+                    combined_indices.is_contiguous(),
+                "moe_lora_routing inputs should be contiguous");
+
+    const int64_t num_rows = expanded_row_idx.numel();
+    TORCH_CHECK(num_rows > 0 && num_rows <= 1024,
+                "moe_lora_routing supports 1 to 1024 routed rows");
+    TORCH_CHECK(topk_ids.numel() == num_rows && combined_indices.numel() == num_rows,
+                "expanded_row_idx, topk_ids, and combined_indices should have the same number of elements");
+    TORCH_CHECK(top_k > 0 && num_rows % top_k == 0,
+                "the number of routed rows should be divisible by top_k");
+    const int64_t num_tokens = num_rows / top_k;
+    TORCH_CHECK(token_lora_indices.numel() >= num_tokens,
+                "token_lora_indices does not contain all routed tokens");
+    TORCH_CHECK(adapter_enabled.numel() > 0 && adapter_enabled.numel() <= 64,
+                "moe_lora_routing supports 1 to 64 LoRA adapter slots");
+    TORCH_CHECK(num_experts > 0, "num_experts should be greater than 0");
+
+    uint32_t enabled_type_code = 0;
+    if (enabled_type == torch::kInt) {
+        enabled_type_code = 1;
+    } else if (enabled_type == torch::kLong) {
+        enabled_type_code = 2;
+    }
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    moe_lora_routing_impl(
+        stream, expanded_row_idx.data_ptr(), topk_ids.data_ptr(), token_lora_indices.data_ptr(),
+        adapter_enabled.data_ptr(), combined_indices.data_ptr(), static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(num_tokens), static_cast<uint32_t>(adapter_enabled.numel()),
+        static_cast<uint32_t>(top_k), static_cast<uint32_t>(num_experts), index_type == torch::kLong,
+        enabled_type_code);
+    return combined_indices;
+}
+
+std::vector<at::Tensor> moe_lora_prefill_route_allgather(
+    at::Tensor &x, at::Tensor &expanded_row_idx, at::Tensor &routed_topk_ids,
+    at::Tensor &token_lora_indices, at::Tensor &adapter_enabled,
+    at::Tensor &local_count, at::Tensor &core_prefix, at::Tensor &group_total,
+    at::Tensor &group_start, at::Tensor &group_count_i64,
+    at::Tensor &perm_record, at::Tensor &error_per_core,
+    at::Tensor &route_error, at::Tensor &grouped_x,
+    int64_t top_k, int64_t num_experts, int64_t first_expert_idx)
+{
+    const auto data_type = x.scalar_type();
+    const auto index_type = expanded_row_idx.scalar_type();
+    const auto enabled_type = adapter_enabled.scalar_type();
+    TORCH_CHECK(data_type == torch::kHalf || data_type == torch::kBFloat16,
+                "moe_lora_prefill_route_allgather only supports fp16/bf16 X");
+    TORCH_CHECK(index_type == torch::kInt || index_type == torch::kLong,
+                "expanded_row_idx should be int32 or int64");
+    TORCH_CHECK(routed_topk_ids.scalar_type() == index_type,
+                "routed_topk_ids should have the same dtype as expanded_row_idx");
+    TORCH_CHECK(token_lora_indices.scalar_type() == torch::kLong,
+                "token_lora_indices should be int64");
+    TORCH_CHECK(enabled_type == torch::kBool || enabled_type == torch::kInt ||
+                    enabled_type == torch::kLong,
+                "adapter_enabled should be bool, int32, or int64");
+    TORCH_CHECK(x.dim() == 2 && grouped_x.dim() == 2,
+                "x and grouped_x should be 2D");
+    TORCH_CHECK(expanded_row_idx.dim() == 1 && routed_topk_ids.dim() == 1 &&
+                    token_lora_indices.dim() == 1 && adapter_enabled.dim() == 1,
+                "route metadata inputs should be 1D");
+    TORCH_CHECK(top_k > 0 && num_experts > 0,
+                "top_k and num_experts should be positive");
+
+    const int64_t canonical_rows = expanded_row_idx.numel();
+    const int64_t num_rows = x.size(0);
+    const int64_t num_adapters = adapter_enabled.numel();
+    const int64_t num_groups = num_adapters * num_experts;
+    const int64_t group_pitch = (num_groups + 7) / 8 * 8;
+    TORCH_CHECK(canonical_rows > 0 && canonical_rows % top_k == 0,
+                "canonical routed rows should be positive and divisible by top_k");
+    TORCH_CHECK(routed_topk_ids.numel() == canonical_rows,
+                "routed_topk_ids length should match expanded_row_idx");
+    TORCH_CHECK(token_lora_indices.numel() >= canonical_rows / top_k,
+                "token_lora_indices does not cover all canonical tokens");
+    TORCH_CHECK(num_rows > 0 && num_groups >= 2 && num_groups <= 1024,
+                "requires M>0 and 2<=num_adapters*num_experts<=1024");
+    TORCH_CHECK(grouped_x.size(0) == num_rows && grouped_x.size(1) >= x.size(1) &&
+                    grouped_x.scalar_type() == data_type,
+                "grouped_x should be [M, stride>=K] with X dtype");
+
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS,
+                "failed to query current NPU device");
+    TORCH_CHECK(aclGetDeviceCapability(
+                    device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS,
+                "failed to query NPU vector core count");
+    TORCH_CHECK(aiv_num > 0 && aiv_num <= 4095,
+                "invalid vector core count for DataCopyPad blockCount");
+
+    TORCH_CHECK(local_count.scalar_type() == torch::kInt &&
+                    core_prefix.scalar_type() == torch::kInt &&
+                    group_total.scalar_type() == torch::kInt &&
+                    group_start.scalar_type() == torch::kInt,
+                "count/prefix workspace should be int32");
+    TORCH_CHECK(group_count_i64.scalar_type() == torch::kLong,
+                "group_count_i64 should be int64");
+    TORCH_CHECK(perm_record.scalar_type() == torch::kInt &&
+                    error_per_core.scalar_type() == torch::kInt &&
+                    route_error.scalar_type() == torch::kInt,
+                "perm/error workspace should be int32");
+    TORCH_CHECK(local_count.sizes() == at::IntArrayRef({aiv_num, group_pitch}) &&
+                    core_prefix.sizes() == at::IntArrayRef({aiv_num, group_pitch}),
+                "local_count/core_prefix should be [C,Gp]");
+    TORCH_CHECK(group_total.numel() == num_groups && group_start.numel() == num_groups &&
+                    group_count_i64.numel() == num_groups,
+                "group vectors should have G elements");
+    TORCH_CHECK(perm_record.dim() == 2 && perm_record.size(0) == num_rows &&
+                    perm_record.size(1) == 8,
+                "perm_record should be [M,8]");
+    TORCH_CHECK(error_per_core.dim() == 2 && error_per_core.size(0) == aiv_num &&
+                    error_per_core.size(1) == 8 && route_error.numel() == 8,
+                "error_per_core/route_error should be [C,8]/[8]");
+    TORCH_CHECK(x.is_contiguous() && expanded_row_idx.is_contiguous() &&
+                    routed_topk_ids.is_contiguous() && token_lora_indices.is_contiguous() &&
+                    adapter_enabled.is_contiguous() && local_count.is_contiguous() &&
+                    core_prefix.is_contiguous() && group_total.is_contiguous() &&
+                    group_start.is_contiguous() && group_count_i64.is_contiguous() &&
+                    perm_record.is_contiguous() && error_per_core.is_contiguous() &&
+                    route_error.is_contiguous() && grouped_x.is_contiguous(),
+                "all moe_lora_prefill_route_allgather tensors should be contiguous");
+
+    uint32_t enabled_type_code = 0;
+    if (enabled_type == torch::kInt) {
+        enabled_type_code = 1;
+    } else if (enabled_type == torch::kLong) {
+        enabled_type_code = 2;
+    }
+    const uint32_t core_count = static_cast<uint32_t>(aiv_num);
+    const uint32_t index_bytes = index_type == torch::kLong ? 8U : 4U;
+    const uint32_t enabled_bytes = enabled_type == torch::kBool
+        ? 1U
+        : (enabled_type == torch::kInt ? 4U : 8U);
+    const auto tiling = make_moe_lora_prefill_tiling(
+        static_cast<uint32_t>(num_groups), static_cast<uint32_t>(group_pitch),
+        core_count, index_bytes,
+        enabled_bytes, static_cast<uint32_t>(x.element_size()),
+        static_cast<uint32_t>(canonical_rows),
+        static_cast<uint32_t>(x.size(1)), static_cast<uint32_t>(x.size(1)));
+    const uint32_t prefix_blocks = std::min<uint32_t>(
+        core_count,
+        (static_cast<uint32_t>(num_groups) + tiling.prefix_tile_groups - 1U) /
+            tiling.prefix_tile_groups);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    moe_lora_prefill_route_allgather_impl(
+        stream, expanded_row_idx.data_ptr(), routed_topk_ids.data_ptr(),
+        token_lora_indices.data_ptr(), adapter_enabled.data_ptr(),
+        local_count.data_ptr(), error_per_core.data_ptr(),
+        static_cast<uint32_t>(canonical_rows), static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(token_lora_indices.numel()),
+        static_cast<uint32_t>(num_adapters), static_cast<uint32_t>(top_k),
+        static_cast<uint32_t>(num_experts), static_cast<uint32_t>(group_pitch),
+        first_expert_idx, core_count, tiling.route_tile_rows,
+        index_type == torch::kLong,
+        enabled_type_code);
+    moe_lora_prefill_prefix_b1_impl(
+        stream, local_count.data_ptr(), core_prefix.data_ptr(),
+        group_total.data_ptr(), static_cast<uint32_t>(num_groups),
+        static_cast<uint32_t>(group_pitch), core_count, prefix_blocks,
+        tiling.prefix_tile_groups);
+    moe_lora_prefill_prefix_b2_impl(
+        stream, group_total.data_ptr(), error_per_core.data_ptr(),
+        group_start.data_ptr(), group_count_i64.data_ptr(),
+        route_error.data_ptr(), static_cast<uint32_t>(num_groups),
+        static_cast<uint32_t>(group_pitch), core_count,
+        static_cast<uint32_t>(num_rows));
+    moe_lora_prefill_scatter_allgather_impl(
+        stream, x.data_ptr(), expanded_row_idx.data_ptr(),
+        routed_topk_ids.data_ptr(), token_lora_indices.data_ptr(),
+        adapter_enabled.data_ptr(), core_prefix.data_ptr(), group_start.data_ptr(),
+        group_total.data_ptr(), grouped_x.data_ptr(), perm_record.data_ptr(),
+        static_cast<uint32_t>(canonical_rows), static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(token_lora_indices.numel()),
+        static_cast<uint32_t>(num_adapters), static_cast<uint32_t>(top_k),
+        static_cast<uint32_t>(num_experts), static_cast<uint32_t>(num_groups),
+        static_cast<uint32_t>(group_pitch), static_cast<uint32_t>(x.size(1)),
+        static_cast<uint32_t>(grouped_x.size(1)), first_expert_idx, core_count,
+        tiling.route_tile_rows, tiling.column_tile_elements,
+        data_type == torch::kBFloat16, index_type == torch::kLong,
+        enabled_type_code);
+    return {group_count_i64, perm_record, grouped_x, route_error};
+}
+
+std::vector<at::Tensor> moe_lora_prefill_route_alltoall(
+    at::Tensor &x, at::Tensor &expert_count,
+    at::Tensor &exchanged_lora_indices, at::Tensor &adapter_enabled,
+    at::Tensor &local_count, at::Tensor &core_prefix, at::Tensor &group_total,
+    at::Tensor &group_start, at::Tensor &group_count_i64,
+    at::Tensor &perm_record, at::Tensor &error_per_core,
+    at::Tensor &route_error, at::Tensor &grouped_x)
+{
+    const auto data_type = x.scalar_type();
+    const auto count_type = expert_count.scalar_type();
+    const auto enabled_type = adapter_enabled.scalar_type();
+    TORCH_CHECK(data_type == torch::kHalf || data_type == torch::kBFloat16,
+                "moe_lora_prefill_route_alltoall only supports fp16/bf16 X");
+    TORCH_CHECK(count_type == torch::kInt || count_type == torch::kLong,
+                "expert_count should be int32 or int64");
+    TORCH_CHECK(exchanged_lora_indices.scalar_type() == torch::kLong,
+                "exchanged_lora_indices should be int64");
+    TORCH_CHECK(enabled_type == torch::kBool || enabled_type == torch::kInt ||
+                    enabled_type == torch::kLong,
+                "adapter_enabled should be bool, int32, or int64");
+    TORCH_CHECK(x.dim() == 2 && grouped_x.dim() == 2,
+                "x and grouped_x should be 2D");
+    TORCH_CHECK(expert_count.dim() == 1 && exchanged_lora_indices.dim() == 1 &&
+                    adapter_enabled.dim() == 1,
+                "route metadata inputs should be 1D");
+
+    const int64_t num_rows = x.size(0);
+    const int64_t num_experts = expert_count.numel();
+    const int64_t num_adapters = adapter_enabled.numel();
+    const int64_t num_groups = num_adapters * num_experts;
+    const int64_t group_pitch = (num_groups + 7) / 8 * 8;
+    TORCH_CHECK(num_rows > 0 && exchanged_lora_indices.numel() == num_rows,
+                "exchanged_lora_indices should contain one entry per input row");
+    TORCH_CHECK(num_experts > 0 && num_adapters > 0 &&
+                    num_groups >= 2 && num_groups <= 1024,
+                "requires E>0, L>0, and 2<=L*E<=1024");
+    TORCH_CHECK(grouped_x.size(0) == num_rows && grouped_x.size(1) >= x.size(1) &&
+                    grouped_x.scalar_type() == data_type,
+                "grouped_x should be [M, stride>=K] with X dtype");
+
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS,
+                "failed to query current NPU device");
+    TORCH_CHECK(aclGetDeviceCapability(
+                    device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS,
+                "failed to query NPU vector core count");
+    TORCH_CHECK(aiv_num > 0 && aiv_num <= 4095,
+                "invalid vector core count for DataCopyPad blockCount");
+
+    TORCH_CHECK(local_count.scalar_type() == torch::kInt &&
+                    core_prefix.scalar_type() == torch::kInt &&
+                    group_total.scalar_type() == torch::kInt &&
+                    group_start.scalar_type() == torch::kInt,
+                "count/prefix workspace should be int32");
+    TORCH_CHECK(group_count_i64.scalar_type() == torch::kLong,
+                "group_count_i64 should be int64");
+    TORCH_CHECK(perm_record.scalar_type() == torch::kInt &&
+                    error_per_core.scalar_type() == torch::kInt &&
+                    route_error.scalar_type() == torch::kInt,
+                "perm/error workspace should be int32");
+    TORCH_CHECK(local_count.sizes() == at::IntArrayRef({aiv_num, group_pitch}) &&
+                    core_prefix.sizes() == at::IntArrayRef({aiv_num, group_pitch}),
+                "local_count/core_prefix should be [C,Gp]");
+    TORCH_CHECK(group_total.numel() == num_groups && group_start.numel() == num_groups &&
+                    group_count_i64.numel() == num_groups,
+                "group vectors should have G elements");
+    TORCH_CHECK(perm_record.dim() == 2 && perm_record.size(0) == num_rows &&
+                    perm_record.size(1) == 8,
+                "perm_record should be [M,8]");
+    TORCH_CHECK(error_per_core.dim() == 2 && error_per_core.size(0) == aiv_num &&
+                    error_per_core.size(1) == 8 && route_error.numel() == 8,
+                "error_per_core/route_error should be [C,8]/[8]");
+    TORCH_CHECK(x.is_contiguous() && expert_count.is_contiguous() &&
+                    exchanged_lora_indices.is_contiguous() &&
+                    adapter_enabled.is_contiguous() && local_count.is_contiguous() &&
+                    core_prefix.is_contiguous() && group_total.is_contiguous() &&
+                    group_start.is_contiguous() && group_count_i64.is_contiguous() &&
+                    perm_record.is_contiguous() && error_per_core.is_contiguous() &&
+                    route_error.is_contiguous() && grouped_x.is_contiguous(),
+                "all moe_lora_prefill_route_alltoall tensors should be contiguous");
+
+    uint32_t enabled_type_code = 0;
+    if (enabled_type == torch::kInt) {
+        enabled_type_code = 1;
+    } else if (enabled_type == torch::kLong) {
+        enabled_type_code = 2;
+    }
+    const uint32_t core_count = static_cast<uint32_t>(aiv_num);
+    const uint32_t count_bytes = count_type == torch::kLong ? 8U : 4U;
+    const uint32_t enabled_bytes = enabled_type == torch::kBool
+        ? 1U
+        : (enabled_type == torch::kInt ? 4U : 8U);
+    const auto tiling = make_moe_lora_prefill_tiling(
+        static_cast<uint32_t>(num_groups), static_cast<uint32_t>(group_pitch),
+        core_count, count_bytes,
+        enabled_bytes, static_cast<uint32_t>(x.element_size()),
+        static_cast<uint32_t>(num_rows), static_cast<uint32_t>(x.size(1)),
+        static_cast<uint32_t>(x.size(1)));
+    const uint32_t prefix_blocks = std::min<uint32_t>(
+        core_count,
+        (static_cast<uint32_t>(num_groups) + tiling.prefix_tile_groups - 1U) /
+            tiling.prefix_tile_groups);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    moe_lora_prefill_route_alltoall_impl(
+        stream, expert_count.data_ptr(), exchanged_lora_indices.data_ptr(),
+        adapter_enabled.data_ptr(), local_count.data_ptr(),
+        error_per_core.data_ptr(), static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(num_adapters), static_cast<uint32_t>(num_experts),
+        static_cast<uint32_t>(group_pitch), core_count, tiling.route_tile_rows,
+        count_type == torch::kLong, enabled_type_code);
+    moe_lora_prefill_prefix_b1_impl(
+        stream, local_count.data_ptr(), core_prefix.data_ptr(),
+        group_total.data_ptr(), static_cast<uint32_t>(num_groups),
+        static_cast<uint32_t>(group_pitch), core_count, prefix_blocks,
+        tiling.prefix_tile_groups);
+    moe_lora_prefill_prefix_b2_impl(
+        stream, group_total.data_ptr(), error_per_core.data_ptr(),
+        group_start.data_ptr(), group_count_i64.data_ptr(),
+        route_error.data_ptr(), static_cast<uint32_t>(num_groups),
+        static_cast<uint32_t>(group_pitch), core_count,
+        static_cast<uint32_t>(num_rows));
+    moe_lora_prefill_scatter_alltoall_impl(
+        stream, x.data_ptr(), expert_count.data_ptr(),
+        exchanged_lora_indices.data_ptr(), adapter_enabled.data_ptr(),
+        core_prefix.data_ptr(), group_start.data_ptr(), group_total.data_ptr(),
+        grouped_x.data_ptr(), perm_record.data_ptr(), static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(num_adapters), static_cast<uint32_t>(num_experts),
+        static_cast<uint32_t>(num_groups), static_cast<uint32_t>(group_pitch),
+        static_cast<uint32_t>(x.size(1)), static_cast<uint32_t>(grouped_x.size(1)),
+        core_count, tiling.route_tile_rows, tiling.column_tile_elements,
+        data_type == torch::kBFloat16,
+        count_type == torch::kLong, enabled_type_code);
+    return {group_count_i64, perm_record, grouped_x, route_error};
+}
+
+at::Tensor moe_lora_prefill_gather_by_perm(
+    at::Tensor &source, at::Tensor &perm_record, at::Tensor &grouped_x)
+{
+    const auto data_type = source.scalar_type();
+    TORCH_CHECK(data_type == torch::kHalf || data_type == torch::kBFloat16,
+                "moe_lora_prefill_gather_by_perm only supports fp16/bf16");
+    TORCH_CHECK(grouped_x.scalar_type() == data_type,
+                "source and grouped_x should have the same dtype");
+    TORCH_CHECK(perm_record.scalar_type() == torch::kInt,
+                "perm_record should be int32");
+    TORCH_CHECK(source.dim() == 2 && grouped_x.dim() == 2,
+                "source and grouped_x should be 2D");
+    TORCH_CHECK(perm_record.dim() == 2 && perm_record.size(1) == 8,
+                "perm_record should be [M,8]");
+    const int64_t num_rows = source.size(0);
+    TORCH_CHECK(num_rows > 0 && perm_record.size(0) == num_rows &&
+                    grouped_x.size(0) == num_rows &&
+                    grouped_x.size(1) >= source.size(1),
+                "source/perm_record/grouped_x row count and width mismatch");
+    TORCH_CHECK(source.is_contiguous() && perm_record.is_contiguous() &&
+                    grouped_x.is_contiguous(),
+                "gather tensors should be contiguous");
+    TORCH_CHECK(source.storage_offset() == 0 && perm_record.storage_offset() == 0 &&
+                    grouped_x.storage_offset() == 0,
+                "gather tensors should have zero storage_offset");
+
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS,
+                "failed to query current NPU device");
+    TORCH_CHECK(aclGetDeviceCapability(
+                    device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS,
+                "failed to query NPU vector core count");
+    TORCH_CHECK(aiv_num > 0,
+                "invalid vector core count");
+    const auto tiling = make_moe_lora_prefill_tiling(
+        8U, 8U, static_cast<uint32_t>(aiv_num), 4U, 4U,
+        static_cast<uint32_t>(source.element_size()),
+        static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(source.size(1)),
+        static_cast<uint32_t>(source.size(1)));
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    moe_lora_prefill_gather_by_perm_impl(
+        stream, source.data_ptr(), perm_record.data_ptr(), grouped_x.data_ptr(),
+        static_cast<uint32_t>(num_rows), static_cast<uint32_t>(source.size(1)),
+        static_cast<uint32_t>(grouped_x.size(1)), static_cast<uint32_t>(aiv_num),
+        tiling.route_tile_rows, tiling.column_tile_elements,
+        data_type == torch::kBFloat16);
+    return grouped_x;
+}
+
+at::Tensor moe_lora_prefill_scatter_add(
+    at::Tensor &delta, at::Tensor &perm_record, at::Tensor &y,
+    int64_t output_offset)
+{
+    const auto data_type = delta.scalar_type();
+    TORCH_CHECK(data_type == torch::kHalf || data_type == torch::kBFloat16,
+                "moe_lora_prefill_scatter_add only supports fp16/bf16");
+    TORCH_CHECK(y.scalar_type() == data_type,
+                "delta and y should have the same dtype");
+    TORCH_CHECK(perm_record.scalar_type() == torch::kInt,
+                "perm_record should be int32");
+    TORCH_CHECK(delta.dim() == 2 && y.dim() == 2,
+                "delta and y should be 2D");
+    TORCH_CHECK(perm_record.dim() == 2 && perm_record.size(1) == 8,
+                "perm_record should be [M,8]");
+    const int64_t num_rows = delta.size(0);
+    TORCH_CHECK(num_rows > 0 && y.size(0) == num_rows &&
+                    perm_record.size(0) == num_rows,
+                "delta/perm_record/y row count mismatch");
+    TORCH_CHECK(output_offset >= 0 &&
+                    output_offset + delta.size(1) <= y.size(1),
+                "scatter-add output slice is out of bounds");
+    TORCH_CHECK(delta.is_contiguous() && perm_record.is_contiguous() &&
+                    y.is_contiguous(),
+                "scatter-add tensors should be contiguous");
+    TORCH_CHECK(delta.storage_offset() == 0 && perm_record.storage_offset() == 0 &&
+                    y.storage_offset() == 0,
+                "scatter-add tensors should have zero storage_offset");
+
+    int32_t device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS,
+                "failed to query current NPU device");
+    TORCH_CHECK(aclGetDeviceCapability(
+                    device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS,
+                "failed to query NPU vector core count");
+    TORCH_CHECK(aiv_num > 0,
+                "invalid vector core count");
+    const auto tiling = make_moe_lora_prefill_tiling(
+        8U, 8U, static_cast<uint32_t>(aiv_num), 4U, 4U,
+        static_cast<uint32_t>(delta.element_size()),
+        static_cast<uint32_t>(num_rows),
+        static_cast<uint32_t>(delta.size(1)),
+        static_cast<uint32_t>(delta.size(1)));
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    moe_lora_prefill_scatter_add_impl(
+        stream, delta.data_ptr(), perm_record.data_ptr(), y.data_ptr(),
+        static_cast<uint32_t>(num_rows), static_cast<uint32_t>(delta.size(1)),
+        static_cast<uint32_t>(y.size(1)), static_cast<uint32_t>(output_offset),
+        static_cast<uint32_t>(aiv_num), tiling.route_tile_rows,
+        tiling.scatter_add_tile_elements, data_type == torch::kBFloat16);
+    return y;
 }
 
 void sgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
@@ -684,6 +1212,41 @@ std::vector<at::Tensor> moe_grouped_matmul(
     EXEC_NPU_CMD(aclnnMoeGroupedMatmulWeightNz,
                 x_list, weight_list, group_list, transpose_weight, result);
 
+    return y;
+}
+
+at::Tensor moe_lora_grouped_matmul(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& group_list
+)
+{
+    TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
+    TORCH_CHECK(weight.dim() == 3, "weight must be 3D, but got dim=", weight.dim());
+    TORCH_CHECK(group_list.dim() == 2 && group_list.size(1) == 2,
+                "group_list must have shape [G, 2], but got ", group_list.sizes());
+    TORCH_CHECK(x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16,
+                "x must be float16 or bfloat16, but got ", x.scalar_type());
+    TORCH_CHECK(weight.scalar_type() == x.scalar_type(),
+                "weight dtype must match x dtype");
+    TORCH_CHECK(group_list.scalar_type() == at::kInt,
+                "group_list must be int32, but got ", group_list.scalar_type());
+    TORCH_CHECK(x.is_contiguous() && weight.is_contiguous() && group_list.is_contiguous(),
+                "x, weight and group_list must be contiguous");
+    TORCH_CHECK(weight.size(0) == group_list.size(0),
+                "weight group count must match group_list rows");
+    TORCH_CHECK(weight.size(2) == x.size(1),
+                "weight K must match x K");
+
+    constexpr bool transpose_weight = true;
+    at::Tensor y = at::empty({x.size(0), weight.size(1)}, x.options());
+    at::TensorList x_list = at::TensorList(x);
+    at::TensorList weight_list = at::TensorList(weight);
+    std::vector<at::Tensor> y_list{y};
+    at::TensorList result = at::TensorList(y_list);
+
+    EXEC_NPU_CMD(aclnnMoeGroupedMatmul,
+                 x_list, weight_list, group_list, transpose_weight, result);
     return y;
 }
 
@@ -2134,6 +2697,48 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
 
+    ops.def(
+        "bgmv_moe_w13(Tensor x, Tensor weight_a0, Tensor weight_a1, Tensor weight_b0, Tensor weight_b1,"
+        "              Tensor indices, Tensor! workspace, Tensor! y, int slice_offset, float scale) -> Tensor");
+    ops.impl("bgmv_moe_w13", torch::kPrivateUse1, &vllm_ascend::bgmv_moe_w13);
+
+    ops.def(
+        "moe_lora_routing(Tensor expanded_row_idx, Tensor topk_ids, Tensor token_lora_indices,"
+        "                 Tensor adapter_enabled, Tensor! combined_indices, int top_k, int num_experts) -> Tensor");
+    ops.impl("moe_lora_routing", torch::kPrivateUse1, &vllm_ascend::moe_lora_routing);
+
+    ops.def(
+        "moe_lora_prefill_route_allgather("
+        "Tensor x, Tensor expanded_row_idx, Tensor routed_topk_ids, Tensor token_lora_indices, "
+        "Tensor adapter_enabled, Tensor! local_count, Tensor! core_prefix, Tensor! group_total, "
+        "Tensor! group_start, Tensor! group_count_i64, Tensor! perm_record, "
+        "Tensor! error_per_core, Tensor! route_error, Tensor! grouped_x, "
+        "int top_k, int num_experts, int first_expert_idx) -> Tensor[]");
+    ops.impl("moe_lora_prefill_route_allgather", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prefill_route_allgather);
+
+    ops.def(
+        "moe_lora_prefill_route_alltoall("
+        "Tensor x, Tensor expert_count, Tensor exchanged_lora_indices, "
+        "Tensor adapter_enabled, Tensor! local_count, Tensor! core_prefix, "
+        "Tensor! group_total, Tensor! group_start, Tensor! group_count_i64, "
+        "Tensor! perm_record, Tensor! error_per_core, Tensor! route_error, "
+        "Tensor! grouped_x) -> Tensor[]");
+    ops.impl("moe_lora_prefill_route_alltoall", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prefill_route_alltoall);
+
+    ops.def(
+        "moe_lora_prefill_gather_by_perm("
+        "Tensor source, Tensor perm_record, Tensor! grouped_x) -> Tensor");
+    ops.impl("moe_lora_prefill_gather_by_perm", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prefill_gather_by_perm);
+
+    ops.def(
+        "moe_lora_prefill_scatter_add("
+        "Tensor delta, Tensor perm_record, Tensor! y, int output_offset) -> Tensor");
+    ops.impl("moe_lora_prefill_scatter_add", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prefill_scatter_add);
+
     ops.def("sgmv_shrink(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y, float scale) -> ()");
     ops.impl("sgmv_shrink", torch::kPrivateUse1, &vllm_ascend::sgmv_shrink);
 
@@ -2342,6 +2947,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> Tensor[]"
     );
     ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
+
+    ops.def(
+        "moe_lora_grouped_matmul("
+            "Tensor x,"
+            "Tensor weight,"
+            "Tensor group_list)"
+        "-> Tensor"
+    );
+    ops.impl("moe_lora_grouped_matmul", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_grouped_matmul);
 
     ops.def(
         "moe_gating_top_k_hash("

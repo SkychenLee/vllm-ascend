@@ -36,7 +36,8 @@ namespace vllm_ascend {
         uint32_t num_tokens_per_core,
         uint32_t input_hidden_dim,
         uint32_t lora_rank,
-        float scale);
+        float scale,
+        uint32_t aiv_num);
 
     extern void bgmv_expand_impl(
         AscendType type,
@@ -52,7 +53,43 @@ namespace vllm_ascend {
         uint32_t lora_rank,
         uint32_t output_hidden_dim,
         uint32_t slice_offset,
-        uint32_t output_full_dim);
+        uint32_t output_full_dim,
+        uint32_t aiv_num);
+
+    extern void bgmv_moe_w13_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight_a0,
+        void *weight_a1,
+        void *weight_b0,
+        void *weight_b1,
+        void *indices,
+        uint32_t indices_size,
+        void *workspace,
+        void *y,
+        uint32_t batch_size,
+        uint32_t input_hidden_dim,
+        uint32_t output_slice_dim,
+        uint32_t slice_offset,
+        uint32_t output_full_dim,
+        float scale,
+        uint32_t aiv_num);
+
+    extern void moe_lora_routing_impl(
+        void *stream,
+        void *expanded_row_idx,
+        void *topk_ids,
+        void *token_lora_indices,
+        void *adapter_enabled,
+        void *combined_indices,
+        uint32_t num_rows,
+        uint32_t num_tokens,
+        uint32_t num_adapters,
+        uint32_t top_k,
+        uint32_t num_experts,
+        bool index64,
+        uint32_t enabled_type);
 
     extern void sgmv_shrink_impl(
         AscendType type,

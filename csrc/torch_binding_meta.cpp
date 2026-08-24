@@ -626,6 +626,16 @@ std::vector<at::Tensor> moe_grouped_matmul_meta(
     return y;
 }
 
+at::Tensor moe_lora_grouped_matmul_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& group_list
+)
+{
+    return at::empty_symint(
+        c10::SymDimVector{x.sym_size(0), weight.sym_size(1)}, x.options());
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     const at::Tensor& x,
     int64_t k,
@@ -1588,6 +1598,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
+    ops.impl("moe_lora_grouped_matmul", &vllm_ascend::meta::moe_lora_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);

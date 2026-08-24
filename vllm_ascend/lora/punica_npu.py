@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+from collections import OrderedDict
 from collections.abc import Callable
 
 import torch
+import torch_npu
+from torch_npu.npu.utils import get_cann_version
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -11,6 +15,112 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+_MOE_LORA_PREFILL_VERSION_KEY = (
+    "2.10.0+cpu",
+    "2.10.0.post2",
+    "9.0.0",
+    223,
+)
+_MOE_LORA_PREFILL_OPS = (
+    "moe_lora_prefill_route_allgather",
+    "moe_lora_prefill_route_alltoall",
+    "moe_lora_prefill_gather_by_perm",
+    "moe_lora_prefill_scatter_add",
+)
+_MOE_LORA_PREFILL_SCHEMA_ARGS = {
+    "moe_lora_prefill_route_allgather": (
+        "Tensor x, Tensor expanded_row_idx, Tensor routed_topk_ids, "
+        "Tensor token_lora_indices, Tensor adapter_enabled, "
+        "Tensor($0! -> ) local_count, Tensor($1! -> ) core_prefix, "
+        "Tensor($2! -> ) group_total, Tensor($3! -> ) group_start, "
+        "Tensor($4! -> ) group_count_i64, Tensor($5! -> ) perm_record, "
+        "Tensor($6! -> ) error_per_core, Tensor($7! -> ) route_error, "
+        "Tensor($8! -> ) grouped_x, int top_k, int num_experts, "
+        "int first_expert_idx) -> Tensor[]"
+    ),
+    "moe_lora_prefill_route_alltoall": (
+        "Tensor x, Tensor expert_count, Tensor exchanged_lora_indices, "
+        "Tensor adapter_enabled, Tensor($0! -> ) local_count, "
+        "Tensor($1! -> ) core_prefix, Tensor($2! -> ) group_total, "
+        "Tensor($3! -> ) group_start, Tensor($4! -> ) group_count_i64, "
+        "Tensor($5! -> ) perm_record, Tensor($6! -> ) error_per_core, "
+        "Tensor($7! -> ) route_error, Tensor($8! -> ) grouped_x) -> Tensor[]"
+    ),
+    "moe_lora_prefill_gather_by_perm": (
+        "Tensor source, Tensor perm_record, Tensor($0! -> ) grouped_x) -> Tensor"
+    ),
+    "moe_lora_prefill_scatter_add": (
+        "Tensor delta, Tensor perm_record, Tensor($0! -> ) y, "
+        "int output_offset) -> Tensor"
+    ),
+}
+_MOE_LORA_PREFILL_GMM_SCHEMA = (
+    "npu::npu_grouped_matmul(Tensor[] x, Tensor[] weight, *, "
+    "Tensor[]? bias=None, Tensor[]? scale=None, Tensor[]? offset=None, "
+    "Tensor[]? antiquant_scale=None, Tensor[]? antiquant_offset=None, "
+    "Tensor[]? per_token_scale=None, Tensor? group_list=None, "
+    "Tensor[]? activation_input=None, Tensor[]? activation_quant_scale=None, "
+    "Tensor[]? activation_quant_offset=None, int? split_item=0, "
+    "int? group_type=None, int? group_list_type=0, int? act_type=0, "
+    "int[]? tuning_config=None, int? output_dtype=None, int? x_dtype=None, "
+    "int? weight_dtype=None, int? scale_dtype=None, "
+    "int? per_token_scale_dtype=None) -> Tensor[]"
+)
+
+_MOE_LORA_PREFILL_COUNTER_NAMES = (
+    "grouped_contexts",
+    "route_allgather_launches",
+    "route_alltoall_launches",
+    "gather_by_perm_launches",
+    "grouped_gmm_launches",
+    "scatter_add_launches",
+    "baseline_bgmv_path_calls",
+)
+
+_MOE_LORA_PREFILL_CERTIFIED_DTYPES = ("torch.float16", "torch.bfloat16")
+_MOE_LORA_PREFILL_CERTIFIED_ROUTE_MODE = "allgather"
+_MOE_LORA_PREFILL_CERTIFIED_ALLGATHER_M = (2048, 4096)
+
+
+def _certified_w8a8_multilora_key(dtype: str, m: int) -> tuple:
+    """Exact synthetic key certified on Ascend910B3; no wildcard matching."""
+    layouts = (
+        ((3, 8, 16, 4096), (524288, 65536, 4096, 1)),
+        ((3, 8, 16, 4096), (524288, 65536, 4096, 1)),
+        ((3, 8, 2048, 16), (262144, 32768, 16, 1)),
+        ((3, 8, 2048, 16), (262144, 32768, 16, 1)),
+        ((3, 8, 16, 2048), (262144, 32768, 2048, 1)),
+        ((3, 8, 4096, 16), (524288, 65536, 16, 1)),
+    )
+    return (
+        _MOE_LORA_PREFILL_VERSION_KEY,
+        dtype,
+        m,
+        3,
+        8,
+        4096,
+        4096,
+        2048,
+        16,
+        _MOE_LORA_PREFILL_CERTIFIED_ROUTE_MODE,
+        layouts,
+    )
+
+
+# Round-002 measured each entry below with 20 warmups and 100 complete
+# LoRA-subchain samples on Ascend910B3.  AllGather M=512 was slower than BGMV
+# and M=1024 missed the 1.10x P95 gate, so neither is certified.  AlltoAll is
+# outside the current production acceptance scope and therefore has no key.
+# This is deliberately not a DeepSeek model claim: every non-exact shape stays
+# on the existing BGMV path until a read-only production shape probe certifies
+# it in a future round.
+_MOE_LORA_PREFILL_CERTIFIED_KEYS: frozenset[tuple] = frozenset(
+    _certified_w8a8_multilora_key(dtype, m)
+    for dtype in _MOE_LORA_PREFILL_CERTIFIED_DTYPES
+    for m in _MOE_LORA_PREFILL_CERTIFIED_ALLGATHER_M
+)
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -26,6 +136,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
+        bgmv_moe_w13 = None
+        moe_lora_prefill_route_allgather = None
+        moe_lora_prefill_route_alltoall = None
+        moe_lora_prefill_gather_by_perm = None
+        moe_lora_prefill_scatter_add = None
         if get_ascend_device_type() == AscendDeviceType._310P or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
@@ -41,17 +156,67 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             from vllm_ascend.lora.lora_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
+                bgmv_moe_w13,
                 bgmv_shrink,
+                moe_lora_prefill_gather_by_perm,
+                moe_lora_prefill_route_allgather,
+                moe_lora_prefill_route_alltoall,
+                moe_lora_prefill_scatter_add,
                 sgmv_expand,
                 sgmv_expand_slice,
                 sgmv_shrink,
             )
         self.bgmv_expand = bgmv_expand
         self.bgmv_expand_slice = bgmv_expand_slice
+        self.bgmv_moe_w13 = bgmv_moe_w13
         self.bgmv_shrink = bgmv_shrink
+        self.moe_lora_prefill_route_allgather = moe_lora_prefill_route_allgather
+        self.moe_lora_prefill_route_alltoall = moe_lora_prefill_route_alltoall
+        self.moe_lora_prefill_gather_by_perm = moe_lora_prefill_gather_by_perm
+        self.moe_lora_prefill_scatter_add = moe_lora_prefill_scatter_add
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        # Per-shape scratch storage is safe to reuse because shrink and expand
+        # execute on the same NPU stream. Keeping it on the wrapper also gives
+        # ACLGraph stable addresses across layer captures.
+        self._moe_w13_workspaces: dict[tuple[torch.device, int], torch.Tensor] = {}
+        self._moe_lora_routing_workspaces: dict[tuple[torch.device, int], torch.Tensor] = {}
+        self._moe_lora_prefill_workspaces: OrderedDict[tuple, dict[str, object]] = OrderedDict()
+        self._moe_lora_prefill_workspace_bytes = 0
+        self._moe_lora_prefill_workspace_limit_bytes = (
+            int(os.getenv("VLLM_ASCEND_MOE_LORA_WORKSPACE_MB", "512")) * 1024 * 1024
+        )
+        self._moe_lora_prefill_workspace_max_entries = int(
+            os.getenv("VLLM_ASCEND_MOE_LORA_WORKSPACE_ENTRIES", "8")
+        )
+        self._moe_lora_prefill_weight_views: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._moe_lora_prefill_certified_keys = set(_MOE_LORA_PREFILL_CERTIFIED_KEYS)
+        self._moe_lora_prefill_capability: bool | None = None
+        self._moe_lora_prefill_launch_counters = {
+            name: 0 for name in _MOE_LORA_PREFILL_COUNTER_NAMES
+        }
+
+    def _record_moe_lora_prefill_launch(self, name: str, count: int = 1) -> None:
+        """Record Host-observable path evidence without synchronizing the NPU."""
+        counters = getattr(self, "_moe_lora_prefill_launch_counters", None)
+        if counters is None:
+            counters = {key: 0 for key in _MOE_LORA_PREFILL_COUNTER_NAMES}
+            self._moe_lora_prefill_launch_counters = counters
+        if name not in counters:
+            raise KeyError(f"unknown MoE LoRA prefill counter: {name}")
+        counters[name] += count
+
+    def get_moe_lora_prefill_launch_counters(self, *, reset: bool = False) -> dict[str, int]:
+        """Return E2E hit evidence; optionally reset counters for the next request."""
+        counters = getattr(self, "_moe_lora_prefill_launch_counters", None)
+        if counters is None:
+            counters = {key: 0 for key in _MOE_LORA_PREFILL_COUNTER_NAMES}
+            self._moe_lora_prefill_launch_counters = counters
+        snapshot = dict(counters)
+        if reset:
+            counters.update({key: 0 for key in counters})
+        return snapshot
 
     def update_metadata(
         self,
@@ -344,6 +509,575 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
 
+    def _has_moe_lora_prefill_backend(self) -> bool:
+        if self._moe_lora_prefill_capability is not None:
+            return self._moe_lora_prefill_capability
+        capable = False
+        try:
+            version_key = (
+                torch.__version__,
+                torch_npu.__version__,
+                get_cann_version(),
+                torch_npu.npu.get_soc_version(),
+            )
+            if version_key != _MOE_LORA_PREFILL_VERSION_KEY:
+                self._moe_lora_prefill_capability = False
+                return False
+            if get_ascend_device_type() != AscendDeviceType.A2:
+                self._moe_lora_prefill_capability = False
+                return False
+            if str(torch.ops.npu.npu_grouped_matmul.default._schema) != _MOE_LORA_PREFILL_GMM_SCHEMA:
+                self._moe_lora_prefill_capability = False
+                return False
+            for name in _MOE_LORA_PREFILL_OPS:
+                if not hasattr(torch.ops._C_ascend, name):
+                    self._moe_lora_prefill_capability = False
+                    return False
+                schema = str(getattr(torch.ops._C_ascend, name).default._schema)
+                if schema.split("(", 1)[1] != _MOE_LORA_PREFILL_SCHEMA_ARGS[name]:
+                    self._moe_lora_prefill_capability = False
+                    return False
+            capable = all(
+                op is not None
+                for op in (
+                    self.moe_lora_prefill_route_allgather,
+                    self.moe_lora_prefill_route_alltoall,
+                    self.moe_lora_prefill_gather_by_perm,
+                    self.moe_lora_prefill_scatter_add,
+                )
+            )
+        except (AttributeError, RuntimeError):
+            capable = False
+        self._moe_lora_prefill_capability = capable
+        return capable
+
+    @staticmethod
+    def _moe_lora_prefill_weight_pair_supported(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        *,
+        num_adapters: int,
+        num_experts: int,
+        input_width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> bool:
+        return (
+            a.dim() == 4
+            and b.dim() == 4
+            and a.shape[0] == num_adapters
+            and b.shape[0] == num_adapters
+            and a.shape[1] == num_experts
+            and b.shape[1] == num_experts
+            and a.shape[-2] == 16
+            and b.shape[-1] == 16
+            and a.shape[-1] == input_width
+            and b.shape[-2] % 16 == 0
+            and a.dtype == b.dtype == dtype
+            and a.device == b.device == device
+            and a.is_contiguous()
+            and b.is_contiguous()
+            and a.storage_offset() == 0
+            and b.storage_offset() == 0
+        )
+
+    @staticmethod
+    def _moe_lora_prefill_capability_key(
+        *,
+        x: torch.Tensor,
+        output_width: int,
+        w13_lora_a: tuple[torch.Tensor, ...],
+        w13_lora_b: tuple[torch.Tensor, ...],
+        w2_lora_a: tuple[torch.Tensor, ...],
+        w2_lora_b: tuple[torch.Tensor, ...],
+        num_adapters: int,
+        num_experts: int,
+        route_mode: str,
+    ) -> tuple:
+        """Build the exact Host-static certification key (no device reads)."""
+        weights = w13_lora_a + w13_lora_b + w2_lora_a + w2_lora_b
+        return (
+            _MOE_LORA_PREFILL_VERSION_KEY,
+            str(x.dtype),
+            x.shape[0],
+            num_adapters,
+            num_experts,
+            x.shape[-1],
+            output_width,
+            w2_lora_a[0].shape[-1],
+            w13_lora_a[0].shape[-2],
+            route_mode,
+            tuple((tuple(weight.shape), tuple(weight.stride())) for weight in weights),
+        )
+
+    def _get_moe_lora_prefill_workspace(
+        self,
+        *,
+        x: torch.Tensor,
+        num_groups: int,
+        max_width: int,
+        route_mode: str,
+        layout_class: tuple,
+    ) -> dict[str, object] | None:
+        num_rows = x.shape[0]
+        group_pitch = (num_groups + 7) // 8 * 8
+        device_index = x.device.index
+        if device_index is None:
+            device_index = torch.npu.current_device()
+        vector_cores = torch.npu.get_device_properties(device_index).vector_core_num
+        current_stream = torch.npu.current_stream(x.device)
+        if current_stream != torch.npu.default_stream(x.device):
+            return None
+        if torch.npu.is_current_stream_capturing():
+            # No stable graph-identity/lifecycle owner is available at this
+            # layer yet. Fail closed instead of sharing eager buffers with a
+            # capture or pinning them forever.
+            return None
+        stream_identity = int(current_stream.npu_stream)
+        key = (
+            x.device,
+            stream_identity,
+            None,
+            x.dtype,
+            num_rows,
+            num_groups,
+            max_width,
+            route_mode,
+            layout_class,
+            vector_cores,
+        )
+        requested_bytes = (
+            2 * vector_cores * group_pitch * torch.int32.itemsize
+            + 2 * num_groups * torch.int32.itemsize
+            + num_groups * torch.int64.itemsize
+            + num_rows * 8 * torch.int32.itemsize
+            + vector_cores * 8 * torch.int32.itemsize
+            + 8 * torch.int32.itemsize
+            + num_rows * max_width * x.element_size()
+        )
+        # Admission follows DESIGN.md Bexplicit_peak rather than accounting
+        # only for persistent route/grouped buffers.  The extra term covers
+        # the simultaneously live second MxW payload and the MxR_compute
+        # shrink output.  Certified keys use physical R_compute=16.
+        gmm_transient_peak_bytes = (
+            num_rows * (max_width + 16) * x.element_size()
+        )
+        # CANN's internal GroupedMatmul workspace is not described by a stable
+        # linear schema. Until an exact capability-key measurement is archived,
+        # reserve a configurable conservative floor on both new and cached
+        # entries. This reserve is intentionally distinct from Bexplicit_peak.
+        cann_workspace_reserve_bytes = max(
+            0,
+            int(os.getenv("VLLM_ASCEND_MOE_LORA_CANN_WORKSPACE_MB", "128")),
+        ) * 1024 * 1024
+
+        free_bytes, total_bytes = torch.npu.mem_get_info(device_index)
+        configured_headroom = max(
+            0,
+            int(os.getenv("VLLM_ASCEND_MOE_LORA_HEADROOM_MB", "256")),
+        ) * 1024 * 1024
+        ratio_headroom = int(
+            total_bytes
+            * max(
+                0.0,
+                float(os.getenv("VLLM_ASCEND_MOE_LORA_HEADROOM_RATIO", "0.02")),
+            )
+        )
+        required_headroom = max(configured_headroom, ratio_headroom)
+
+        workspace = self._moe_lora_prefill_workspaces.get(key)
+        if workspace is not None:
+            # Persistent buffers are already reflected in current free memory.
+            # Re-check the transient GMM/CANN requirement on every reuse because
+            # KV cache and concurrent requests may have consumed the original
+            # allocation-time headroom.
+            reuse_peak_bytes = int(workspace["gmm_transient_peak_bytes"]) + int(
+                workspace["cann_workspace_reserve_bytes"]
+            )
+            if free_bytes < reuse_peak_bytes + required_headroom:
+                return None
+            self._moe_lora_prefill_workspaces.move_to_end(key)
+            workspace["state"] = "in-flight"
+            workspace["required_device_headroom_bytes"] = required_headroom
+            workspace["last_observed_free_bytes"] = free_bytes
+            return workspace
+
+        while (
+            len(self._moe_lora_prefill_workspaces) >= self._moe_lora_prefill_workspace_max_entries
+            or self._moe_lora_prefill_workspace_bytes
+            + requested_bytes
+            + gmm_transient_peak_bytes
+            + cann_workspace_reserve_bytes
+            > self._moe_lora_prefill_workspace_limit_bytes
+        ):
+            evict_key = None
+            for candidate_key, candidate in self._moe_lora_prefill_workspaces.items():
+                completion = candidate.get("completion_event")
+                if candidate.get("state") == "eager-reusable" and (
+                    completion is None or completion.query()
+                ):
+                    evict_key = candidate_key
+                    break
+            if evict_key is None:
+                return None
+            evicted = self._moe_lora_prefill_workspaces.pop(evict_key)
+            self._moe_lora_prefill_workspace_bytes -= int(evicted["bytes"])
+
+        admission_peak_bytes = (
+            requested_bytes
+            + gmm_transient_peak_bytes
+            + cann_workspace_reserve_bytes
+        )
+        if free_bytes < admission_peak_bytes + required_headroom:
+            return None
+
+        try:
+            workspace = {
+                "local_count": torch.empty(
+                    (vector_cores, group_pitch), dtype=torch.int32, device=x.device
+                ),
+                "core_prefix": torch.empty(
+                    (vector_cores, group_pitch), dtype=torch.int32, device=x.device
+                ),
+                "group_total": torch.empty(num_groups, dtype=torch.int32, device=x.device),
+                "group_start": torch.empty(num_groups, dtype=torch.int32, device=x.device),
+                "group_count": torch.empty(num_groups, dtype=torch.int64, device=x.device),
+                "perm_record": torch.empty((num_rows, 8), dtype=torch.int32, device=x.device),
+                "error_per_core": torch.empty(
+                    (vector_cores, 8), dtype=torch.int32, device=x.device
+                ),
+                "route_error": torch.empty(8, dtype=torch.int32, device=x.device),
+                "grouped_storage": torch.empty(
+                    num_rows * max_width, dtype=x.dtype, device=x.device
+                ),
+                "state": "in-flight",
+                "completion_event": None,
+                "bytes": requested_bytes,
+                "gmm_transient_peak_bytes": gmm_transient_peak_bytes,
+                "cann_workspace_reserve_bytes": cann_workspace_reserve_bytes,
+                "admission_peak_bytes": admission_peak_bytes,
+                "required_device_headroom_bytes": required_headroom,
+                "last_observed_free_bytes": free_bytes,
+                "stream_identity": stream_identity,
+            }
+        except RuntimeError:
+            # Allocation failed before route/GMM launch. Do not publish a
+            # partial entry; callers will execute the unchanged BGMV fallback.
+            self._moe_lora_prefill_workspaces.pop(key, None)
+            return None
+        self._moe_lora_prefill_workspaces[key] = workspace
+        self._moe_lora_prefill_workspace_bytes += requested_bytes
+        return workspace
+
+    def prepare_moe_lora_prefill(
+        self,
+        *,
+        x: torch.Tensor,
+        output_width: int,
+        w13_lora_a: tuple[torch.Tensor, ...],
+        w13_lora_b: tuple[torch.Tensor, ...],
+        w2_lora_a: tuple[torch.Tensor, ...],
+        w2_lora_b: tuple[torch.Tensor, ...],
+        adapter_enabled: torch.Tensor,
+        route_mode: str,
+        group_list_type: int,
+        expanded_row_idx: torch.Tensor | None = None,
+        routed_topk_ids: torch.Tensor | None = None,
+        token_lora_indices: torch.Tensor | None = None,
+        top_k: int = 1,
+        first_expert_idx: int = 0,
+        expert_count: torch.Tensor | None = None,
+        exchanged_lora_indices: torch.Tensor | None = None,
+        fully_sharded: bool = False,
+        mul_routed_weight: bool = False,
+    ) -> dict[str, object] | None:
+        if not self.is_prefill or not self._has_moe_lora_prefill_backend():
+            return None
+        if fully_sharded or mul_routed_weight or group_list_type != 1:
+            return None
+        if x.dim() != 2 or x.shape[0] < 512 or x.shape[0] > 2**31 - 1:
+            return None
+        if (
+            x.dtype not in (torch.float16, torch.bfloat16)
+            or output_width <= 0
+            or output_width >= 65536
+        ):
+            return None
+        if (
+            not x.is_contiguous()
+            or x.storage_offset() != 0
+            or x.shape[-1] % 16 != 0
+            or x.shape[-1] >= 65536
+        ):
+            return None
+        if len(w13_lora_a) != 2 or len(w13_lora_b) != 2:
+            return None
+        if len(w2_lora_a) != 1 or len(w2_lora_b) != 1:
+            return None
+        if (
+            adapter_enabled.dtype not in (torch.bool, torch.int32, torch.int64)
+            or adapter_enabled.device != x.device
+            or adapter_enabled.dim() != 1
+        ):
+            return None
+        if not adapter_enabled.is_contiguous() or adapter_enabled.storage_offset() != 0:
+            return None
+        num_adapters = w13_lora_a[0].shape[0]
+        if adapter_enabled.numel() != num_adapters:
+            return None
+        num_experts = w13_lora_a[0].shape[1]
+        num_groups = num_adapters * num_experts
+        if not 2 <= num_groups <= 1024:
+            return None
+        capability_key = self._moe_lora_prefill_capability_key(
+            x=x,
+            output_width=output_width,
+            w13_lora_a=w13_lora_a,
+            w13_lora_b=w13_lora_b,
+            w2_lora_a=w2_lora_a,
+            w2_lora_b=w2_lora_b,
+            num_adapters=num_adapters,
+            num_experts=num_experts,
+            route_mode=route_mode,
+        )
+        if capability_key not in self._moe_lora_prefill_certified_keys:
+            return None
+        max_width = max(x.shape[-1], w2_lora_a[0].shape[-1])
+        weight_pairs = tuple(zip(w13_lora_a, w13_lora_b)) + tuple(zip(w2_lora_a, w2_lora_b))
+        input_widths = (x.shape[-1], x.shape[-1], w2_lora_a[0].shape[-1])
+        if any(
+            not self._moe_lora_prefill_weight_pair_supported(
+                a,
+                b,
+                num_adapters=num_adapters,
+                num_experts=num_experts,
+                input_width=input_width,
+                dtype=x.dtype,
+                device=x.device,
+            )
+            for (a, b), input_width in zip(weight_pairs, input_widths)
+        ):
+            return None
+        if sum(b.shape[-2] for b in w13_lora_b) > output_width:
+            return None
+        if w2_lora_b[0].shape[-2] > x.shape[-1]:
+            return None
+
+        if route_mode == "allgather":
+            if (
+                expanded_row_idx is None
+                or routed_topk_ids is None
+                or token_lora_indices is None
+                or expanded_row_idx.device != x.device
+                or routed_topk_ids.device != x.device
+                or token_lora_indices.device != x.device
+                or expanded_row_idx.dtype not in (torch.int32, torch.int64)
+                or routed_topk_ids.dtype != expanded_row_idx.dtype
+                or token_lora_indices.dtype != torch.int64
+                or expanded_row_idx.dim() != 1
+                or routed_topk_ids.shape != expanded_row_idx.shape
+                or token_lora_indices.dim() != 1
+                or top_k <= 0
+                or expanded_row_idx.numel() % top_k != 0
+                or token_lora_indices.numel() != expanded_row_idx.numel() // top_k
+                or not expanded_row_idx.is_contiguous()
+                or not routed_topk_ids.is_contiguous()
+                or not token_lora_indices.is_contiguous()
+                or expanded_row_idx.storage_offset() != 0
+                or routed_topk_ids.storage_offset() != 0
+                or token_lora_indices.storage_offset() != 0
+            ):
+                return None
+        elif route_mode == "alltoall":
+            if (
+                expert_count is None
+                or exchanged_lora_indices is None
+                or expert_count.device != x.device
+                or exchanged_lora_indices.device != x.device
+                or expert_count.dtype not in (torch.int32, torch.int64)
+                or expert_count.dim() != 1
+                or expert_count.numel() != num_experts
+                or exchanged_lora_indices.dtype != torch.int64
+                or exchanged_lora_indices.dim() != 1
+                or exchanged_lora_indices.numel() != x.shape[0]
+                or not expert_count.is_contiguous()
+                or not exchanged_lora_indices.is_contiguous()
+                or expert_count.storage_offset() != 0
+                or exchanged_lora_indices.storage_offset() != 0
+            ):
+                return None
+        else:
+            return None
+
+        layout_class = tuple(
+            (tuple(weight.shape), tuple(weight.stride()))
+            for weight in w13_lora_a + w13_lora_b + w2_lora_a + w2_lora_b
+        )
+        workspace = self._get_moe_lora_prefill_workspace(
+            x=x,
+            num_groups=num_groups,
+            max_width=max_width,
+            route_mode=route_mode,
+            layout_class=layout_class,
+        )
+        if workspace is None:
+            return None
+        grouped_x = workspace["grouped_storage"][: x.numel()].view_as(x)
+        route_workspace = (
+            workspace["local_count"],
+            workspace["core_prefix"],
+            workspace["group_total"],
+            workspace["group_start"],
+            workspace["group_count"],
+            workspace["perm_record"],
+            workspace["error_per_core"],
+            workspace["route_error"],
+            grouped_x,
+        )
+        if route_mode == "allgather":
+            self.moe_lora_prefill_route_allgather(
+                x,
+                expanded_row_idx,
+                routed_topk_ids,
+                token_lora_indices,
+                adapter_enabled,
+                route_workspace,
+                top_k,
+                num_experts,
+                first_expert_idx,
+            )
+            self._record_moe_lora_prefill_launch("route_allgather_launches")
+        else:
+            self.moe_lora_prefill_route_alltoall(
+                x,
+                expert_count,
+                exchanged_lora_indices,
+                adapter_enabled,
+                route_workspace,
+            )
+            self._record_moe_lora_prefill_launch("route_alltoall_launches")
+        self._record_moe_lora_prefill_launch("grouped_contexts")
+        return {
+            "workspace": workspace,
+            "num_rows": x.shape[0],
+            "num_groups": num_groups,
+            "num_experts": num_experts,
+            "dtype": x.dtype,
+            "device": x.device,
+            "route_width": x.shape[-1],
+            "output_width": output_width,
+            "capability_key": capability_key,
+        }
+
+    def _get_moe_lora_prefill_weight_views(
+        self, a: torch.Tensor, b: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = (
+            a.data_ptr(),
+            b.data_ptr(),
+            a.storage_offset(),
+            b.storage_offset(),
+            tuple(a.shape),
+            tuple(b.shape),
+            tuple(a.stride()),
+            tuple(b.stride()),
+            a.dtype,
+            a.device,
+        )
+        views = self._moe_lora_prefill_weight_views.get(key)
+        if views is None:
+            groups = a.shape[0] * a.shape[1]
+            a_view = a.view(groups, a.shape[-2], a.shape[-1]).transpose(-1, -2)
+            b_view = b.view(groups, b.shape[-2], b.shape[-1]).transpose(-1, -2)
+            if (
+                a_view.data_ptr() != a.data_ptr()
+                or b_view.data_ptr() != b.data_ptr()
+                or a_view.storage_offset() != 0
+                or b_view.storage_offset() != 0
+                or tuple(a_view.shape) != (groups, a.shape[-1], a.shape[-2])
+                or tuple(a_view.stride())
+                != (a.shape[-2] * a.shape[-1], 1, a.shape[-1])
+                or tuple(b_view.shape) != (groups, b.shape[-1], b.shape[-2])
+                or tuple(b_view.stride())
+                != (b.shape[-2] * b.shape[-1], 1, b.shape[-1])
+            ):
+                raise RuntimeError("MoE LoRA prefill weight transpose layout is not certified")
+            views = (a_view, b_view)
+            self._moe_lora_prefill_weight_views[key] = views
+        return views
+
+    def apply_moe_lora_prefill(
+        self,
+        *,
+        context: dict[str, object],
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        output_offset: int = 0,
+        gather_input: bool = False,
+    ) -> None:
+        workspace = context["workspace"]
+        assert isinstance(workspace, dict)
+        if (
+            y.dim() != 2
+            or y.shape[0] != context["num_rows"]
+            or output_offset + sum(weight.shape[-2] for weight in lora_b_stacked)
+            > y.shape[1]
+            or y.dtype != context["dtype"]
+            or y.device != context["device"]
+            or not y.is_contiguous()
+            or y.storage_offset() != 0
+        ):
+            raise RuntimeError("MoE LoRA prefill output no longer matches the prepared context")
+        grouped_storage = workspace["grouped_storage"]
+        grouped_x = grouped_storage[: x.numel()].view_as(x)
+        perm_record = workspace["perm_record"]
+        group_count = workspace["group_count"]
+        if gather_input:
+            self.moe_lora_prefill_gather_by_perm(x, perm_record, grouped_x)
+            self._record_moe_lora_prefill_launch("gather_by_perm_launches")
+        else:
+            if x.shape[-1] != context["route_width"]:
+                raise RuntimeError("W13 grouped input does not match routed input width")
+        cur_offset = output_offset
+        for a, b in zip(lora_a_stacked, lora_b_stacked):
+            a_view, b_view = self._get_moe_lora_prefill_weight_views(a, b)
+            shrink_out = torch_npu.npu_grouped_matmul(
+                x=[grouped_x],
+                weight=[a_view],
+                bias=None,
+                group_list=group_count,
+                split_item=2,
+                group_type=0,
+                group_list_type=1,
+                output_dtype=None,
+            )[0]
+            self._record_moe_lora_prefill_launch("grouped_gmm_launches")
+            if shrink_out.dtype != x.dtype or shrink_out.shape[-1] != 16:
+                raise RuntimeError("built-in MoE LoRA shrink violated the certified T output ABI")
+            delta = torch_npu.npu_grouped_matmul(
+                x=[shrink_out],
+                weight=[b_view],
+                bias=None,
+                group_list=group_count,
+                split_item=2,
+                group_type=0,
+                group_list_type=1,
+                output_dtype=None,
+            )[0]
+            self._record_moe_lora_prefill_launch("grouped_gmm_launches")
+            if delta.dtype != x.dtype:
+                raise RuntimeError("built-in MoE LoRA expand violated the certified T output ABI")
+            self.moe_lora_prefill_scatter_add(delta, perm_record, y, cur_offset)
+            self._record_moe_lora_prefill_launch("scatter_add_launches")
+            cur_offset += b.shape[-2]
+        if gather_input:
+            completion = torch.npu.Event()
+            completion.record(torch.npu.current_stream(x.device))
+            workspace["completion_event"] = completion
+            workspace["state"] = "eager-reusable"
+
     def add_lora_fused_moe(
         self,
         y: torch.Tensor,
@@ -364,6 +1098,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        combined_indices: torch.Tensor | None = None,
     ) -> None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -388,6 +1123,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         inactive rows get a zero delta for free -- no Python-level branching
         needed.
         """
+        if getattr(self, "is_prefill", False):
+            self._record_moe_lora_prefill_launch("baseline_bgmv_path_calls")
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
@@ -399,13 +1136,61 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         expert_idx = expert_ids.view(-1).to(torch.long)
         num_experts = lora_a_stacked[0].shape[1]
 
-        lora_idx_safe = token_lora_mapping.clamp(min=0)
-        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-        combined_idx = torch.where(
-            enabled,
-            lora_idx_safe * num_experts + expert_idx,
-            torch.full_like(token_lora_mapping, -1),
-        ).contiguous()
+        if combined_indices is None:
+            lora_idx_safe = token_lora_mapping.clamp(min=0)
+            enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+            combined_idx = torch.where(
+                enabled,
+                lora_idx_safe * num_experts + expert_idx,
+                torch.full_like(token_lora_mapping, -1),
+            ).contiguous()
+        else:
+            combined_idx = combined_indices.view(-1)
+
+        fused_w13 = (
+            getattr(self, "bgmv_moe_w13", None) is not None
+            and get_ascend_device_type() == AscendDeviceType.A2
+            and (not self.is_prefill or x2d.shape[0] <= 384)
+            and len(lora_a_stacked) == 2
+            and len(lora_b_stacked) == 2
+            and not fully_sharded
+            and not mul_routed_weight
+            and lora_a_stacked[0].shape[-2] == 16
+            and lora_a_stacked[1].shape == lora_a_stacked[0].shape
+            and lora_a_stacked[0].shape[-1] <= 4096
+            and lora_a_stacked[0].shape[-1] % 16 == 0
+            and lora_b_stacked[0].shape[-1] == 16
+            and lora_b_stacked[1].shape == lora_b_stacked[0].shape
+            and lora_b_stacked[0].shape[-2] % 512 == 0
+            and offset + 2 * lora_b_stacked[0].shape[-2] <= y2d.shape[-1]
+        )
+        if fused_w13:
+            a0 = lora_a_stacked[0].view(-1, 16, x2d.shape[-1])
+            a1 = lora_a_stacked[1].view(-1, 16, x2d.shape[-1])
+            output_slice = lora_b_stacked[0].shape[-2]
+            b0 = lora_b_stacked[0].view(-1, output_slice, 16)
+            b1 = lora_b_stacked[1].view(-1, output_slice, 16)
+            workspace_key = (x2d.device, x2d.shape[0])
+            workspaces = getattr(self, "_moe_w13_workspaces", None)
+            if workspaces is None:
+                workspaces = self._moe_w13_workspaces = {}
+            workspace = workspaces.get(workspace_key)
+            if workspace is None:
+                workspace = torch.empty((2, x2d.shape[0], 16), dtype=torch.float32, device=x2d.device)
+                workspaces[workspace_key] = workspace
+            self.bgmv_moe_w13(
+                x2d,
+                a0,
+                a1,
+                b0,
+                b1,
+                combined_idx,
+                workspace,
+                y2d,
+                offset,
+                1.0,
+            )
+            return
 
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):

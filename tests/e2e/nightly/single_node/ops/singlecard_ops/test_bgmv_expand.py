@@ -1,5 +1,6 @@
 import gc
 
+import pytest
 import torch
 
 from vllm_ascend.utils import enable_custom_op
@@ -40,3 +41,35 @@ def test_bgmv_expand():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "batch_size,slice_offset,slice_size,output_full_dim",
+    [(1, 0, 4096, 4096), (6, 0, 2048, 4096), (6, 2048, 2048, 4096)],
+)
+@torch.inference_mode()
+def test_bgmv_expand_rank16_decode_shape(
+    dtype: torch.dtype,
+    batch_size: int,
+    slice_offset: int,
+    slice_size: int,
+    output_full_dim: int,
+):
+    """Cover 512-element output tiling and sliced W13 updates."""
+    num_loras = 4
+    rank = 16
+    x = torch.randn([batch_size, rank], dtype=torch.float32)
+    w = torch.randn([num_loras, slice_size, rank], dtype=dtype)
+    indices = torch.arange(batch_size, dtype=torch.int64) % num_loras
+    y = torch.randn([batch_size, output_full_dim], dtype=dtype)
+
+    expected = bgmv_expand_cpu_impl(x, w, indices, y.clone(), slice_offset, slice_size)
+    actual = y.npu()
+    torch.ops._C_ascend.bgmv_expand(
+        x.npu(), w.npu(), indices.npu(), actual, slice_offset, slice_size
+    )
+
+    atol = 3e-2 if dtype == torch.bfloat16 else 3e-3
+    rtol = 3e-2 if dtype == torch.bfloat16 else 3e-3
+    torch.testing.assert_close(actual.cpu(), expected, atol=atol, rtol=rtol)

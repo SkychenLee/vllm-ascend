@@ -31,8 +31,9 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
+    _prepare_moe_lora_routing_allgather_indices,
+    _prepare_moe_lora_routing_indices,
     _recover_moe_lora_routing_all2all,
-    _recover_moe_lora_routing_allgather,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
 )
@@ -212,7 +213,7 @@ def _apply_dynamic_int8_moe_lora(
     )[0]
 
     if comm_type == MoECommType.ALLGATHER:
-        lora_routing = _recover_moe_lora_routing_allgather(
+        lora_routing = _prepare_moe_lora_routing_allgather_indices(
             lora_context,
             mlp_compute_input.expanded_row_idx,
             mlp_compute_input.topk_ids,
@@ -222,6 +223,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             group_list=mlp_compute_input.group_list,
         )
+        lora_routing = _prepare_moe_lora_routing_indices(lora_context, lora_routing)
     moe_lora_apply_w13(
         lora_context,
         gate_up_out=gate_up_out,

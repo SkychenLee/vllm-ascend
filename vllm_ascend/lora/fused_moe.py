@@ -250,6 +250,61 @@ def _recover_moe_lora_routing_all2all(
     return expert_per_row, lora_per_row
 
 
+def _prepare_moe_lora_routing_indices(lora_context, lora_routing):
+    """Fold (LoRA slot, expert) once for reuse by both W13 and W2."""
+    expert_per_row, lora_per_row = lora_routing
+    num_experts = lora_context.w13_lora_a_stacked[0].shape[1]
+    lora_idx_safe = lora_per_row.clamp(min=0)
+    enabled = (lora_per_row >= 0) & lora_context.adapter_enabled[lora_idx_safe].bool()
+    combined_indices = torch.where(
+        enabled,
+        lora_idx_safe * num_experts + expert_per_row.view(-1).to(torch.long),
+        torch.full_like(lora_per_row, -1),
+    ).contiguous()
+    return expert_per_row, lora_per_row, combined_indices
+
+
+def _prepare_moe_lora_routing_allgather_indices(lora_context, expanded_row_idx, topk_ids):
+    """Prepare AllGather BGMV indices without the A2 AICPU ArgSort path."""
+    num_rows = expanded_row_idx.numel()
+    adapter_enabled = lora_context.adapter_enabled
+    fast_path = (
+        hasattr(torch.ops._C_ascend, "moe_lora_routing")
+        and 0 < num_rows <= 1024
+        and expanded_row_idx.dtype in (torch.int32, torch.int64)
+        and topk_ids.dtype == expanded_row_idx.dtype
+        and adapter_enabled.dtype in (torch.bool, torch.int32, torch.int64)
+        and adapter_enabled.numel() <= 64
+    )
+    if not fast_path:
+        routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
+        return _prepare_moe_lora_routing_indices(lora_context, routing)
+
+    workspace_key = (expanded_row_idx.device, num_rows)
+    punica_wrapper = lora_context.punica_wrapper
+    workspaces = getattr(punica_wrapper, "_moe_lora_routing_workspaces", None)
+    if workspaces is None:
+        workspaces = punica_wrapper._moe_lora_routing_workspaces = {}
+    combined_indices = workspaces.get(workspace_key)
+    if combined_indices is None:
+        combined_indices = torch.empty(num_rows, dtype=torch.int64, device=expanded_row_idx.device)
+        workspaces[workspace_key] = combined_indices
+
+    num_experts = lora_context.w13_lora_a_stacked[0].shape[1]
+    torch.ops._C_ascend.moe_lora_routing(
+        expanded_row_idx.contiguous(),
+        topk_ids.contiguous(),
+        punica_wrapper.token_lora_indices,
+        adapter_enabled,
+        combined_indices,
+        lora_context.top_k,
+        num_experts,
+    )
+    # The first two entries preserve the routing tuple contract. Once the
+    # combined index is present, add_lora_fused_moe consumes only entry three.
+    return topk_ids.reshape(-1), combined_indices, combined_indices
+
+
 def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
@@ -260,7 +315,8 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
             caller via _recover_moe_lora_routing (AllGather) or
             _recover_moe_lora_routing_all2all (AlltoAll).
     """
-    expert_per_row, lora_per_row = lora_routing
+    expert_per_row, lora_per_row = lora_routing[:2]
+    combined_indices = lora_routing[2] if len(lora_routing) == 3 else None
     # EP rank may receive 0 dispatched tokens when all tokens route to
     # experts on other ranks. Skip LoRA to avoid passing empty tensors
     # to add_lora_fused_moe (which can trigger NPU kernel crashes).
@@ -275,6 +331,7 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         adapter_enabled=lora_context.adapter_enabled,
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
+        combined_indices=combined_indices,
     )
 
 
@@ -284,7 +341,8 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
     is the activation output that fed the base down GMM.
     """
-    expert_per_row, lora_per_row = lora_routing
+    expert_per_row, lora_per_row = lora_routing[:2]
+    combined_indices = lora_routing[2] if len(lora_routing) == 3 else None
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
     # kernel crashes with empty tensors.
     if expert_per_row.numel() == 0:
@@ -303,6 +361,7 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         fully_sharded=lora_context.fully_sharded,
         offset=offset,
         token_lora_mapping=lora_per_row,
+        combined_indices=combined_indices,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for
