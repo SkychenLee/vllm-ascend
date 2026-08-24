@@ -1,7 +1,9 @@
+import pytest
 import vllm
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-30B-A3B"
+W8A8_MODEL_PATH = "vllm-ascend/Qwen3-30B-A3B-W8A8"
 
 PROMPT_TEMPLATE = """<|im_start|>user
 I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me.Below is an instruction that describes a task, Write a response that appropriately completes the request.
@@ -63,6 +65,34 @@ def test_qwen3moe_lora_tp(qwen3moe_lora_files):
         trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
+    )
+
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+
+
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="lora,fully_sharded_lora",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2,A3",
+    quantization="W8A8",
+    graph_mode="eager",
+)
+def test_qwen3moe_w8a8_fully_sharded_lora_tp2(qwen3moe_lora_files):
+    llm = vllm.LLM(
+        W8A8_MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=16,
+        fully_sharded_loras=True,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+        tensor_parallel_size=2,
+        enable_expert_parallel=False,
+        quantization="ascend",
     )
 
     generate_and_test(llm, qwen3moe_lora_files, lora_id=1)

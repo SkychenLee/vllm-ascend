@@ -26,6 +26,10 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
+from vllm.distributed import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -176,7 +180,6 @@ def _can_use_single_lora_gmm(
         return False
     if (
         getattr(punica_wrapper, "num_active_moe_loras", 0) != 1
-        or lora_context.fully_sharded
         or group_list_type != 1
         or lora_context.top_k != MOE_LORA_GMM_TOP_K
         or hidden_states.dtype != torch.bfloat16
@@ -189,12 +192,16 @@ def _can_use_single_lora_gmm(
     w2_b = lora_context.w2_lora_b_stacked
     weights = (*w13_a, *w13_b, *w2_a, *w2_b)
     num_experts = group_list.numel()
+    w13_a_rank = MOE_LORA_GMM_RANK
+    if lora_context.fully_sharded:
+        w13_a_rank //= lora_context.tp_size
     return not (
         not weights
         or any(weight.shape[0] != MOE_LORA_GMM_MAX_LORAS for weight in weights)
         or any(weight.shape[1] != num_experts for weight in weights)
         or any(weight.dtype != hidden_states.dtype for weight in weights)
-        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in (*w13_a, *w2_a))
+        or any(weight.shape[-2] != w13_a_rank for weight in w13_a)
+        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in w2_a)
         or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
         or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_experts
     )
@@ -213,7 +220,6 @@ def _can_use_composite_lora_gmm(
         punica_wrapper is None
         or getattr(punica_wrapper, "no_lora", True)
         or getattr(punica_wrapper, "num_active_moe_loras", 0) < 2
-        or lora_context.fully_sharded
         or group_list_type != 1
         or lora_context.top_k != MOE_LORA_GMM_TOP_K
         or hidden_states.dtype != torch.bfloat16
@@ -227,12 +233,16 @@ def _can_use_composite_lora_gmm(
     weights = (*w13_a, *w13_b, *w2_a, *w2_b)
     num_experts = group_list.numel()
     num_composite_groups = MOE_LORA_GMM_MAX_LORAS * num_experts
+    w13_a_rank = MOE_LORA_GMM_RANK
+    if lora_context.fully_sharded:
+        w13_a_rank //= lora_context.tp_size
     return not (
         not weights
         or any(weight.shape[0] != MOE_LORA_GMM_MAX_LORAS for weight in weights)
         or any(weight.shape[1] != num_experts for weight in weights)
         or any(weight.dtype != hidden_states.dtype for weight in weights)
-        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in (*w13_a, *w2_a))
+        or any(weight.shape[-2] != w13_a_rank for weight in w13_a)
+        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in w2_a)
         or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
         or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_composite_groups
     )
@@ -331,6 +341,31 @@ def _grouped_lora_matmul(
     )[0]
 
 
+def _communicate_fully_sharded_lora(
+    shrink: torch.Tensor,
+    lora_a: torch.Tensor,
+    lora_b: torch.Tensor,
+    *,
+    fully_sharded: bool,
+) -> torch.Tensor:
+    """Assemble the LoRA rank dimension before applying the B projection."""
+    if fully_sharded:
+        local_rank = lora_a.shape[-2]
+        full_rank = lora_b.shape[-1]
+        if local_rank == full_rank:
+            shrink = tensor_model_parallel_all_reduce(shrink)
+        else:
+            shrink = tensor_model_parallel_all_gather(shrink)
+
+    if shrink.shape[-1] != lora_b.shape[-1]:
+        raise ValueError(
+            "MoE LoRA rank mismatch after TP communication: "
+            f"A projection has rank {shrink.shape[-1]}, "
+            f"but LoRA B expects rank {lora_b.shape[-1]}."
+        )
+    return shrink
+
+
 def _add_single_lora_gmm(
     output: torch.Tensor,
     inputs: torch.Tensor,
@@ -339,22 +374,30 @@ def _add_single_lora_gmm(
     *,
     routing: _SingleLoraGMMRouting,
     group_list: torch.Tensor,
+    fully_sharded: bool = False,
+    output_offset: int = 0,
 ) -> None:
     """Add one adapter with two grouped matmuls per output slice.
 
     Slot selection and the optional base-token mask remain graph tensors.
     """
     masked_inputs = inputs * routing.enabled.unsqueeze(-1).to(inputs.dtype)
-    output_offset = 0
+    current_output_offset = output_offset
     for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
         selected_lora_a = torch.index_select(lora_a, 0, routing.slot).squeeze(0)
         selected_lora_b = torch.index_select(lora_b, 0, routing.slot).squeeze(0)
         shrink = _grouped_lora_matmul(masked_inputs, selected_lora_a, group_list)
+        shrink = _communicate_fully_sharded_lora(
+            shrink,
+            selected_lora_a,
+            selected_lora_b,
+            fully_sharded=fully_sharded,
+        )
         delta = _grouped_lora_matmul(shrink, selected_lora_b, group_list)
         delta *= routing.enabled.unsqueeze(-1).to(delta.dtype)
         output_size = delta.shape[-1]
-        output.narrow(-1, output_offset, output_size).add_(delta)
-        output_offset += output_size
+        output.narrow(-1, current_output_offset, output_size).add_(delta)
+        current_output_offset += output_size
 
 
 def _add_composite_lora_gmm(
@@ -364,25 +407,33 @@ def _add_composite_lora_gmm(
     lora_b_stacked: tuple[torch.Tensor, ...],
     *,
     routing: _CompositeLoraGMMRouting,
+    fully_sharded: bool = False,
+    output_offset: int = 0,
 ) -> None:
     """Add LoRA deltas after grouping rows by dynamic slot and expert."""
     grouped_inputs = inputs.index_select(0, routing.permutation)
     grouped_inputs = grouped_inputs * routing.enabled.unsqueeze(-1).to(inputs.dtype)
 
-    output_offset = 0
+    current_output_offset = output_offset
     for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
         lora_a_flat = lora_a.flatten(0, 1)
         lora_b_flat = lora_b.flatten(0, 1)
         shrink = _grouped_lora_matmul(grouped_inputs, lora_a_flat, routing.group_list)
+        shrink = _communicate_fully_sharded_lora(
+            shrink,
+            lora_a_flat,
+            lora_b_flat,
+            fully_sharded=fully_sharded,
+        )
         delta = _grouped_lora_matmul(shrink, lora_b_flat, routing.group_list)
         delta *= routing.enabled.unsqueeze(-1).to(delta.dtype)
         output_size = delta.shape[-1]
-        output.narrow(-1, output_offset, output_size).index_add_(
+        output.narrow(-1, current_output_offset, output_size).index_add_(
             0,
             routing.permutation,
             delta,
         )
-        output_offset += output_size
+        current_output_offset += output_size
 
 
 @register_quant_moe_lora_impl(
@@ -485,6 +536,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_context.w13_lora_b_stacked,
             routing=single_lora_routing,
             group_list=mlp_compute_input.group_list,
+            fully_sharded=lora_context.fully_sharded,
         )
     elif use_composite_lora_gmm:
         composite_lora_routing = _build_composite_lora_gmm_routing(
@@ -499,6 +551,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_context.w13_lora_a_stacked,
             lora_context.w13_lora_b_stacked,
             routing=composite_lora_routing,
+            fully_sharded=lora_context.fully_sharded,
         )
     elif comm_type == MoECommType.ALLGATHER:
         lora_routing = _recover_moe_lora_routing_allgather(
@@ -556,6 +609,9 @@ def _apply_dynamic_int8_moe_lora(
     if use_single_lora_gmm:
         # activated already includes topk_scales, so the W2 LoRA delta must
         # not multiply routed weights a second time.
+        output_offset = 0
+        if lora_context.fully_sharded:
+            output_offset = lora_context.w2_lora_b_stacked[0].shape[-2] * lora_context.tp_rank
         _add_single_lora_gmm(
             down_out,
             activated,
@@ -563,15 +619,22 @@ def _apply_dynamic_int8_moe_lora(
             lora_context.w2_lora_b_stacked,
             routing=single_lora_routing,
             group_list=mlp_compute_input.group_list,
+            fully_sharded=lora_context.fully_sharded,
+            output_offset=output_offset,
         )
         reset_lora_indices(lora_context)
     elif use_composite_lora_gmm:
+        output_offset = 0
+        if lora_context.fully_sharded:
+            output_offset = lora_context.w2_lora_b_stacked[0].shape[-2] * lora_context.tp_rank
         _add_composite_lora_gmm(
             down_out,
             activated,
             lora_context.w2_lora_a_stacked,
             lora_context.w2_lora_b_stacked,
             routing=composite_lora_routing,
+            fully_sharded=lora_context.fully_sharded,
+            output_offset=output_offset,
         )
         reset_lora_indices(lora_context)
     else:
