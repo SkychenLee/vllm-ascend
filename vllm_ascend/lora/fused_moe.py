@@ -110,7 +110,7 @@ def preprocess_lora_indices(
 ) -> None:
     """Expand and permute LoRA token indices for the AlltoAll dispatch path.
 
-    Reads ``lora_context.split_lora_indices``, repeats each entry by
+    Reads ``lora_context.split_lora_indices``, broadcasts each entry across
     ``topk``, applies the token permutation to align with the dispatched
     hidden states, and stores the result in
     ``lora_context.permuted_lora_indices``.
@@ -121,7 +121,7 @@ def preprocess_lora_indices(
     split_indices = getattr(lora_context, "split_lora_indices", None)
     if split_indices is None:
         return
-    expanded = split_indices.repeat_interleave(topk_ids.shape[1])
+    expanded = split_indices.unsqueeze(-1).expand(-1, topk_ids.shape[1]).reshape(-1)
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
     lora_context.permuted_lora_indices = expanded[permutation]
 
@@ -247,7 +247,7 @@ def _recover_moe_lora_routing_allgather(
         expert_per_row.scatter_add_(0, destination, encoded_expert_ids)
         expert_per_row.sub_(1).clamp_min_(0)
 
-        lora_per_pair = token_lora_indices[: topk_ids.shape[0]].repeat_interleave(top_k)
+        lora_per_pair = token_lora_indices[: topk_ids.shape[0]].unsqueeze(-1).expand_as(topk_ids).reshape(-1)
         encoded_lora_ids = torch.where(
             is_local & (lora_per_pair >= 0),
             lora_per_pair + 1,
@@ -290,19 +290,32 @@ def _recover_moe_lora_routing_all2all(
     if exchanged_lora_indices is None:
         raise AssertionError("AlltoAll MoE LoRA requires exchanged_lora_indices in lora_context.")
 
-    # Build per-token expert IDs
-    expert_per_row = torch.repeat_interleave(
-        torch.arange(num_local_experts, device=group_list.device),
-        group_list,
-    )
-
     lora_per_row = exchanged_lora_indices.reshape(-1).to(torch.long)
-    if expert_per_row.numel() != lora_per_row.numel():
+    if group_list.numel() != num_local_experts:
         raise AssertionError(
             "AlltoAll MoE LoRA routing metadata is misaligned: "
-            f"group_list describes {expert_per_row.numel()} rows, but "
-            f"received {lora_per_row.numel()} LoRA indices."
+            f"expected {num_local_experts} local expert counts, but "
+            f"received {group_list.numel()}."
         )
+
+    # Mark every expert boundary, then recover the expert id for each row
+    # with a cumulative sum. Multiple empty experts share a boundary and
+    # therefore contribute multiple increments at the same position. Unlike
+    # tensor-repeat expansion, every intermediate has a static
+    # shape and is safe to capture in ACLGraph.
+    group_counts = group_list.to(torch.long)
+    expert_starts = torch.cumsum(group_counts, dim=0) - group_counts
+    boundary_increments = torch.zeros(
+        lora_per_row.shape[0] + 1,
+        dtype=torch.long,
+        device=group_list.device,
+    )
+    boundary_increments.scatter_add_(
+        0,
+        expert_starts.clamp(max=lora_per_row.shape[0]),
+        torch.ones_like(expert_starts),
+    )
+    expert_per_row = torch.cumsum(boundary_increments[:-1], dim=0).sub_(1)
 
     return expert_per_row, lora_per_row
 

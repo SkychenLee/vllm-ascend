@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,7 @@ from vllm_ascend.lora.fused_moe import (
     has_lora,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
+    preprocess_lora_indices,
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.quantization.quant_type import QuantType
@@ -212,6 +214,20 @@ def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:
     assert torch.equal(lora_slots, torch.tensor([0, -1, 0, -1, 1, 1]))
 
 
+def test_preprocess_lora_indices_broadcasts_before_permutation() -> None:
+    context = SimpleNamespace(split_lora_indices=torch.tensor([7, -1]))
+    topk_ids = torch.tensor([[0, 1], [1, 0]])
+    reversed_permutation_mapping = torch.tensor([[2, 0], [3, 1]])
+
+    preprocess_lora_indices(
+        context,
+        topk_ids=topk_ids,
+        reversed_permutation_mapping=reversed_permutation_mapping,
+    )
+
+    assert torch.equal(context.permuted_lora_indices, torch.tensor([7, -1, 7, -1]))
+
+
 def test_allgather_ep_routing_uses_gathered_adapters_and_local_experts() -> None:
     context = SimpleNamespace(
         top_k=2,
@@ -248,6 +264,33 @@ def test_all2all_routing_uses_local_experts_and_exchanged_adapters() -> None:
 
     assert torch.equal(expert_ids, torch.tensor([0, 0, 2, 2]))
     assert torch.equal(lora_slots, torch.tensor([1, -1, 0, 2]))
+
+
+def test_all2all_routing_handles_leading_and_consecutive_empty_experts() -> None:
+    context = SimpleNamespace(
+        local_num_experts=4,
+        exchanged_lora_indices=torch.tensor([5, -1, 2]),
+    )
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_all2all(
+        context,
+        group_list=torch.tensor([0, 2, 0, 1]),
+    )
+
+    assert torch.equal(expert_ids, torch.tensor([1, 1, 3]))
+    assert torch.equal(lora_slots, torch.tensor([5, -1, 2]))
+
+
+@pytest.mark.parametrize(
+    "routing_fn",
+    [
+        preprocess_lora_indices,
+        _recover_moe_lora_routing_allgather,
+        _recover_moe_lora_routing_all2all,
+    ],
+)
+def test_moe_lora_routing_does_not_use_repeat_interleave(routing_fn) -> None:
+    assert ".repeat_interleave(" not in inspect.getsource(routing_fn)
 
 
 def test_has_lora_follows_batch_metadata() -> None:
