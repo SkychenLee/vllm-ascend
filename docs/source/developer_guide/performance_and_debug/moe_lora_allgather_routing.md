@@ -1,6 +1,6 @@
 # MoE LoRA AllGather 路由数据说明
 
-本文解释 vLLM Ascend 在 TP + AllGather（不开 EP）场景中，MoE dispatch 前后各类行号如何变化，以及
+本文解释 vLLM Ascend 在 TP/EP + AllGather 场景中，MoE dispatch 前后各类行号如何变化，以及
 `expanded_row_idx`、`inv_perm`、`expert_per_row` 和 `lora_per_row` 是如何生成的。
 
 对应实现位于：
@@ -405,3 +405,31 @@ assert lora_per_row.shape == (num_pairs,)
 
 这些断言仅适合测试和调试，不应直接加入 NPU 推理热路径，因为设备张量的 Python 条件判断可能造成
 NPU 与 CPU 同步。
+
+## 12. 单 LoRA GMM 快速路径
+
+当动态 W8A8 MoE 满足单 LoRA GMM 条件时，AllGather dispatcher 将 token 对应的 LoRA slot 作为
+`npu_moe_init_routing_v2` 的非量化 `scale` 侧带输入。算子返回的 `expanded_scale` 与
+`sorted_hidden_states` 使用相同的 expert-major 顺序，因此不再需要通过 `expanded_row_idx` 对 LoRA mask
+执行 `index_copy_` 或 `scatter_add_`。EP 的非本地无效尾部由 `expert_tokens.sum()` 表示的连续有效前缀
+直接屏蔽。
+
+LoRA 权重库仍按 `[max_loras, num_experts, ...]` 保存；此外为单 LoRA 快速路径分配一份固定地址的
+`[num_experts, ...]` packed 缓冲区。调度器在 host 已知本批只有一个活跃 adapter 时得到其 slot；仅当
+slot 改变时，将该 slot 的 W13/W2 A/B 因子复制到 packed 缓冲区：
+
+```text
+weight_bank[active_slot] --copy on slot change--> fixed packed buffer
+ACLGraph replay          --always reads--------> fixed packed buffer
+```
+
+packed 缓冲区地址不随 slot 改变，因而 ACLGraph 捕获后只更新内容，不改变图中 GMM 的权重地址。W13
+和 W2 直接复用 init-routing 生成的 expert-major 激活顺序及原始 `num_experts` 长度 group list，热路径
+不再对完整 LoRA A/B 权重执行 `index_select`，也不需要扩展 group list 或对输出做 scatter。base token
+及 EP 无效尾部只通过 `expanded_scale >= 0` 得到的连续行 mask 归零。
+
+该实现继续使用 BF16 GMM 支持的 `group_list_type=1`。当前验证环境中的 `group_list_type=2` 仅支持 X 和
+weight 同为 INT8，无法用于 BF16 LoRA；把 group list 扩展成 `max_loras * num_experts` 的 type-1 零分组
+虽然功能正确，但增加了 GMM 分组开销。packed 方案以一份 adapter 权重的额外显存和 slot 切换时的一次
+device copy，换取稳定地址及更短的重放热路径。小批量、多个活跃 adapter 或不支持的形状继续使用
+BGMV fallback。

@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
+    MOE_LORA_GMM_MAX_LORAS,
+    MOE_LORA_GMM_RANK,
+    MOE_LORA_GMM_TOP_K,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     get_allgather_lora_indices,
@@ -65,15 +68,11 @@ class _CompositeLoraGMMRouting:
 
 @dataclass(frozen=True)
 class _SingleLoraGMMRouting:
-    slot: torch.Tensor
     enabled: torch.Tensor
 
 
 _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
 
-MOE_LORA_GMM_MAX_LORAS = 3
-MOE_LORA_GMM_RANK = 16
-MOE_LORA_GMM_TOP_K = 6
 MOE_LORA_GMM_MIN_ROWS_PER_GROUP = 8
 
 
@@ -168,15 +167,16 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
-def _can_use_single_lora_gmm(
+def _can_prepare_single_lora_gmm(
     lora_context,
     *,
-    hidden_states: torch.Tensor,
-    group_list: torch.Tensor,
+    hidden_dtype: torch.dtype,
+    num_routed_rows: int,
+    num_experts: int,
     group_list_type: int,
     expert_map: torch.Tensor | None = None,
 ) -> bool:
-    """Return whether one active adapter can use expert-grouped GMM."""
+    """Return whether AllGather should route single-LoRA metadata."""
     use_ep = getattr(lora_context, "use_ep", False)
     if use_ep and (expert_map is None or getattr(lora_context, "fully_sharded", False)):
         return False
@@ -185,18 +185,21 @@ def _can_use_single_lora_gmm(
         return False
     if (
         getattr(punica_wrapper, "num_active_moe_loras", 0) != 1
+        or getattr(punica_wrapper, "active_moe_lora_slot", None) is None
+        or getattr(lora_context, "single_lora_cache_slot", None) != punica_wrapper.active_moe_lora_slot
         or group_list_type != 1
         or lora_context.top_k != MOE_LORA_GMM_TOP_K
-        or hidden_states.dtype != torch.bfloat16
+        or hidden_dtype != torch.bfloat16
     ):
         return False
 
-    w13_a = lora_context.w13_lora_a_stacked
-    w13_b = lora_context.w13_lora_b_stacked
-    w2_a = lora_context.w2_lora_a_stacked
-    w2_b = lora_context.w2_lora_b_stacked
+    w13_a = getattr(lora_context, "w13_lora_a_packed", None)
+    w13_b = getattr(lora_context, "w13_lora_b_packed", None)
+    w2_a = getattr(lora_context, "w2_lora_a_packed", None)
+    w2_b = getattr(lora_context, "w2_lora_b_packed", None)
+    if any(stacked is None for stacked in (w13_a, w13_b, w2_a, w2_b)):
+        return False
     weights = (*w13_a, *w13_b, *w2_a, *w2_b)
-    num_experts = group_list.numel()
     # EP keeps a full, statically shaped dispatched buffer while each rank's
     # GMM group list only covers its local experts. Use the global expert-map
     # size for the minimum-work heuristic so EP does not take this fast path at
@@ -207,13 +210,35 @@ def _can_use_single_lora_gmm(
         w13_a_rank //= lora_context.tp_size
     return not (
         not weights
-        or any(weight.shape[0] != MOE_LORA_GMM_MAX_LORAS for weight in weights)
-        or any(weight.shape[1] != num_experts for weight in weights)
-        or any(weight.dtype != hidden_states.dtype for weight in weights)
+        or getattr(lora_context, "max_loras", None) != MOE_LORA_GMM_MAX_LORAS
+        or any(weight.shape[0] != num_experts for weight in weights)
+        or any(weight.dtype != hidden_dtype for weight in weights)
         or any(weight.shape[-2] != w13_a_rank for weight in w13_a)
         or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in w2_a)
         or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
-        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * min_rows_num_experts
+        or num_routed_rows < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * min_rows_num_experts
+    )
+
+
+def _can_use_single_lora_gmm(
+    lora_context,
+    *,
+    hidden_states: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+    expert_map: torch.Tensor | None = None,
+    routed_lora_slots: torch.Tensor | None = None,
+) -> bool:
+    """Return whether one active adapter can use expert-grouped GMM."""
+    if routed_lora_slots is None or routed_lora_slots.numel() != hidden_states.shape[0]:
+        return False
+    return _can_prepare_single_lora_gmm(
+        lora_context,
+        hidden_dtype=hidden_states.dtype,
+        num_routed_rows=hidden_states.shape[0],
+        num_experts=group_list.numel(),
+        group_list_type=group_list_type,
+        expert_map=expert_map,
     )
 
 
@@ -261,42 +286,11 @@ def _can_use_composite_lora_gmm(
 
 
 def _build_single_lora_gmm_routing(
-    lora_context,
     *,
-    expanded_row_idx: torch.Tensor,
-    topk_ids: torch.Tensor,
-    expert_map: torch.Tensor | None = None,
+    routed_lora_slots: torch.Tensor,
 ) -> _SingleLoraGMMRouting:
-    """Select one adapter and align its active/base mask to dispatched rows."""
-    token_lora_indices = get_allgather_lora_indices(lora_context)
-    token_lora_slots = token_lora_indices[: topk_ids.shape[0]]
-    max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
-    safe_token_lora_slots = token_lora_slots.clamp(min=0, max=max_loras - 1)
-    token_enabled = (token_lora_slots >= 0) & lora_context.adapter_enabled[safe_token_lora_slots].bool()
-    pair_enabled = token_enabled.unsqueeze(-1).expand_as(topk_ids).reshape(-1)
-
-    dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
-    if expert_map is None:
-        dispatched_enabled = torch.empty_like(pair_enabled)
-        dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
-    else:
-        # active_expert_range only guarantees valid destinations for pairs
-        # routed to experts owned by this EP rank. Non-local pairs can contain
-        # repeated placeholder destinations, so scatter an integer mask rather
-        # than treating expanded_row_idx as a full permutation. Zero-valued
-        # non-local entries cannot overwrite a valid local row.
-        flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
-        local_expert_ids = expert_map[flat_expert_ids]
-        is_local = local_expert_ids >= 0
-        destination = dispatched_rows.clamp_(max=max(pair_enabled.numel() - 1, 0))
-        encoded_enabled = (is_local & pair_enabled).to(torch.long)
-        dispatched_enabled_count = torch.zeros_like(encoded_enabled)
-        dispatched_enabled_count.scatter_add_(0, destination, encoded_enabled)
-        dispatched_enabled = dispatched_enabled_count.bool()
-    return _SingleLoraGMMRouting(
-        slot=safe_token_lora_slots.max().reshape(1),
-        enabled=dispatched_enabled,
-    )
+    """Build graph-safe single-adapter routing from init-routing metadata."""
+    return _SingleLoraGMMRouting(enabled=routed_lora_slots >= 0)
 
 
 def _build_composite_lora_gmm_routing(
@@ -407,22 +401,28 @@ def _add_single_lora_gmm(
 ) -> None:
     """Add one adapter with two grouped matmuls per output slice.
 
-    Slot selection and the optional base-token mask remain graph tensors.
+    Packed weights have stable addresses and contain the host-known active
+    adapter. The optional base-token mask remains a graph tensor.
     """
     masked_inputs = inputs * routing.enabled.unsqueeze(-1).to(inputs.dtype)
     current_output_offset = output_offset
     for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
-        selected_lora_a = torch.index_select(lora_a, 0, routing.slot).squeeze(0)
-        selected_lora_b = torch.index_select(lora_b, 0, routing.slot).squeeze(0)
-        shrink = _grouped_lora_matmul(masked_inputs, selected_lora_a, group_list)
+        shrink = _grouped_lora_matmul(
+            masked_inputs,
+            lora_a,
+            group_list,
+        )
         shrink = _communicate_fully_sharded_lora(
             shrink,
-            selected_lora_a,
-            selected_lora_b,
+            lora_a,
+            lora_b,
             fully_sharded=fully_sharded,
         )
-        delta = _grouped_lora_matmul(shrink, selected_lora_b, group_list)
-        delta *= routing.enabled.unsqueeze(-1).to(delta.dtype)
+        delta = _grouped_lora_matmul(
+            shrink,
+            lora_b,
+            group_list,
+        )
         output_size = delta.shape[-1]
         output.narrow(-1, current_output_offset, output_size).add_(delta)
         current_output_offset += output_size
@@ -540,6 +540,7 @@ def _apply_dynamic_int8_moe_lora(
             group_list=mlp_compute_input.group_list,
             group_list_type=mlp_compute_input.group_list_type,
             expert_map=mlp_compute_input.expert_map,
+            routed_lora_slots=mlp_compute_input.routed_lora_slots,
         )
         if not use_single_lora_gmm:
             use_composite_lora_gmm = _can_use_composite_lora_gmm(
@@ -553,17 +554,15 @@ def _apply_dynamic_int8_moe_lora(
     single_lora_routing = None
     composite_lora_routing = None
     if use_single_lora_gmm:
+        assert mlp_compute_input.routed_lora_slots is not None
         single_lora_routing = _build_single_lora_gmm_routing(
-            lora_context,
-            expanded_row_idx=mlp_compute_input.expanded_row_idx,
-            topk_ids=mlp_compute_input.topk_ids,
-            expert_map=mlp_compute_input.expert_map,
+            routed_lora_slots=mlp_compute_input.routed_lora_slots,
         )
         _add_single_lora_gmm(
             gate_up_out,
             hidden_states,
-            lora_context.w13_lora_a_stacked,
-            lora_context.w13_lora_b_stacked,
+            lora_context.w13_lora_a_packed,
+            lora_context.w13_lora_b_packed,
             routing=single_lora_routing,
             group_list=mlp_compute_input.group_list,
             fully_sharded=lora_context.fully_sharded,
@@ -646,8 +645,8 @@ def _apply_dynamic_int8_moe_lora(
         _add_single_lora_gmm(
             down_out,
             activated,
-            lora_context.w2_lora_a_stacked,
-            lora_context.w2_lora_b_stacked,
+            lora_context.w2_lora_a_packed,
+            lora_context.w2_lora_b_packed,
             routing=single_lora_routing,
             group_list=mlp_compute_input.group_list,
             fully_sharded=lora_context.fully_sharded,

@@ -14,6 +14,7 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w13,
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
@@ -41,6 +42,8 @@ def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
     assert wrapper._lora_stream is None
     assert wrapper._events is None
     assert wrapper.enable_moe_shared_loras is False
+    assert wrapper._single_lora_packed_weights is None
+    assert wrapper._single_lora_cache_slot is None
     assert wrapper._shared_experts is shared_experts
     assert wrapper.n_slices == 256 * 3
 
@@ -272,19 +275,159 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
 
 
 @pytest.mark.parametrize(
-    ("is_prefill", "index_mapping", "expected_count"),
+    ("is_prefill", "index_mapping", "expected_count", "expected_slot"),
     [
-        (True, (42, 42, 42), 1),
-        (True, (42, 7, 42), 2),
-        (True, (42, 0, 42), 1),
-        (False, (42, 42, 42), 1),
+        (True, (42, 42, 42), 1, 1),
+        (True, (42, 7, 42), 2, None),
+        (True, (42, 0, 42), 1, 1),
+        (False, (42, 42, 42), 1, 1),
     ],
 )
-def test_metadata_tracks_host_known_active_moe_lora_count(is_prefill, index_mapping, expected_count) -> None:
+def test_metadata_tracks_active_moe_lora_slot(
+    is_prefill,
+    index_mapping,
+    expected_count,
+    expected_slot,
+) -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
     mapping = SimpleNamespace(is_prefill=is_prefill, index_mapping=index_mapping)
+    layer = Mock()
+    wrapper._single_lora_moe_layers = (layer,)
 
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [7, 42, None], 3, 100)
 
     assert wrapper.num_active_moe_loras == expected_count
+    assert wrapper.active_moe_lora_slot == expected_slot
+    if expected_slot is None:
+        layer.refresh_single_lora_cache.assert_not_called()
+    else:
+        layer.refresh_single_lora_cache.assert_called_once_with(expected_slot)
+
+
+def test_metadata_does_not_refresh_an_unchanged_single_lora_slot() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.active_moe_lora_slot = 1
+    layer = Mock()
+    wrapper._single_lora_moe_layers = (layer,)
+    mapping = SimpleNamespace(is_prefill=False, index_mapping=(42, 42))
+
+    with patch.object(PunicaWrapperBase, "update_metadata"):
+        wrapper.update_metadata(mapping, [7, 42, None], 3, 100)
+
+    assert wrapper.active_moe_lora_slot == 1
+    layer.refresh_single_lora_cache.assert_not_called()
+
+
+def test_single_lora_cache_copies_only_when_active_slot_changes() -> None:
+    layer = object.__new__(AscendFusedMoEWithLoRA)
+    torch.nn.Module.__init__(layer)
+    source_weights = tuple(
+        (torch.stack(tuple(torch.full((2, 3), slot, dtype=torch.bfloat16) for slot in range(3))),) for _ in range(4)
+    )
+    layer.max_loras = 3
+    layer._single_lora_packed_weights = tuple((torch.empty(2, 3, dtype=torch.bfloat16),) for _ in range(4))
+    layer._single_lora_slot_views = tuple(tuple(weight.unbind(0) for weight in stacked) for stacked in source_weights)
+    layer._single_lora_cache_slot = None
+    layer._ascend_lora_context = SimpleNamespace(single_lora_cache_slot=None)
+
+    layer.refresh_single_lora_cache(2)
+
+    assert layer._single_lora_cache_slot == 2
+    assert layer._ascend_lora_context.single_lora_cache_slot == 2
+    assert all(
+        torch.equal(stack[0], torch.full((2, 3), 2, dtype=torch.bfloat16))
+        for stack in layer._single_lora_packed_weights
+    )
+
+    for stack in source_weights:
+        stack[0][2].fill_(7)
+    layer.refresh_single_lora_cache(2)
+    assert all(
+        torch.equal(stack[0], torch.full((2, 3), 2, dtype=torch.bfloat16))
+        for stack in layer._single_lora_packed_weights
+    )
+
+    layer.refresh_single_lora_cache(None)
+    layer.refresh_single_lora_cache(2)
+    assert all(
+        torch.equal(stack[0], torch.full((2, 3), 7, dtype=torch.bfloat16))
+        for stack in layer._single_lora_packed_weights
+    )
+
+
+def test_create_lora_weights_allocates_fixed_address_cache_for_w8a8() -> None:
+    parallel_config = SimpleNamespace(tp_size=1, tp_rank=0, ep_rank=0, use_ep=False)
+    base_layer = SimpleNamespace(
+        quant_type=QuantType.W8A8,
+        moe_config=SimpleNamespace(
+            hidden_dim=4,
+            num_local_experts=2,
+            num_experts=2,
+            intermediate_size_per_partition=3,
+            experts_per_token=6,
+            moe_parallel_config=parallel_config,
+            is_act_and_mul=True,
+        ),
+    )
+    lora_config = SimpleNamespace(
+        max_loras=3,
+        max_lora_rank=16,
+        lora_dtype=torch.bfloat16,
+        fully_sharded_loras=False,
+        enable_moe_shared_loras=False,
+    )
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        layer = AscendFusedMoEWithLoRA(base_layer)
+        layer.create_lora_weights(3, lora_config)
+
+    assert layer._single_lora_packed_weights is not None
+    assert layer._single_lora_slot_views is not None
+    source_stacks = (
+        layer.w13_lora_a_stacked,
+        layer.w13_lora_b_stacked,
+        layer.w2_lora_a_stacked,
+        layer.w2_lora_b_stacked,
+    )
+    for packed_stack, source_stack in zip(
+        layer._single_lora_packed_weights,
+        source_stacks,
+        strict=True,
+    ):
+        for packed, source in zip(packed_stack, source_stack, strict=True):
+            assert packed.shape == source.shape[1:]
+            assert packed.data_ptr() != source.data_ptr()
+
+    layer._ascend_lora_context = SimpleNamespace(single_lora_cache_slot=None)
+    layer.refresh_single_lora_cache(2)
+    layer.set_lora(
+        2,
+        [
+            torch.full((2, 16, 4), 1, dtype=torch.bfloat16),
+            torch.full((2, 16, 3), 2, dtype=torch.bfloat16),
+            torch.full((2, 16, 4), 3, dtype=torch.bfloat16),
+        ],
+        [
+            torch.full((2, 3, 16), 4, dtype=torch.bfloat16),
+            torch.full((2, 4, 16), 5, dtype=torch.bfloat16),
+            torch.full((2, 3, 16), 6, dtype=torch.bfloat16),
+        ],
+    )
+    for packed_stack, source_stack in zip(
+        layer._single_lora_packed_weights,
+        source_stacks,
+        strict=True,
+    ):
+        for packed, source in zip(packed_stack, source_stack, strict=True):
+            assert torch.equal(packed, source[2])
+
+    layer.reset_lora(2)
+    assert layer._single_lora_cache_slot == 2
+    assert all(
+        torch.count_nonzero(packed) == 0
+        for packed_stack in layer._single_lora_packed_weights
+        for packed in packed_stack
+    )

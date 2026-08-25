@@ -134,10 +134,19 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
         w13_lora_b_stacked="w13_b",
         w2_lora_a_stacked="w2_a",
         w2_lora_b_stacked="w2_b",
+        w13_lora_a_packed="w13_a_packed",
+        w13_lora_b_packed="w13_b_packed",
+        w2_lora_a_packed="w2_a_packed",
+        w2_lora_b_packed="w2_b_packed",
         fully_sharded=False,
     )
     topk_scales = torch.tensor([[0.25], [0.5]], dtype=torch.bfloat16)
-    mlp_input = _make_input(lora_context=lora_context, topk_scales=topk_scales)
+    routed_lora_slots = torch.tensor([0, -1], dtype=torch.long)
+    mlp_input = _make_input(
+        lora_context=lora_context,
+        topk_scales=topk_scales,
+        routed_lora_slots=routed_lora_slots,
+    )
     quantized_input = torch.ones(2, 4, dtype=torch.int8)
     input_scale = torch.ones(2)
     gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
@@ -145,7 +154,7 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
     quantized_activated = torch.ones(2, 3, dtype=torch.int8)
     activated_scale = torch.ones(2)
     down_out = torch.randn(2, 4, dtype=torch.bfloat16)
-    single_routing = SimpleNamespace(slot="slot", enabled="enabled")
+    single_routing = SimpleNamespace(enabled="enabled")
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
         patch(
@@ -171,17 +180,20 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
 
     assert add_gmm.call_count == 2
     build_routing.assert_called_once_with(
-        lora_context,
-        expanded_row_idx=mlp_input.expanded_row_idx,
-        topk_ids=mlp_input.topk_ids,
-        expert_map=mlp_input.expert_map,
+        routed_lora_slots=routed_lora_slots,
     )
     assert add_gmm.call_args_list[0].args[0] is gate_up_out
     assert add_gmm.call_args_list[0].args[1] is mlp_input.hidden_states
+    assert add_gmm.call_args_list[0].args[2] == "w13_a_packed"
+    assert add_gmm.call_args_list[0].args[3] == "w13_b_packed"
     assert add_gmm.call_args_list[0].kwargs["routing"] is single_routing
+    assert add_gmm.call_args_list[0].kwargs["group_list"] is mlp_input.group_list
     assert add_gmm.call_args_list[0].kwargs["fully_sharded"] is False
     assert torch.equal(add_gmm.call_args_list[1].args[1], topk_scales.expand(-1, 3))
+    assert add_gmm.call_args_list[1].args[2] == "w2_a_packed"
+    assert add_gmm.call_args_list[1].args[3] == "w2_b_packed"
     assert add_gmm.call_args_list[1].kwargs["routing"] is single_routing
+    assert add_gmm.call_args_list[1].kwargs["group_list"] is mlp_input.group_list
     assert add_gmm.call_args_list[1].kwargs["fully_sharded"] is False
     assert add_gmm.call_args_list[1].kwargs["output_offset"] == 0
     recover.assert_not_called()
@@ -195,6 +207,7 @@ def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
     expert_map = torch.tensor([-1, 0, 1, -1])
     group_list = torch.tensor([16, 16])
     hidden_states = torch.randn(32, 4, dtype=torch.bfloat16)
+    routed_lora_slots = torch.zeros(32, dtype=torch.long)
 
     assert _can_use_single_lora_gmm(
         lora_context,
@@ -202,6 +215,7 @@ def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
         group_list=group_list,
         group_list_type=1,
         expert_map=expert_map,
+        routed_lora_slots=routed_lora_slots,
     )
     assert not _can_use_single_lora_gmm(
         lora_context,
@@ -209,12 +223,14 @@ def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
         group_list=group_list,
         group_list_type=1,
         expert_map=expert_map,
+        routed_lora_slots=routed_lora_slots[:-1],
     )
     assert not _can_use_single_lora_gmm(
         lora_context,
         hidden_states=hidden_states,
         group_list=group_list,
         group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
     )
     assert not _can_use_composite_lora_gmm(
         lora_context,
@@ -230,6 +246,7 @@ def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
         group_list=group_list,
         group_list_type=1,
         expert_map=expert_map,
+        routed_lora_slots=routed_lora_slots,
     )
 
 
@@ -369,24 +386,39 @@ def _make_gmm_lora_context(
     intermediate_size = 3
     w13_a_rank = rank // tp_size if fully_sharded else rank
     w2_b_output_size = hidden_size // tp_size if fully_sharded else hidden_size
+    w13_a = (
+        torch.zeros(max_loras, num_experts, w13_a_rank, hidden_size, dtype=torch.bfloat16),
+        torch.zeros(max_loras, num_experts, w13_a_rank, hidden_size, dtype=torch.bfloat16),
+    )
+    w13_b = (
+        torch.zeros(max_loras, num_experts, intermediate_size, rank, dtype=torch.bfloat16),
+        torch.zeros(max_loras, num_experts, intermediate_size, rank, dtype=torch.bfloat16),
+    )
+    w2_a = (torch.zeros(max_loras, num_experts, rank, intermediate_size, dtype=torch.bfloat16),)
+    w2_b = (torch.zeros(max_loras, num_experts, w2_b_output_size, rank, dtype=torch.bfloat16),)
     return SimpleNamespace(
-        punica_wrapper=SimpleNamespace(is_prefill=True, num_active_moe_loras=1, no_lora=False),
+        punica_wrapper=SimpleNamespace(
+            is_prefill=True,
+            num_active_moe_loras=1,
+            active_moe_lora_slot=0,
+            no_lora=False,
+        ),
         adapter_enabled=torch.tensor([1, 0, 0, 0], dtype=torch.int32),
         fully_sharded=fully_sharded,
         use_ep=use_ep,
         tp_size=tp_size,
         tp_rank=tp_rank,
         top_k=6,
-        w13_lora_a_stacked=(
-            torch.zeros(max_loras, num_experts, w13_a_rank, hidden_size, dtype=torch.bfloat16),
-            torch.zeros(max_loras, num_experts, w13_a_rank, hidden_size, dtype=torch.bfloat16),
-        ),
-        w13_lora_b_stacked=(
-            torch.zeros(max_loras, num_experts, intermediate_size, rank, dtype=torch.bfloat16),
-            torch.zeros(max_loras, num_experts, intermediate_size, rank, dtype=torch.bfloat16),
-        ),
-        w2_lora_a_stacked=(torch.zeros(max_loras, num_experts, rank, intermediate_size, dtype=torch.bfloat16),),
-        w2_lora_b_stacked=(torch.zeros(max_loras, num_experts, w2_b_output_size, rank, dtype=torch.bfloat16),),
+        max_loras=max_loras,
+        single_lora_cache_slot=0,
+        w13_lora_a_stacked=w13_a,
+        w13_lora_b_stacked=w13_b,
+        w2_lora_a_stacked=w2_a,
+        w2_lora_b_stacked=w2_b,
+        w13_lora_a_packed=tuple(weight[0].clone() for weight in w13_a),
+        w13_lora_b_packed=tuple(weight[0].clone() for weight in w13_b),
+        w2_lora_a_packed=tuple(weight[0].clone() for weight in w2_a),
+        w2_lora_b_packed=tuple(weight[0].clone() for weight in w2_b),
     )
 
 
@@ -398,6 +430,14 @@ def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
     context.punica_wrapper.is_prefill = False
     group_list = torch.tensor([8, 8], dtype=torch.int64)
     hidden_states = torch.zeros(16, 4, dtype=torch.bfloat16)
+    routed_lora_slots = torch.zeros(16, dtype=torch.long)
+
+    assert not _can_use_single_lora_gmm(
+        context,
+        hidden_states=hidden_states,
+        group_list=group_list,
+        group_list_type=1,
+    )
 
     assert (
         _can_use_single_lora_gmm(
@@ -405,15 +445,26 @@ def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
             hidden_states=hidden_states,
             group_list=group_list,
             group_list_type=1,
+            routed_lora_slots=routed_lora_slots,
         )
         is True
     )
+    context.single_lora_cache_slot = 1
+    assert not _can_use_single_lora_gmm(
+        context,
+        hidden_states=hidden_states,
+        group_list=group_list,
+        group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
+    )
+    context.single_lora_cache_slot = 0
     assert (
         _can_use_single_lora_gmm(
             context,
             hidden_states=hidden_states[:15],
             group_list=group_list,
             group_list_type=1,
+            routed_lora_slots=routed_lora_slots[:15],
         )
         is False
     )
@@ -424,6 +475,7 @@ def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
             hidden_states=hidden_states,
             group_list=group_list,
             group_list_type=1,
+            routed_lora_slots=routed_lora_slots,
         )
         is True
     )
@@ -467,45 +519,23 @@ def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
 
 
 def test_build_single_lora_gmm_routing_handles_base_rows() -> None:
-    context = SimpleNamespace(
-        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([2, -1])),
-        adapter_enabled=torch.tensor([0, 0, 1, 0], dtype=torch.int32),
-        w13_lora_a_stacked=(torch.empty(3, 2, 16, 4),),
-    )
-    topk_ids = torch.tensor([[1, 0], [0, 1]], dtype=torch.int32)
-    expanded_row_idx = torch.tensor([2, 0, 1, 3], dtype=torch.int32)
+    routed_lora_slots = torch.tensor([2, -1, 2, -1], dtype=torch.long)
 
     routing = _build_single_lora_gmm_routing(
-        context,
-        expanded_row_idx=expanded_row_idx,
-        topk_ids=topk_ids,
+        routed_lora_slots=routed_lora_slots,
     )
 
-    assert torch.equal(routing.slot, torch.tensor([2]))
     assert torch.equal(routing.enabled, torch.tensor([True, False, True, False]))
 
 
 def test_build_single_lora_gmm_routing_ignores_nonlocal_ep_rows() -> None:
-    context = SimpleNamespace(
-        use_ep=True,
-        allgather_lora_indices=torch.tensor([1, -1]),
-        adapter_enabled=torch.tensor([0, 1, 0], dtype=torch.int32),
-        w13_lora_a_stacked=(torch.empty(3, 2, 16, 4),),
-    )
-    topk_ids = torch.tensor([[0, 2], [3, 1]], dtype=torch.int32)
-    # Only pairs for global experts 2 and 3 have valid destinations. The
-    # repeated non-local destinations mirror active_expert_range output.
-    expanded_row_idx = torch.tensor([-1, 0, 1, -1], dtype=torch.int32)
-    expert_map = torch.tensor([-1, -1, 0, 1])
+    # init-routing sideband has already marked the non-local tail as -1.
+    routed_lora_slots = torch.tensor([1, -1, -1, -1], dtype=torch.long)
 
     routing = _build_single_lora_gmm_routing(
-        context,
-        expanded_row_idx=expanded_row_idx,
-        topk_ids=topk_ids,
-        expert_map=expert_map,
+        routed_lora_slots=routed_lora_slots,
     )
 
-    assert torch.equal(routing.slot, torch.tensor([1]))
     assert torch.equal(routing.enabled, torch.tensor([True, False, False, False]))
 
 
@@ -563,34 +593,32 @@ def test_composite_lora_gmm_reorders_masks_and_restores_rows() -> None:
     assert torch.equal(output, torch.tensor([[0.0, 0.0], [30.0, 31.0], [10.0, 11.0]]))
 
 
-@pytest.mark.parametrize("slot", [0, 2])
-def test_single_lora_gmm_selects_device_slot_and_adds_each_output_slice(slot: int) -> None:
+def test_single_lora_gmm_uses_packed_weights_and_adds_each_output_slice() -> None:
     output = torch.zeros(2, 5, dtype=torch.bfloat16)
     inputs = torch.ones(2, 4, dtype=torch.bfloat16)
-    lora_a = tuple(
-        torch.stack([torch.full(shape, value, dtype=torch.bfloat16) for value in range(3)])
-        for shape in ((2, 16, 4), (2, 16, 4))
-    )
-    lora_b = tuple(
-        torch.stack([torch.full(shape, value, dtype=torch.bfloat16) for value in range(3)])
-        for shape in ((2, 2, 16), (2, 3, 16))
-    )
-    group_list = torch.tensor([1, 1], dtype=torch.int64)
+    lora_a = tuple(torch.zeros(shape, dtype=torch.bfloat16) for shape in ((2, 16, 4), (2, 16, 4)))
+    lora_b = tuple(torch.zeros(shape, dtype=torch.bfloat16) for shape in ((2, 2, 16), (2, 3, 16)))
     shrink = torch.zeros(2, 16, dtype=torch.bfloat16)
+    group_list = torch.ones(2, dtype=torch.int64)
     routing = _SingleLoraGMMRouting(
-        slot=torch.tensor([slot], dtype=torch.long),
         enabled=torch.tensor([True, False]),
     )
 
-    with patch(
-        f"{QUANT_MOE}._grouped_lora_matmul",
-        side_effect=[
-            shrink,
-            torch.ones(2, 2, dtype=torch.bfloat16),
-            shrink,
-            torch.full((2, 3), 2, dtype=torch.bfloat16),
-        ],
-    ) as grouped_matmul:
+    with (
+        patch(
+            f"{QUANT_MOE}._grouped_lora_matmul",
+            side_effect=[
+                shrink,
+                torch.tensor([[1, 1], [0, 0]], dtype=torch.bfloat16),
+                shrink,
+                torch.tensor([[2, 2, 2], [0, 0, 0]], dtype=torch.bfloat16),
+            ],
+        ) as grouped_matmul,
+        patch(
+            f"{QUANT_MOE}.torch.index_select",
+            side_effect=AssertionError("single-LoRA GMM must not gather weights"),
+        ) as index_select,
+    ):
         _add_single_lora_gmm(
             output,
             inputs,
@@ -601,12 +629,14 @@ def test_single_lora_gmm_selects_device_slot_and_adds_each_output_slice(slot: in
         )
 
     assert grouped_matmul.call_count == 4
+    index_select.assert_not_called()
     assert torch.equal(
         grouped_matmul.call_args_list[0].args[0],
         torch.tensor([[1, 1, 1, 1], [0, 0, 0, 0]], dtype=torch.bfloat16),
     )
     for call in grouped_matmul.call_args_list:
-        assert torch.all(call.args[1] == slot)
+        assert call.args[1].shape[0] == 2
+        assert call.args[2] is group_list
     assert torch.equal(output[0, :2], torch.ones(2, dtype=torch.bfloat16))
     assert torch.equal(output[0, 2:], torch.full((3,), 2, dtype=torch.bfloat16))
     assert torch.equal(output[1], torch.zeros(5, dtype=torch.bfloat16))
@@ -615,10 +645,10 @@ def test_single_lora_gmm_selects_device_slot_and_adds_each_output_slice(slot: in
 def test_single_lora_gmm_fully_sharded_gathers_rank_and_uses_output_offset() -> None:
     output = torch.zeros(2, 6, dtype=torch.bfloat16)
     inputs = torch.ones(2, 4, dtype=torch.bfloat16)
-    lora_a = (torch.zeros(3, 2, 8, 4, dtype=torch.bfloat16),)
-    lora_b = (torch.zeros(3, 2, 2, 16, dtype=torch.bfloat16),)
+    lora_a = (torch.zeros(2, 8, 4, dtype=torch.bfloat16),)
+    lora_b = (torch.zeros(2, 2, 16, dtype=torch.bfloat16),)
+    group_list = torch.ones(2, dtype=torch.int64)
     routing = _SingleLoraGMMRouting(
-        slot=torch.tensor([0], dtype=torch.long),
         enabled=torch.tensor([True, True]),
     )
     local_shrink = torch.ones(2, 8, dtype=torch.bfloat16)
@@ -642,7 +672,7 @@ def test_single_lora_gmm_fully_sharded_gathers_rank_and_uses_output_offset() -> 
             lora_a,
             lora_b,
             routing=routing,
-            group_list=torch.tensor([1, 1], dtype=torch.int64),
+            group_list=group_list,
             fully_sharded=True,
             output_offset=3,
         )

@@ -497,7 +497,12 @@ def test_allgather_w8a8_lora_controls_dispatch_quantization(
     expect_dynamic_scale,
 ):
     dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
-    dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=no_lora)))
+    dispatcher.set_lora_context(
+        MagicMock(
+            allgather_lora_indices=None,
+            punica_wrapper=MagicMock(no_lora=no_lora),
+        )
+    )
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     returned_scale = torch.randn(2)
     token_dispatch_input = build_token_dispatch_input_fixture(
@@ -521,6 +526,97 @@ def test_allgather_w8a8_lora_controls_dispatch_quantization(
 
     assert mock_init_routing.call_args.kwargs["quant_mode"] == expected_quant_mode
     assert (output.dynamic_scale is not None) == expect_dynamic_scale
+    if not no_lora:
+        assert mock_init_routing.call_args.kwargs["scale"] is None
+        assert output.routed_lora_slots is None
+
+
+def test_allgather_w8a8_single_lora_routes_slots_without_scatter() -> None:
+    dispatcher = TokenDispatcherWithAllGather(
+        top_k=6,
+        num_experts=2,
+        num_local_experts=1,
+    )
+    num_tokens = 3
+    hidden_size = 4
+    num_routed_rows = num_tokens * dispatcher.top_k
+    token_lora_slots = torch.tensor([2, -1, 2], dtype=torch.long)
+    lora_context = SimpleNamespace(
+        use_ep=True,
+        fully_sharded=False,
+        top_k=6,
+        allgather_lora_indices=token_lora_slots,
+        punica_wrapper=SimpleNamespace(
+            no_lora=False,
+            num_active_moe_loras=1,
+            active_moe_lora_slot=2,
+        ),
+        max_loras=3,
+        single_lora_cache_slot=2,
+        w13_lora_a_stacked=(torch.zeros(3, 1, 16, hidden_size, dtype=torch.bfloat16),),
+        w13_lora_b_stacked=(torch.zeros(3, 1, 3, 16, dtype=torch.bfloat16),),
+        w2_lora_a_stacked=(torch.zeros(3, 1, 16, 3, dtype=torch.bfloat16),),
+        w2_lora_b_stacked=(torch.zeros(3, 1, hidden_size, 16, dtype=torch.bfloat16),),
+        w13_lora_a_packed=(torch.zeros(1, 16, hidden_size, dtype=torch.bfloat16),),
+        w13_lora_b_packed=(torch.zeros(1, 3, 16, dtype=torch.bfloat16),),
+        w2_lora_a_packed=(torch.zeros(1, 16, 3, dtype=torch.bfloat16),),
+        w2_lora_b_packed=(torch.zeros(1, hidden_size, 16, dtype=torch.bfloat16),),
+    )
+    dispatcher.set_lora_context(lora_context)
+
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
+    topk_ids = torch.tensor(
+        [[0, 1, 0, 1, 0, 1]] * num_tokens,
+        dtype=torch.int32,
+    )
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(num_tokens, dispatcher.top_k),
+        topk_ids=topk_ids,
+        expert_map=torch.tensor([0, -1], dtype=torch.int32),
+        quant_type=QuantType.W8A8,
+    )
+
+    valid_slots = torch.tensor([2, -1, 2, -1, 2, -1, 2, -1], dtype=torch.float32)
+    expanded_slots = torch.cat(
+        (
+            valid_slots,
+            torch.full((num_routed_rows - valid_slots.numel(),), 99.0),
+        )
+    )
+    init_routing_output = (
+        torch.randn(num_routed_rows, hidden_size, dtype=torch.bfloat16),
+        torch.arange(num_routed_rows, dtype=torch.int32),
+        torch.tensor([valid_slots.numel()], dtype=torch.int32),
+        expanded_slots,
+    )
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    routing_scale = mock_init_routing.call_args.kwargs["scale"]
+    assert routing_scale.dtype == torch.float32
+    assert torch.equal(routing_scale, token_lora_slots.to(torch.float32))
+    assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
+    assert output.dynamic_scale is None
+    assert torch.equal(
+        output.routed_lora_slots,
+        torch.cat(
+            (
+                valid_slots.to(torch.long),
+                torch.full((num_routed_rows - valid_slots.numel(),), -1),
+            )
+        ),
+    )
 
 
 def test_allgather_bf16_lora_skips_quant_backend_validation():

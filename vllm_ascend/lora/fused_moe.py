@@ -40,6 +40,7 @@ from vllm.lora.layers.utils import _get_lora_device
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
+from vllm_ascend.quantization.quant_type import QuantType
 
 _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
@@ -48,12 +49,18 @@ _MOE_LORA_INDEX_FIELDS = (
     "allgather_lora_indices",
 )
 
+# The fixed-shape single-adapter GMM path currently targets the production
+# DeepSeek configuration. Keep these constraints next to weight allocation so
+# unsupported deployments do not pay for an unused packed-weight cache.
+MOE_LORA_GMM_MAX_LORAS = 3
+MOE_LORA_GMM_RANK = 16
+MOE_LORA_GMM_TOP_K = 6
+
 
 def has_lora(lora_context) -> bool:
     """Return whether this rank must execute the LoRA-aware MoE path."""
     return lora_context is not None and (
-        getattr(lora_context, "allgather_lora_indices", None) is not None
-        or not lora_context.punica_wrapper.no_lora
+        getattr(lora_context, "allgather_lora_indices", None) is not None or not lora_context.punica_wrapper.no_lora
     )
 
 
@@ -394,6 +401,10 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self._lora_stream = None
         self._events = None
         self.enable_moe_shared_loras = False
+        self._single_lora_packed_weights = None
+        self._single_lora_slot_views = None
+        self._single_lora_cache_slot = None
+        self._ascend_lora_context = None
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
@@ -408,7 +419,105 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        packed_weights = self._single_lora_packed_weights
+        if packed_weights is None:
+            packed_weights = (None, None, None, None)
+        (
+            lora_context.w13_lora_a_packed,
+            lora_context.w13_lora_b_packed,
+            lora_context.w2_lora_a_packed,
+            lora_context.w2_lora_b_packed,
+        ) = packed_weights
+        lora_context.single_lora_cache_slot = self._single_lora_cache_slot
         return lora_context
+
+    def create_lora_weights(self, max_loras, lora_config, model_config=None) -> None:
+        """Allocate upstream weights and an optional fixed-address GMM cache."""
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        self._single_lora_packed_weights = None
+        self._single_lora_slot_views = None
+        self._single_lora_cache_slot = None
+
+        weights = (
+            self.w13_lora_a_stacked,
+            self.w13_lora_b_stacked,
+            self.w2_lora_a_stacked,
+            self.w2_lora_b_stacked,
+        )
+        supports_packed_cache = (
+            getattr(self.base_layer, "quant_type", None) == QuantType.W8A8
+            and self.max_loras == MOE_LORA_GMM_MAX_LORAS
+            and self.moe_config.experts_per_token == MOE_LORA_GMM_TOP_K
+            and lora_config.max_lora_rank == MOE_LORA_GMM_RANK
+            and lora_config.lora_dtype == torch.bfloat16
+            and not self.enable_moe_shared_loras
+            and all(weight.shape[0] == MOE_LORA_GMM_MAX_LORAS for stacked in weights for weight in stacked)
+            and all(weight.shape[1] == self.local_num_experts for stacked in weights for weight in stacked)
+        )
+        if not supports_packed_cache:
+            return
+
+        # GMM always reads these one-adapter buffers at stable addresses. Slot
+        # views are created once so an adapter switch needs only device copies,
+        # not a runtime index/index_select operation over full weight banks.
+        self._single_lora_packed_weights = tuple(
+            tuple(weight.new_empty(weight.shape[1:]) for weight in stacked) for stacked in weights
+        )
+        self._single_lora_slot_views = tuple(tuple(weight.unbind(0) for weight in stacked) for stacked in weights)
+
+    def refresh_single_lora_cache(self, slot: int | None) -> None:
+        """Refresh fixed-address packed weights when the active slot changes."""
+        if slot is None:
+            self._single_lora_cache_slot = None
+            if self._ascend_lora_context is not None:
+                self._ascend_lora_context.single_lora_cache_slot = None
+            return
+        if self._single_lora_packed_weights is None or self._single_lora_slot_views is None:
+            return
+        if slot == self._single_lora_cache_slot:
+            return
+        if not 0 <= slot < self.max_loras:
+            raise ValueError(f"LoRA slot {slot} is outside the packed cache range [0, {self.max_loras}).")
+
+        for packed_stack, slot_view_stack in zip(
+            self._single_lora_packed_weights,
+            self._single_lora_slot_views,
+            strict=True,
+        ):
+            for packed, slot_views in zip(packed_stack, slot_view_stack, strict=True):
+                packed.copy_(slot_views[slot], non_blocking=True)
+        self._single_lora_cache_slot = slot
+        if self._ascend_lora_context is not None:
+            self._ascend_lora_context.single_lora_cache_slot = slot
+
+    def reset_lora(self, index: int):
+        refresh_cache = index == self._single_lora_cache_slot or index == getattr(
+            getattr(self, "punica_wrapper", None),
+            "active_moe_lora_slot",
+            None,
+        )
+        super().reset_lora(index)
+        if refresh_cache:
+            self.refresh_single_lora_cache(None)
+            self.refresh_single_lora_cache(index)
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ):
+        refresh_cache = index == self._single_lora_cache_slot or index == getattr(
+            getattr(self, "punica_wrapper", None),
+            "active_moe_lora_slot",
+            None,
+        )
+        super().set_lora(index, lora_a, lora_b)
+        if refresh_cache:
+            # ``super().set_lora`` calls our reset method before loading the
+            # new factors. Force one final copy after all source views update.
+            self.refresh_single_lora_cache(None)
+            self.refresh_single_lora_cache(index)
 
     # ------------------------------------------------------------------
     # Mapping
@@ -425,7 +534,9 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # publish it through the Ascend MoE runner. The runner stores it on
         # routed_experts; batch-local LoRA indices are refreshed before each forward.
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        self.base_layer.set_lora_context(self._build_lora_context())
+        self._ascend_lora_context = self._build_lora_context()
+        punica_wrapper.register_single_lora_moe_layer(self)
+        self.base_layer.set_lora_context(self._ascend_lora_context)
 
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):

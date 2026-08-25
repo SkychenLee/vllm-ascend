@@ -128,6 +128,9 @@ class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
     combine_metadata: TMoECombineMetadata
     dynamic_scale: torch.Tensor | None = None
     topk_scales: torch.Tensor | None = None
+    # Optional LoRA slot mapping aligned with dispatched rows. AllGather can
+    # carry this metadata through init-routing without gathering activations.
+    routed_lora_slots: torch.Tensor | None = None
 
 
 # dispatch -> mlp -> combine
@@ -155,6 +158,8 @@ class MoEMlpComputeInput:
     lora_context: Any = None
     # Global logical-expert to local physical-expert mapping for EP.
     expert_map: torch.Tensor | None = None
+    # LoRA slot per dispatched row, or -1 for base/non-local rows.
+    routed_lora_slots: torch.Tensor | None = None
 
 
 __all__ = [

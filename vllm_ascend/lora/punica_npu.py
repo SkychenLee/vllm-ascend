@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Callable
+from weakref import WeakSet
 
 import torch
 from vllm.distributed import (
@@ -52,6 +53,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        self._single_lora_moe_layers = WeakSet()
+        self.active_moe_lora_slot = None
+
+    def register_single_lora_moe_layer(self, layer) -> None:
+        """Register a MoE layer whose fixed-address cache follows metadata."""
+        layers = getattr(self, "_single_lora_moe_layers", None)
+        if layers is None:
+            layers = WeakSet()
+            self._single_lora_moe_layers = layers
+        layers.add(layer)
+        layer.refresh_single_lora_cache(getattr(self, "active_moe_lora_slot", None))
 
     def update_metadata(
         self,
@@ -68,14 +80,16 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             vocab_size,
             **kwargs,
         )
-        # Keep only the active-LoRA count on the host. The concrete slot and
-        # base-token mask stay in device tensors so ACLGraph replay can switch
-        # requests without fixing batch-local routing values.
         index_mapping = mapping.index_mapping
         loaded_lora_ids = set(lora_id for lora_id in lora_index_to_id if lora_id is not None)
-        self.num_active_moe_loras = len(
-            set(lora_id for lora_id in index_mapping if lora_id > 0 and lora_id in loaded_lora_ids)
-        )
+        active_lora_ids = set(lora_id for lora_id in index_mapping if lora_id > 0 and lora_id in loaded_lora_ids)
+        self.num_active_moe_loras = len(active_lora_ids)
+        active_slots = [slot for slot, lora_id in enumerate(lora_index_to_id) if lora_id in active_lora_ids]
+        active_slot = active_slots[0] if len(active_slots) == 1 else None
+        if active_slot != getattr(self, "active_moe_lora_slot", None):
+            for layer in tuple(getattr(self, "_single_lora_moe_layers", ())):
+                layer.refresh_single_lora_cache(active_slot)
+        self.active_moe_lora_slot = active_slot
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
         self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)

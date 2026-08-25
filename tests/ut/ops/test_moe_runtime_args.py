@@ -208,6 +208,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w2_scale=[torch.randn(1)],
                     expert_map=torch.tensor([0, 1], dtype=torch.int32),
                 )
+                routed_lora_slots = torch.tensor([0, -1, 0, -1], dtype=torch.long)
                 token_dispatch_output = MoETokenDispatchOutput(
                     hidden_states=torch.randn(4, 8, dtype=torch.bfloat16),
                     group_list=torch.tensor([2, 2], dtype=torch.int64),
@@ -218,6 +219,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                         expanded_row_idx=torch.arange(4, dtype=torch.int32),
                         restore_shape=torch.Size([2, 8]),
                     ),
+                    routed_lora_slots=routed_lora_slots,
                 )
 
                 mlp_compute_input = build_mlp_compute_input(
@@ -239,6 +241,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
                 self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
                 self.assertIs(mlp_compute_input.expert_map, fused_experts_input.routing.expert_map)
+                self.assertIs(mlp_compute_input.routed_lora_slots, routed_lora_slots)
 
     def test_build_fused_experts_input_constructs_internal_mxfp_leaf_from_primitives(self):
         for quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP):

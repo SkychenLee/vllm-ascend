@@ -34,11 +34,15 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
+    get_allgather_lora_indices,
     has_lora,
     postprocess_lora_indices,
     preprocess_lora_indices,
 )
-from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
+from vllm_ascend.lora.quant_moe import (
+    _can_prepare_single_lora_gmm,
+    validate_quant_moe_lora_activation_input,
+)
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -421,10 +425,30 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
+
+        route_single_lora_slots = quant_type == QuantType.W8A8 and _can_prepare_single_lora_gmm(
+            self.lora_context,
+            hidden_dtype=hidden_states.dtype,
+            num_routed_rows=num_tokens * self.top_k,
+            num_experts=self.num_experts_local,
+            group_list_type=1,
+            expert_map=expert_map,
+        )
+        routing_scale = dynamic_scale
+        if route_single_lora_slots:
+            if dynamic_scale is not None or quant_mode != -1:
+                raise AssertionError("Single-LoRA routing metadata requires unquantized AllGather dispatch.")
+            # In non-quant mode init-routing copies this per-token FP32
+            # sideband into expert-major order. Carrying the slot itself keeps
+            # both the active/base mask and adapter selection free of scatter.
+            routing_scale = (
+                get_allgather_lora_indices(self.lora_context)[:num_tokens].to(dtype=torch.float32).contiguous()
+            )
+
+        sorted_hidden_states, expanded_row_idx, expert_tokens, expanded_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,
-            scale=dynamic_scale,
+            scale=routing_scale,
             active_num=num_tokens * self.top_k,
             expert_num=global_num_experts,
             expert_tokens_num_type=1,
@@ -436,9 +460,33 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
 
+        routed_lora_slots = None
+        if route_single_lora_slots:
+            routed_scale = expanded_scale.reshape(-1)
+            if routed_scale.shape[0] != sorted_hidden_states.shape[0]:
+                raise RuntimeError(
+                    "init-routing returned incompatible LoRA metadata shape: "
+                    f"{tuple(routed_scale.shape)} for routed activations "
+                    f"{tuple(sorted_hidden_states.shape)}."
+                )
+            # active_expert_range leaves the non-local tail undefined. Mask it
+            # by the contiguous valid-row prefix instead of scattering local
+            # expert flags through expanded_row_idx.
+            row_ids = torch.arange(
+                routed_scale.shape[0],
+                dtype=expert_tokens.dtype,
+                device=routed_scale.device,
+            )
+            valid_rows = row_ids < expert_tokens.sum()
+            routed_lora_slots = torch.where(
+                valid_rows,
+                routed_scale.to(torch.long),
+                torch.full_like(row_ids, -1),
+            )
+
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
-            dynamic_scale=dynamic_scale if with_quant else None,
+            dynamic_scale=expanded_scale if with_quant else None,
             group_list=expert_tokens,
             group_list_type=group_list_type,
             combine_metadata=MoEAllGatherCombineMetadata(
@@ -446,6 +494,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
             ),
+            routed_lora_slots=routed_lora_slots,
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
