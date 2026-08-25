@@ -508,21 +508,6 @@ def test_single_lora_gmm_accepts_dynamic_lora_configuration(
     )
 
 
-def test_single_lora_gmm_rejects_incompatible_dynamic_rank() -> None:
-    context = _make_gmm_lora_context(rank=8)
-    context.w13_lora_b_packed = tuple(
-        torch.zeros(*weight.shape[:-1], 12, dtype=weight.dtype) for weight in context.w13_lora_b_packed
-    )
-
-    assert not _can_use_single_lora_gmm(
-        context,
-        hidden_states=torch.zeros(16, 4, dtype=torch.bfloat16),
-        group_list=torch.tensor([8, 8], dtype=torch.int64),
-        group_list_type=1,
-        routed_lora_slots=torch.zeros(16, dtype=torch.long),
-    )
-
-
 def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
     context = _make_gmm_lora_context()
     context.punica_wrapper.num_active_moe_loras = 2

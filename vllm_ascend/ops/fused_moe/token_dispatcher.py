@@ -428,7 +428,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
 
         route_single_lora_slots = quant_type == QuantType.W8A8 and _can_prepare_single_lora_gmm(
             self.lora_context,
-            hidden_dtype=hidden_states.dtype,
             num_routed_rows=num_tokens * self.top_k,
             num_experts=self.num_experts_local,
             group_list_type=1,

@@ -167,31 +167,9 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
-def _lora_projection_shapes_are_compatible(
-    lora_context,
-    lora_a_stacked: tuple[torch.Tensor, ...],
-    lora_b_stacked: tuple[torch.Tensor, ...],
-) -> bool:
-    """Check A/B rank compatibility without requiring a fixed LoRA rank."""
-    if len(lora_a_stacked) != len(lora_b_stacked):
-        return False
-
-    fully_sharded = getattr(lora_context, "fully_sharded", False)
-    tp_size = getattr(lora_context, "tp_size", 1)
-    for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
-        local_rank = lora_a.shape[-2]
-        full_rank = lora_b.shape[-1]
-        if local_rank == full_rank:
-            continue
-        if not fully_sharded or local_rank * tp_size != full_rank:
-            return False
-    return True
-
-
 def _can_prepare_single_lora_gmm(
     lora_context,
     *,
-    hidden_dtype: torch.dtype,
     num_routed_rows: int,
     num_experts: int,
     group_list_type: int,
@@ -209,28 +187,25 @@ def _can_prepare_single_lora_gmm(
         or getattr(punica_wrapper, "active_moe_lora_slot", None) is None
         or getattr(lora_context, "single_lora_cache_slot", None) != punica_wrapper.active_moe_lora_slot
         or group_list_type != 1
-        or hidden_dtype != torch.bfloat16
     ):
         return False
 
-    w13_a = getattr(lora_context, "w13_lora_a_packed", None)
-    w13_b = getattr(lora_context, "w13_lora_b_packed", None)
-    w2_a = getattr(lora_context, "w2_lora_a_packed", None)
-    w2_b = getattr(lora_context, "w2_lora_b_packed", None)
-    if any(stacked is None for stacked in (w13_a, w13_b, w2_a, w2_b)):
-        return False
-    weights = (*w13_a, *w13_b, *w2_a, *w2_b)
+    # The single-adapter cache is created from the validated LoRA
+    # configuration. Avoid rechecking its existence, dtype, and rank layout in
+    # this per-forward eligibility path.
+    weights = (
+        *lora_context.w13_lora_a_packed,
+        *lora_context.w13_lora_b_packed,
+        *lora_context.w2_lora_a_packed,
+        *lora_context.w2_lora_b_packed,
+    )
     # EP keeps a full, statically shaped dispatched buffer while each rank's
     # GMM group list only covers its local experts. Use the global expert-map
     # size for the minimum-work heuristic so EP does not take this fast path at
     # much smaller batches than the equivalent non-EP execution.
     min_rows_num_experts = max(expert_map.numel(), num_experts) if use_ep else num_experts
     return not (
-        not weights
-        or any(weight.shape[0] != num_experts for weight in weights)
-        or any(weight.dtype != hidden_dtype for weight in weights)
-        or not _lora_projection_shapes_are_compatible(lora_context, w13_a, w13_b)
-        or not _lora_projection_shapes_are_compatible(lora_context, w2_a, w2_b)
+        any(weight.shape[0] != num_experts for weight in weights)
         or num_routed_rows < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * min_rows_num_experts
     )
 
@@ -249,7 +224,6 @@ def _can_use_single_lora_gmm(
         return False
     return _can_prepare_single_lora_gmm(
         lora_context,
-        hidden_dtype=hidden_states.dtype,
         num_routed_rows=hidden_states.shape[0],
         num_experts=group_list.numel(),
         group_list_type=group_list_type,

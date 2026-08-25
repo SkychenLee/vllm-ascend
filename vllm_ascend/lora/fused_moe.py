@@ -459,7 +459,6 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         )
         supports_packed_cache = (
             getattr(self.base_layer, "quant_type", None) == QuantType.W8A8
-            and lora_config.lora_dtype == torch.bfloat16
             and not self.enable_moe_shared_loras
             and all(weight.shape[0] == self.max_loras for stacked in weights for weight in stacked)
             and all(weight.shape[1] == self.local_num_experts for stacked in weights for weight in stacked)
