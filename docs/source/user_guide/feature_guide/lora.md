@@ -51,6 +51,13 @@ For W8A8 MoE, use the same flags together with `--quantization ascend` and a
 compatible quantized checkpoint. LoRA activations remain BF16/FP16 across the
 AllGather and are dynamically quantized only for the base expert GMMs.
 
+AllGather EP can use the expert-grouped GMM LoRA fast path when exactly one
+routed-expert adapter is active. The current fast path requires BF16
+activations, `top_k=6`, `max_loras=3`, `max_lora_rank=16`, and enough routed
+rows to amortize GMM launch overhead. It operates on each rank's local expert
+groups and supports non-fully-sharded LoRA only. Mixed/multiple active adapters,
+smaller batches, and unsupported shapes automatically fall back to BGMV.
+
 ### Fully sharded LoRA with W8A8 MoE
 
 Dynamic W8A8 MoE can use `--fully-sharded-loras` together with tensor

@@ -174,9 +174,11 @@ def _can_use_single_lora_gmm(
     hidden_states: torch.Tensor,
     group_list: torch.Tensor,
     group_list_type: int,
+    expert_map: torch.Tensor | None = None,
 ) -> bool:
     """Return whether one active adapter can use expert-grouped GMM."""
-    if getattr(lora_context, "use_ep", False):
+    use_ep = getattr(lora_context, "use_ep", False)
+    if use_ep and (expert_map is None or getattr(lora_context, "fully_sharded", False)):
         return False
     punica_wrapper = getattr(lora_context, "punica_wrapper", None)
     if punica_wrapper is None:
@@ -195,6 +197,11 @@ def _can_use_single_lora_gmm(
     w2_b = lora_context.w2_lora_b_stacked
     weights = (*w13_a, *w13_b, *w2_a, *w2_b)
     num_experts = group_list.numel()
+    # EP keeps a full, statically shaped dispatched buffer while each rank's
+    # GMM group list only covers its local experts. Use the global expert-map
+    # size for the minimum-work heuristic so EP does not take this fast path at
+    # much smaller batches than the equivalent non-EP execution.
+    min_rows_num_experts = max(expert_map.numel(), num_experts) if use_ep else num_experts
     w13_a_rank = MOE_LORA_GMM_RANK
     if lora_context.fully_sharded:
         w13_a_rank //= lora_context.tp_size
@@ -206,7 +213,7 @@ def _can_use_single_lora_gmm(
         or any(weight.shape[-2] != w13_a_rank for weight in w13_a)
         or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in w2_a)
         or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
-        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_experts
+        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * min_rows_num_experts
     )
 
 
@@ -258,6 +265,7 @@ def _build_single_lora_gmm_routing(
     *,
     expanded_row_idx: torch.Tensor,
     topk_ids: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
 ) -> _SingleLoraGMMRouting:
     """Select one adapter and align its active/base mask to dispatched rows."""
     token_lora_indices = get_allgather_lora_indices(lora_context)
@@ -268,8 +276,23 @@ def _build_single_lora_gmm_routing(
     pair_enabled = token_enabled.unsqueeze(-1).expand_as(topk_ids).reshape(-1)
 
     dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
-    dispatched_enabled = torch.empty_like(pair_enabled)
-    dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
+    if expert_map is None:
+        dispatched_enabled = torch.empty_like(pair_enabled)
+        dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
+    else:
+        # active_expert_range only guarantees valid destinations for pairs
+        # routed to experts owned by this EP rank. Non-local pairs can contain
+        # repeated placeholder destinations, so scatter an integer mask rather
+        # than treating expanded_row_idx as a full permutation. Zero-valued
+        # non-local entries cannot overwrite a valid local row.
+        flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
+        local_expert_ids = expert_map[flat_expert_ids]
+        is_local = local_expert_ids >= 0
+        destination = dispatched_rows.clamp_(max=max(pair_enabled.numel() - 1, 0))
+        encoded_enabled = (is_local & pair_enabled).to(torch.long)
+        dispatched_enabled_count = torch.zeros_like(encoded_enabled)
+        dispatched_enabled_count.scatter_add_(0, destination, encoded_enabled)
+        dispatched_enabled = dispatched_enabled_count.bool()
     return _SingleLoraGMMRouting(
         slot=safe_token_lora_slots.max().reshape(1),
         enabled=dispatched_enabled,
@@ -516,6 +539,7 @@ def _apply_dynamic_int8_moe_lora(
             hidden_states=hidden_states,
             group_list=mlp_compute_input.group_list,
             group_list_type=mlp_compute_input.group_list_type,
+            expert_map=mlp_compute_input.expert_map,
         )
         if not use_single_lora_gmm:
             use_composite_lora_gmm = _can_use_composite_lora_gmm(
@@ -533,6 +557,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
+            expert_map=mlp_compute_input.expert_map,
         )
         _add_single_lora_gmm(
             gate_up_out,

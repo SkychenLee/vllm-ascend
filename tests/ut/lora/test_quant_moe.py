@@ -174,6 +174,7 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
         lora_context,
         expanded_row_idx=mlp_input.expanded_row_idx,
         topk_ids=mlp_input.topk_ids,
+        expert_map=mlp_input.expert_map,
     )
     assert add_gmm.call_args_list[0].args[0] is gate_up_out
     assert add_gmm.call_args_list[0].args[1] is mlp_input.hidden_states
@@ -189,20 +190,46 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
     reset_indices.assert_called_once_with(lora_context)
 
 
-def test_dynamic_int8_disables_lora_gmm_fast_paths_for_ep() -> None:
-    lora_context = SimpleNamespace(use_ep=True)
+def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
+    lora_context = _make_gmm_lora_context(use_ep=True)
+    expert_map = torch.tensor([-1, 0, 1, -1])
+    group_list = torch.tensor([16, 16])
+    hidden_states = torch.randn(32, 4, dtype=torch.bfloat16)
 
+    assert _can_use_single_lora_gmm(
+        lora_context,
+        hidden_states=hidden_states,
+        group_list=group_list,
+        group_list_type=1,
+        expert_map=expert_map,
+    )
     assert not _can_use_single_lora_gmm(
         lora_context,
-        hidden_states=torch.randn(16, 4, dtype=torch.bfloat16),
-        group_list=torch.tensor([8, 8]),
+        hidden_states=hidden_states[:-1],
+        group_list=group_list,
+        group_list_type=1,
+        expert_map=expert_map,
+    )
+    assert not _can_use_single_lora_gmm(
+        lora_context,
+        hidden_states=hidden_states,
+        group_list=group_list,
         group_list_type=1,
     )
     assert not _can_use_composite_lora_gmm(
         lora_context,
-        hidden_states=torch.randn(16, 4, dtype=torch.bfloat16),
-        group_list=torch.tensor([8, 8]),
+        hidden_states=hidden_states,
+        group_list=group_list,
         group_list_type=1,
+    )
+
+    lora_context.fully_sharded = True
+    assert not _can_use_single_lora_gmm(
+        lora_context,
+        hidden_states=hidden_states,
+        group_list=group_list,
+        group_list_type=1,
+        expert_map=expert_map,
     )
 
 
@@ -334,6 +361,7 @@ def _make_gmm_lora_context(
     fully_sharded: bool = False,
     tp_size: int = 1,
     tp_rank: int = 0,
+    use_ep: bool = False,
 ):
     rank = 16
     max_loras = 3
@@ -345,6 +373,7 @@ def _make_gmm_lora_context(
         punica_wrapper=SimpleNamespace(is_prefill=True, num_active_moe_loras=1, no_lora=False),
         adapter_enabled=torch.tensor([1, 0, 0, 0], dtype=torch.int32),
         fully_sharded=fully_sharded,
+        use_ep=use_ep,
         tp_size=tp_size,
         tp_rank=tp_rank,
         top_k=6,
@@ -454,6 +483,30 @@ def test_build_single_lora_gmm_routing_handles_base_rows() -> None:
 
     assert torch.equal(routing.slot, torch.tensor([2]))
     assert torch.equal(routing.enabled, torch.tensor([True, False, True, False]))
+
+
+def test_build_single_lora_gmm_routing_ignores_nonlocal_ep_rows() -> None:
+    context = SimpleNamespace(
+        use_ep=True,
+        allgather_lora_indices=torch.tensor([1, -1]),
+        adapter_enabled=torch.tensor([0, 1, 0], dtype=torch.int32),
+        w13_lora_a_stacked=(torch.empty(3, 2, 16, 4),),
+    )
+    topk_ids = torch.tensor([[0, 2], [3, 1]], dtype=torch.int32)
+    # Only pairs for global experts 2 and 3 have valid destinations. The
+    # repeated non-local destinations mirror active_expert_range output.
+    expanded_row_idx = torch.tensor([-1, 0, 1, -1], dtype=torch.int32)
+    expert_map = torch.tensor([-1, -1, 0, 1])
+
+    routing = _build_single_lora_gmm_routing(
+        context,
+        expanded_row_idx=expanded_row_idx,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+    )
+
+    assert torch.equal(routing.slot, torch.tensor([1]))
+    assert torch.equal(routing.enabled, torch.tensor([True, False, False, False]))
 
 
 def test_build_composite_lora_gmm_routing_handles_multiple_slots_and_base() -> None:
