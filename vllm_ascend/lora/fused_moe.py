@@ -49,9 +49,9 @@ _MOE_LORA_INDEX_FIELDS = (
     "allgather_lora_indices",
 )
 
-# The fixed-shape single-adapter GMM path currently targets the production
-# DeepSeek configuration. Keep these constraints next to weight allocation so
-# unsupported deployments do not pay for an unused packed-weight cache.
+# The mixed-adapter composite GMM path still targets the production DeepSeek
+# configuration. The single-adapter path derives these dimensions from its
+# packed weights instead.
 MOE_LORA_GMM_MAX_LORAS = 3
 MOE_LORA_GMM_RANK = 16
 MOE_LORA_GMM_TOP_K = 6
@@ -459,12 +459,9 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         )
         supports_packed_cache = (
             getattr(self.base_layer, "quant_type", None) == QuantType.W8A8
-            and self.max_loras == MOE_LORA_GMM_MAX_LORAS
-            and self.moe_config.experts_per_token == MOE_LORA_GMM_TOP_K
-            and lora_config.max_lora_rank == MOE_LORA_GMM_RANK
             and lora_config.lora_dtype == torch.bfloat16
             and not self.enable_moe_shared_loras
-            and all(weight.shape[0] == MOE_LORA_GMM_MAX_LORAS for stacked in weights for weight in stacked)
+            and all(weight.shape[0] == self.max_loras for stacked in weights for weight in stacked)
             and all(weight.shape[1] == self.local_num_experts for stacked in weights for weight in stacked)
         )
         if not supports_packed_cache:

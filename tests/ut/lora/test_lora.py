@@ -399,7 +399,7 @@ def test_single_lora_cache_copies_only_when_active_slot_changes() -> None:
     )
 
 
-def test_create_lora_weights_allocates_fixed_address_cache_for_w8a8() -> None:
+def test_create_lora_weights_allocates_dynamic_fixed_address_cache_for_w8a8() -> None:
     parallel_config = SimpleNamespace(tp_size=1, tp_rank=0, ep_rank=0, use_ep=False)
     base_layer = SimpleNamespace(
         quant_type=QuantType.W8A8,
@@ -408,14 +408,14 @@ def test_create_lora_weights_allocates_fixed_address_cache_for_w8a8() -> None:
             num_local_experts=2,
             num_experts=2,
             intermediate_size_per_partition=3,
-            experts_per_token=6,
+            experts_per_token=4,
             moe_parallel_config=parallel_config,
             is_act_and_mul=True,
         ),
     )
     lora_config = SimpleNamespace(
-        max_loras=3,
-        max_lora_rank=16,
+        max_loras=2,
+        max_lora_rank=8,
         lora_dtype=torch.bfloat16,
         fully_sharded_loras=False,
         enable_moe_shared_loras=False,
@@ -425,7 +425,7 @@ def test_create_lora_weights_allocates_fixed_address_cache_for_w8a8() -> None:
         patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
     ):
         layer = AscendFusedMoEWithLoRA(base_layer)
-        layer.create_lora_weights(3, lora_config)
+        layer.create_lora_weights(2, lora_config)
 
     assert layer._single_lora_packed_weights is not None
     assert layer._single_lora_slot_views is not None
@@ -445,18 +445,18 @@ def test_create_lora_weights_allocates_fixed_address_cache_for_w8a8() -> None:
             assert packed.data_ptr() != source.data_ptr()
 
     layer._ascend_lora_context = SimpleNamespace(single_lora_cache_slot=None)
-    layer.refresh_single_lora_cache(2)
+    layer.refresh_single_lora_cache(1)
     layer.set_lora(
-        2,
+        1,
         [
-            torch.full((2, 16, 4), 1, dtype=torch.bfloat16),
-            torch.full((2, 16, 3), 2, dtype=torch.bfloat16),
-            torch.full((2, 16, 4), 3, dtype=torch.bfloat16),
+            torch.full((2, 8, 4), 1, dtype=torch.bfloat16),
+            torch.full((2, 8, 3), 2, dtype=torch.bfloat16),
+            torch.full((2, 8, 4), 3, dtype=torch.bfloat16),
         ],
         [
-            torch.full((2, 3, 16), 4, dtype=torch.bfloat16),
-            torch.full((2, 4, 16), 5, dtype=torch.bfloat16),
-            torch.full((2, 3, 16), 6, dtype=torch.bfloat16),
+            torch.full((2, 3, 8), 4, dtype=torch.bfloat16),
+            torch.full((2, 4, 8), 5, dtype=torch.bfloat16),
+            torch.full((2, 3, 8), 6, dtype=torch.bfloat16),
         ],
     )
     for packed_stack, source_stack in zip(
@@ -465,10 +465,10 @@ def test_create_lora_weights_allocates_fixed_address_cache_for_w8a8() -> None:
         strict=True,
     ):
         for packed, source in zip(packed_stack, source_stack, strict=True):
-            assert torch.equal(packed, source[2])
+            assert torch.equal(packed, source[1])
 
-    layer.reset_lora(2)
-    assert layer._single_lora_cache_slot == 2
+    layer.reset_lora(1)
+    assert layer._single_lora_cache_slot == 1
     assert all(
         torch.count_nonzero(packed) == 0
         for packed_stack in layer._single_lora_packed_weights

@@ -167,6 +167,27 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
+def _lora_projection_shapes_are_compatible(
+    lora_context,
+    lora_a_stacked: tuple[torch.Tensor, ...],
+    lora_b_stacked: tuple[torch.Tensor, ...],
+) -> bool:
+    """Check A/B rank compatibility without requiring a fixed LoRA rank."""
+    if len(lora_a_stacked) != len(lora_b_stacked):
+        return False
+
+    fully_sharded = getattr(lora_context, "fully_sharded", False)
+    tp_size = getattr(lora_context, "tp_size", 1)
+    for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
+        local_rank = lora_a.shape[-2]
+        full_rank = lora_b.shape[-1]
+        if local_rank == full_rank:
+            continue
+        if not fully_sharded or local_rank * tp_size != full_rank:
+            return False
+    return True
+
+
 def _can_prepare_single_lora_gmm(
     lora_context,
     *,
@@ -188,7 +209,6 @@ def _can_prepare_single_lora_gmm(
         or getattr(punica_wrapper, "active_moe_lora_slot", None) is None
         or getattr(lora_context, "single_lora_cache_slot", None) != punica_wrapper.active_moe_lora_slot
         or group_list_type != 1
-        or lora_context.top_k != MOE_LORA_GMM_TOP_K
         or hidden_dtype != torch.bfloat16
     ):
         return False
@@ -205,17 +225,12 @@ def _can_prepare_single_lora_gmm(
     # size for the minimum-work heuristic so EP does not take this fast path at
     # much smaller batches than the equivalent non-EP execution.
     min_rows_num_experts = max(expert_map.numel(), num_experts) if use_ep else num_experts
-    w13_a_rank = MOE_LORA_GMM_RANK
-    if lora_context.fully_sharded:
-        w13_a_rank //= lora_context.tp_size
     return not (
         not weights
-        or getattr(lora_context, "max_loras", None) != MOE_LORA_GMM_MAX_LORAS
         or any(weight.shape[0] != num_experts for weight in weights)
         or any(weight.dtype != hidden_dtype for weight in weights)
-        or any(weight.shape[-2] != w13_a_rank for weight in w13_a)
-        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in w2_a)
-        or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
+        or not _lora_projection_shapes_are_compatible(lora_context, w13_a, w13_b)
+        or not _lora_projection_shapes_are_compatible(lora_context, w2_a, w2_b)
         or num_routed_rows < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * min_rows_num_experts
     )
 

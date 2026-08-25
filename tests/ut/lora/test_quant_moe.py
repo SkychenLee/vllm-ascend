@@ -375,13 +375,14 @@ def test_unregistered_quantized_moe_lora_fails_fast() -> None:
 def _make_gmm_lora_context(
     num_experts: int = 2,
     *,
+    rank: int = 16,
+    max_loras: int = 3,
+    top_k: int = 6,
     fully_sharded: bool = False,
     tp_size: int = 1,
     tp_rank: int = 0,
     use_ep: bool = False,
 ):
-    rank = 16
-    max_loras = 3
     hidden_size = 4
     intermediate_size = 3
     w13_a_rank = rank // tp_size if fully_sharded else rank
@@ -403,12 +404,12 @@ def _make_gmm_lora_context(
             active_moe_lora_slot=0,
             no_lora=False,
         ),
-        adapter_enabled=torch.tensor([1, 0, 0, 0], dtype=torch.int32),
+        adapter_enabled=torch.tensor([1] + [0] * max_loras, dtype=torch.int32),
         fully_sharded=fully_sharded,
         use_ep=use_ep,
         tp_size=tp_size,
         tp_rank=tp_rank,
-        top_k=6,
+        top_k=top_k,
         max_loras=max_loras,
         single_lora_cache_slot=0,
         w13_lora_a_stacked=w13_a,
@@ -422,7 +423,7 @@ def _make_gmm_lora_context(
     )
 
 
-def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
+def test_single_lora_gmm_checks_dynamic_fast_path_shape() -> None:
     context = _make_gmm_lora_context()
     # V1 sets LoRAMapping.is_prefill=True to select SGMV on non-CUDA
     # platforms, so it is not a real scheduler-phase signal. GMM eligibility
@@ -478,6 +479,47 @@ def test_single_lora_gmm_checks_fixed_fast_path_shape() -> None:
             routed_lora_slots=routed_lora_slots,
         )
         is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("top_k", "max_loras", "rank"),
+    ((4, 2, 8), (8, 5, 32)),
+)
+def test_single_lora_gmm_accepts_dynamic_lora_configuration(
+    top_k: int,
+    max_loras: int,
+    rank: int,
+) -> None:
+    context = _make_gmm_lora_context(
+        top_k=top_k,
+        max_loras=max_loras,
+        rank=rank,
+    )
+    hidden_states = torch.zeros(16, 4, dtype=torch.bfloat16)
+    routed_lora_slots = torch.zeros(16, dtype=torch.long)
+
+    assert _can_use_single_lora_gmm(
+        context,
+        hidden_states=hidden_states,
+        group_list=torch.tensor([8, 8], dtype=torch.int64),
+        group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
+    )
+
+
+def test_single_lora_gmm_rejects_incompatible_dynamic_rank() -> None:
+    context = _make_gmm_lora_context(rank=8)
+    context.w13_lora_b_packed = tuple(
+        torch.zeros(*weight.shape[:-1], 12, dtype=weight.dtype) for weight in context.w13_lora_b_packed
+    )
+
+    assert not _can_use_single_lora_gmm(
+        context,
+        hidden_states=torch.zeros(16, 4, dtype=torch.bfloat16),
+        group_list=torch.tensor([8, 8], dtype=torch.int64),
+        group_list_type=1,
+        routed_lora_slots=torch.zeros(16, dtype=torch.long),
     )
 
 
