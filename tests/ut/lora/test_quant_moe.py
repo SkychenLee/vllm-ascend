@@ -8,6 +8,7 @@ import torch_npu  # noqa: F401 -- registers torch.npu
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.quant_moe import (
+    MOE_LORA_GMM_MIN_ROWS_PER_GROUP,
     _add_composite_lora_gmm,
     _add_single_lora_gmm,
     _build_composite_lora_gmm_routing,
@@ -541,6 +542,35 @@ def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
         context,
         hidden_states=hidden_states,
         group_list=group_list,
+        group_list_type=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("top_k", "max_loras", "rank", "fully_sharded", "tp_size"),
+    ((4, 2, 8, False, 1), (8, 5, 32, True, 2)),
+)
+def test_composite_lora_gmm_accepts_dynamic_lora_configuration(
+    top_k: int,
+    max_loras: int,
+    rank: int,
+    fully_sharded: bool,
+    tp_size: int,
+) -> None:
+    context = _make_gmm_lora_context(
+        top_k=top_k,
+        max_loras=max_loras,
+        rank=rank,
+        fully_sharded=fully_sharded,
+        tp_size=tp_size,
+    )
+    context.punica_wrapper.num_active_moe_loras = 2
+    num_routed_rows = MOE_LORA_GMM_MIN_ROWS_PER_GROUP * max_loras * 2
+
+    assert _can_use_composite_lora_gmm(
+        context,
+        hidden_states=torch.zeros(num_routed_rows, 4, dtype=torch.bfloat16),
+        group_list=torch.full((2,), num_routed_rows // 2, dtype=torch.int64),
         group_list_type=1,
     )
 

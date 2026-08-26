@@ -35,9 +35,6 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
-    MOE_LORA_GMM_MAX_LORAS,
-    MOE_LORA_GMM_RANK,
-    MOE_LORA_GMM_TOP_K,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     get_allgather_lora_indices,
@@ -247,7 +244,6 @@ def _can_use_composite_lora_gmm(
         or getattr(punica_wrapper, "no_lora", True)
         or getattr(punica_wrapper, "num_active_moe_loras", 0) < 2
         or group_list_type != 1
-        or lora_context.top_k != MOE_LORA_GMM_TOP_K
         or hidden_states.dtype != torch.bfloat16
     ):
         return False
@@ -258,18 +254,13 @@ def _can_use_composite_lora_gmm(
     w2_b = lora_context.w2_lora_b_stacked
     weights = (*w13_a, *w13_b, *w2_a, *w2_b)
     num_experts = group_list.numel()
-    num_composite_groups = MOE_LORA_GMM_MAX_LORAS * num_experts
-    w13_a_rank = MOE_LORA_GMM_RANK
-    if lora_context.fully_sharded:
-        w13_a_rank //= lora_context.tp_size
+    max_loras = lora_context.max_loras
+    num_composite_groups = max_loras * num_experts
     return not (
         not weights
-        or any(weight.shape[0] != MOE_LORA_GMM_MAX_LORAS for weight in weights)
+        or any(weight.shape[0] != max_loras for weight in weights)
         or any(weight.shape[1] != num_experts for weight in weights)
         or any(weight.dtype != hidden_states.dtype for weight in weights)
-        or any(weight.shape[-2] != w13_a_rank for weight in w13_a)
-        or any(weight.shape[-2] != MOE_LORA_GMM_RANK for weight in w2_a)
-        or any(weight.shape[-1] != MOE_LORA_GMM_RANK for weight in (*w13_b, *w2_b))
         or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_composite_groups
     )
 

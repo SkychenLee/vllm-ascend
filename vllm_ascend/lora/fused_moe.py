@@ -49,13 +49,6 @@ _MOE_LORA_INDEX_FIELDS = (
     "allgather_lora_indices",
 )
 
-# The mixed-adapter composite GMM path still targets the production DeepSeek
-# configuration. The single-adapter path derives these dimensions from its
-# packed weights instead.
-MOE_LORA_GMM_MAX_LORAS = 3
-MOE_LORA_GMM_RANK = 16
-MOE_LORA_GMM_TOP_K = 6
-
 
 def has_lora(lora_context) -> bool:
     """Return whether this rank must execute the LoRA-aware MoE path."""
