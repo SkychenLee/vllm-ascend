@@ -40,6 +40,7 @@ from vllm_ascend.lora.fused_moe import (
     preprocess_lora_indices,
 )
 from vllm_ascend.lora.quant_moe import (
+    _can_prepare_composite_lora_gmm,
     _can_prepare_single_lora_gmm,
     validate_quant_moe_lora_activation_input,
 )
@@ -433,10 +434,23 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             group_list_type=1,
             expert_map=expert_map,
         )
+        route_composite_lora_slots = (
+            quant_type == QuantType.W8A8
+            and not route_single_lora_slots
+            and _can_prepare_composite_lora_gmm(
+                self.lora_context,
+                hidden_dtype=hidden_states.dtype,
+                num_routed_rows=num_tokens * self.top_k,
+                num_experts=self.num_experts_local,
+                group_list_type=1,
+                expert_map=expert_map,
+            )
+        )
+        route_lora_slots = route_single_lora_slots or route_composite_lora_slots
         routing_scale = dynamic_scale
-        if route_single_lora_slots:
+        if route_lora_slots:
             if dynamic_scale is not None or quant_mode != -1:
-                raise AssertionError("Single-LoRA routing metadata requires unquantized AllGather dispatch.")
+                raise AssertionError("MoE LoRA routing metadata requires unquantized AllGather dispatch.")
             # In non-quant mode init-routing copies this per-token FP32
             # sideband into expert-major order. Carrying the slot itself keeps
             # both the active/base mask and adapter selection free of scatter.
@@ -460,7 +474,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         group_list_type = 1  # `count` mode
 
         routed_lora_slots = None
-        if route_single_lora_slots:
+        if route_lora_slots:
             routed_scale = expanded_scale.reshape(-1)
             if routed_scale.shape[0] != sorted_hidden_states.shape[0]:
                 raise RuntimeError(

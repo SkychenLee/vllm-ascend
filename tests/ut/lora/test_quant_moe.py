@@ -203,7 +203,7 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
     reset_indices.assert_called_once_with(lora_context)
 
 
-def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
+def test_dynamic_int8_allows_single_and_composite_lora_gmm_fast_paths_for_ep() -> None:
     lora_context = _make_gmm_lora_context(use_ep=True)
     expert_map = torch.tensor([-1, 0, 1, -1])
     group_list = torch.tensor([16, 16])
@@ -238,6 +238,8 @@ def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
         hidden_states=hidden_states,
         group_list=group_list,
         group_list_type=1,
+        expert_map=expert_map,
+        routed_lora_slots=routed_lora_slots,
     )
 
     lora_context.fully_sharded = True
@@ -250,6 +252,35 @@ def test_dynamic_int8_allows_only_single_lora_gmm_fast_path_for_ep() -> None:
         routed_lora_slots=routed_lora_slots,
     )
 
+    lora_context = _make_gmm_lora_context(use_ep=True)
+    lora_context.punica_wrapper.num_active_moe_loras = 2
+    composite_hidden_states = torch.randn(96, 4, dtype=torch.bfloat16)
+    composite_lora_slots = torch.zeros(96, dtype=torch.long)
+    assert _can_use_composite_lora_gmm(
+        lora_context,
+        hidden_states=composite_hidden_states,
+        group_list=torch.tensor([48, 48]),
+        group_list_type=1,
+        expert_map=expert_map,
+        routed_lora_slots=composite_lora_slots,
+    )
+    assert not _can_use_composite_lora_gmm(
+        lora_context,
+        hidden_states=composite_hidden_states,
+        group_list=torch.tensor([48, 48]),
+        group_list_type=1,
+        routed_lora_slots=composite_lora_slots,
+    )
+    lora_context.fully_sharded = True
+    assert not _can_use_composite_lora_gmm(
+        lora_context,
+        hidden_states=composite_hidden_states,
+        group_list=torch.tensor([48, 48]),
+        group_list_type=1,
+        expert_map=expert_map,
+        routed_lora_slots=composite_lora_slots,
+    )
+
 
 def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:
     lora_context = SimpleNamespace(
@@ -259,7 +290,11 @@ def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:
         w2_lora_b_stacked="w2_b",
         fully_sharded=False,
     )
-    mlp_input = _make_input(lora_context=lora_context)
+    routed_lora_slots = torch.tensor([0, 1], dtype=torch.long)
+    mlp_input = _make_input(
+        lora_context=lora_context,
+        routed_lora_slots=routed_lora_slots,
+    )
     quantized_input = torch.ones(2, 4, dtype=torch.int8)
     input_scale = torch.ones(2)
     gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
@@ -267,7 +302,7 @@ def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:
     quantized_activated = torch.ones(2, 3, dtype=torch.int8)
     activated_scale = torch.ones(2)
     down_out = torch.randn(2, 4, dtype=torch.bfloat16)
-    composite_routing = SimpleNamespace(permutation="permutation")
+    composite_routing = SimpleNamespace(group_ids="group_ids")
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
         patch(
@@ -294,9 +329,8 @@ def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:
 
     build_routing.assert_called_once_with(
         lora_context,
-        expanded_row_idx=mlp_input.expanded_row_idx,
-        topk_ids=mlp_input.topk_ids,
-        num_experts=mlp_input.group_list.numel(),
+        routed_lora_slots=routed_lora_slots,
+        group_list=mlp_input.group_list,
     )
     assert add_gmm.call_count == 2
     assert add_gmm.call_args_list[0].args[0] is gate_up_out
@@ -515,18 +549,21 @@ def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
     context.punica_wrapper.is_prefill = False
     group_list = torch.tensor([24, 24], dtype=torch.int64)
     hidden_states = torch.zeros(48, 4, dtype=torch.bfloat16)
+    routed_lora_slots = torch.zeros(48, dtype=torch.long)
 
     assert _can_use_composite_lora_gmm(
         context,
         hidden_states=hidden_states,
         group_list=group_list,
         group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
     )
     assert not _can_use_composite_lora_gmm(
         context,
         hidden_states=hidden_states[:47],
         group_list=group_list,
         group_list_type=1,
+        routed_lora_slots=routed_lora_slots[:47],
     )
     context.punica_wrapper.no_lora = True
     assert not _can_use_composite_lora_gmm(
@@ -534,6 +571,7 @@ def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
         hidden_states=hidden_states,
         group_list=group_list,
         group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
     )
 
     context = _make_gmm_lora_context(fully_sharded=True, tp_size=2, tp_rank=1)
@@ -543,6 +581,7 @@ def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
         hidden_states=hidden_states,
         group_list=group_list,
         group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
     )
 
 
@@ -566,12 +605,14 @@ def test_composite_lora_gmm_accepts_dynamic_lora_configuration(
     )
     context.punica_wrapper.num_active_moe_loras = 2
     num_routed_rows = MOE_LORA_GMM_MIN_ROWS_PER_GROUP * max_loras * 2
+    routed_lora_slots = torch.zeros(num_routed_rows, dtype=torch.long)
 
     assert _can_use_composite_lora_gmm(
         context,
         hidden_states=torch.zeros(num_routed_rows, 4, dtype=torch.bfloat16),
         group_list=torch.full((2,), num_routed_rows // 2, dtype=torch.int64),
         group_list_type=1,
+        routed_lora_slots=routed_lora_slots,
     )
 
 
@@ -598,25 +639,38 @@ def test_build_single_lora_gmm_routing_ignores_nonlocal_ep_rows() -> None:
 
 def test_build_composite_lora_gmm_routing_handles_multiple_slots_and_base() -> None:
     context = SimpleNamespace(
-        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([2, -1, 0])),
         adapter_enabled=torch.tensor([1, 0, 1, 0], dtype=torch.int32),
         w13_lora_a_stacked=(torch.empty(3, 2, 16, 4),),
     )
-    topk_ids = torch.tensor([[1, 0], [0, 1], [1, 0]], dtype=torch.int32)
-    expanded_row_idx = torch.tensor([4, 1, 0, 3, 5, 2], dtype=torch.int32)
+    routed_lora_slots = torch.tensor([2, -1, 0, 2, -1, 0])
+    group_list = torch.tensor([3, 3], dtype=torch.int64)
 
     routing = _build_composite_lora_gmm_routing(
         context,
-        expanded_row_idx=expanded_row_idx,
-        topk_ids=topk_ids,
-        num_experts=2,
+        routed_lora_slots=routed_lora_slots,
+        group_list=group_list,
     )
 
-    dispatched_groups = torch.tensor([0, 4, 0, 1, 5, 1])
-    dispatched_enabled = torch.tensor([False, True, True, False, True, True])
-    assert torch.equal(dispatched_groups.index_select(0, routing.permutation), torch.tensor([0, 0, 1, 1, 4, 5]))
-    assert torch.equal(routing.group_list, torch.tensor([2, 2, 0, 0, 1, 1]))
-    assert torch.equal(routing.enabled, dispatched_enabled.index_select(0, routing.permutation))
+    assert torch.equal(routing.group_ids, torch.tensor([4, 6, 0, 5, 6, 1], dtype=torch.int32))
+    assert torch.equal(routing.group_list, torch.tensor([1, 1, 0, 0, 1, 1]))
+    assert torch.equal(routing.enabled, torch.tensor([True, False, True, True, False, True]))
+
+
+def test_build_composite_lora_gmm_routing_moves_nonlocal_ep_tail_to_sentinel() -> None:
+    context = SimpleNamespace(
+        adapter_enabled=torch.tensor([1, 1, 0], dtype=torch.int32),
+        w13_lora_a_stacked=(torch.empty(3, 1, 16, 4),),
+    )
+
+    routing = _build_composite_lora_gmm_routing(
+        context,
+        routed_lora_slots=torch.tensor([-1, 1, -1, -1, -1, -1]),
+        group_list=torch.tensor([2], dtype=torch.int64),
+    )
+
+    assert torch.equal(routing.group_ids, torch.tensor([3, 1, 3, 3, 3, 3], dtype=torch.int32))
+    assert torch.equal(routing.group_list, torch.tensor([0, 1, 0]))
+    assert torch.equal(routing.enabled, torch.tensor([False, True, False, False, False, False]))
 
 
 def test_composite_lora_gmm_reorders_masks_and_restores_rows() -> None:
@@ -625,17 +679,32 @@ def test_composite_lora_gmm_reorders_masks_and_restores_rows() -> None:
     lora_a = (torch.zeros(3, 2, 16, 1),)
     lora_b = (torch.zeros(3, 2, 2, 16),)
     routing = _CompositeLoraGMMRouting(
-        permutation=torch.tensor([2, 0, 1]),
-        group_list=torch.tensor([1, 1, 1, 0, 0, 0]),
-        enabled=torch.tensor([True, False, True]),
+        group_ids=torch.tensor([6, 5, 0], dtype=torch.int32),
+        group_list=torch.tensor([1, 0, 0, 0, 0, 1]),
+        enabled=torch.tensor([False, True, True]),
     )
+    grouped_inputs = torch.tensor([[3.0], [2.0], [1.0]])
+    reverse_mapping = torch.tensor([1, 2, 0], dtype=torch.int32)
     shrink = torch.zeros(3, 16)
     delta = torch.tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])
+    restored_delta = torch.tensor([[20.0, 21.0], [30.0, 31.0], [10.0, 11.0]])
 
-    with patch(
-        f"{QUANT_MOE}._grouped_lora_matmul",
-        side_effect=[shrink, delta],
-    ) as grouped_matmul:
+    with (
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_moe_token_permute",
+            return_value=(grouped_inputs, reverse_mapping),
+            create=True,
+        ) as token_permute,
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_moe_token_unpermute",
+            return_value=restored_delta,
+            create=True,
+        ) as token_unpermute,
+        patch(
+            f"{QUANT_MOE}._grouped_lora_matmul",
+            side_effect=[shrink, delta],
+        ) as grouped_matmul,
+    ):
         _add_composite_lora_gmm(
             output,
             inputs,
@@ -644,7 +713,15 @@ def test_composite_lora_gmm_reorders_masks_and_restores_rows() -> None:
             routing=routing,
         )
 
-    assert torch.equal(grouped_matmul.call_args_list[0].args[0], torch.tensor([[3.0], [0.0], [2.0]]))
+    token_permute.assert_called_once()
+    assert token_permute.call_args.kwargs["tokens"] is inputs
+    assert token_permute.call_args.kwargs["indices"] is routing.group_ids
+    assert token_permute.call_args.kwargs["num_out_tokens"] == 3
+    token_unpermute.assert_called_once_with(
+        permuted_tokens=delta,
+        sorted_indices=reverse_mapping,
+    )
+    assert grouped_matmul.call_args_list[0].args[0] is grouped_inputs
     assert grouped_matmul.call_args_list[0].args[1].shape == (6, 16, 1)
     assert grouped_matmul.call_args_list[1].args[1].shape == (6, 2, 16)
     assert torch.equal(output, torch.tensor([[0.0, 0.0], [30.0, 31.0], [10.0, 11.0]]))
@@ -748,15 +825,26 @@ def test_composite_lora_gmm_fully_sharded_reduces_partial_rank() -> None:
     lora_a = (torch.zeros(3, 2, 16, 3, dtype=torch.bfloat16),)
     lora_b = (torch.zeros(3, 2, 2, 16, dtype=torch.bfloat16),)
     routing = _CompositeLoraGMMRouting(
-        permutation=torch.tensor([0, 1]),
+        group_ids=torch.tensor([0, 1], dtype=torch.int32),
         group_list=torch.tensor([1, 1, 0, 0, 0, 0], dtype=torch.int64),
         enabled=torch.tensor([True, True]),
     )
     local_shrink = torch.ones(2, 16, dtype=torch.bfloat16)
     reduced_shrink = torch.full((2, 16), 2, dtype=torch.bfloat16)
     delta = torch.full((2, 2), 5, dtype=torch.bfloat16)
+    reverse_mapping = torch.tensor([0, 1], dtype=torch.int32)
 
     with (
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_moe_token_permute",
+            return_value=(inputs, reverse_mapping),
+            create=True,
+        ),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_moe_token_unpermute",
+            return_value=delta,
+            create=True,
+        ),
         patch(
             f"{QUANT_MOE}._grouped_lora_matmul",
             side_effect=[local_shrink, delta],

@@ -37,7 +37,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
-    get_allgather_lora_indices,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
     reset_lora_indices,
@@ -58,7 +57,7 @@ class QuantMoELoRAImpl:
 
 @dataclass(frozen=True)
 class _CompositeLoraGMMRouting:
-    permutation: torch.Tensor
+    group_ids: torch.Tensor
     group_list: torch.Tensor
     enabled: torch.Tensor
 
@@ -228,15 +227,18 @@ def _can_use_single_lora_gmm(
     )
 
 
-def _can_use_composite_lora_gmm(
+def _can_prepare_composite_lora_gmm(
     lora_context,
     *,
-    hidden_states: torch.Tensor,
-    group_list: torch.Tensor,
+    hidden_dtype: torch.dtype,
+    num_routed_rows: int,
+    num_experts: int,
     group_list_type: int,
+    expert_map: torch.Tensor | None = None,
 ) -> bool:
-    """Return whether mixed requests can use ``(slot, expert)`` GMM."""
-    if getattr(lora_context, "use_ep", False):
+    """Return whether AllGather should route composite-LoRA metadata."""
+    use_ep = getattr(lora_context, "use_ep", False)
+    if use_ep and (expert_map is None or getattr(lora_context, "fully_sharded", False)):
         return False
     punica_wrapper = getattr(lora_context, "punica_wrapper", None)
     if (
@@ -244,7 +246,7 @@ def _can_use_composite_lora_gmm(
         or getattr(punica_wrapper, "no_lora", True)
         or getattr(punica_wrapper, "num_active_moe_loras", 0) < 2
         or group_list_type != 1
-        or hidden_states.dtype != torch.bfloat16
+        or hidden_dtype != torch.bfloat16
     ):
         return False
 
@@ -253,15 +255,37 @@ def _can_use_composite_lora_gmm(
     w2_a = lora_context.w2_lora_a_stacked
     w2_b = lora_context.w2_lora_b_stacked
     weights = (*w13_a, *w13_b, *w2_a, *w2_b)
-    num_experts = group_list.numel()
     max_loras = lora_context.max_loras
-    num_composite_groups = max_loras * num_experts
+    min_rows_num_experts = max(expert_map.numel(), num_experts) if use_ep else num_experts
+    num_composite_groups = max_loras * min_rows_num_experts
     return not (
         not weights
         or any(weight.shape[0] != max_loras for weight in weights)
         or any(weight.shape[1] != num_experts for weight in weights)
-        or any(weight.dtype != hidden_states.dtype for weight in weights)
-        or hidden_states.shape[0] < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_composite_groups
+        or any(weight.dtype != hidden_dtype for weight in weights)
+        or num_routed_rows < MOE_LORA_GMM_MIN_ROWS_PER_GROUP * num_composite_groups
+    )
+
+
+def _can_use_composite_lora_gmm(
+    lora_context,
+    *,
+    hidden_states: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+    expert_map: torch.Tensor | None = None,
+    routed_lora_slots: torch.Tensor | None = None,
+) -> bool:
+    """Return whether mixed requests can use ``(slot, expert)`` GMM."""
+    if routed_lora_slots is None or routed_lora_slots.numel() != hidden_states.shape[0]:
+        return False
+    return _can_prepare_composite_lora_gmm(
+        lora_context,
+        hidden_dtype=hidden_states.dtype,
+        num_routed_rows=hidden_states.shape[0],
+        num_experts=group_list.numel(),
+        group_list_type=group_list_type,
+        expert_map=expert_map,
     )
 
 
@@ -276,49 +300,48 @@ def _build_single_lora_gmm_routing(
 def _build_composite_lora_gmm_routing(
     lora_context,
     *,
-    expanded_row_idx: torch.Tensor,
-    topk_ids: torch.Tensor,
-    num_experts: int,
+    routed_lora_slots: torch.Tensor,
+    group_list: torch.Tensor,
 ) -> _CompositeLoraGMMRouting:
-    """Group dispatched rows by ``(LoRA slot, expert)`` without host sync."""
-    token_lora_indices = get_allgather_lora_indices(lora_context)
-    token_lora_slots = token_lora_indices[: topk_ids.shape[0]]
-
+    """Build graph-safe ``(LoRA slot, local expert)`` routing."""
+    num_experts = group_list.numel()
     max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
-    safe_token_lora_slots = token_lora_slots.clamp(min=0, max=max_loras - 1)
-    adapter_enabled = lora_context.adapter_enabled
-    token_enabled = (token_lora_slots >= 0) & adapter_enabled[safe_token_lora_slots].bool()
-    pair_enabled = token_enabled.unsqueeze(-1).expand_as(topk_ids).reshape(-1)
-
-    # Inactive/base rows still need a static GMM group. Route them through an
-    # enabled slot with zeroed inputs so unloaded weight buffers are not read.
-    fallback_slot = torch.argmax(adapter_enabled[:max_loras])
-    token_group_slots = torch.where(token_enabled, safe_token_lora_slots, fallback_slot)
-    pair_group_ids = (token_group_slots.unsqueeze(-1) * num_experts + topk_ids.to(torch.long)).reshape(-1)
-
-    dispatched_rows = expanded_row_idx.abs().reshape(-1).to(torch.long)
-    dispatched_group_ids = torch.empty_like(pair_group_ids)
-    dispatched_group_ids.index_copy_(0, dispatched_rows, pair_group_ids)
-    dispatched_enabled = torch.empty_like(pair_enabled)
-    dispatched_enabled.index_copy_(0, dispatched_rows, pair_enabled)
-
-    _, permutation = torch.sort(dispatched_group_ids)
-    grouped_enabled = dispatched_enabled.index_select(0, permutation)
     num_groups = max_loras * num_experts
+    row_ids = torch.arange(
+        routed_lora_slots.shape[0],
+        dtype=group_list.dtype,
+        device=routed_lora_slots.device,
+    )
+    valid_rows = row_ids < group_list.sum()
+    expert_ids = torch.searchsorted(
+        group_list.cumsum(0),
+        row_ids,
+        right=True,
+    ).clamp_(max=num_experts - 1)
+
+    safe_lora_slots = routed_lora_slots.clamp(min=0, max=max_loras - 1)
+    adapter_enabled = lora_context.adapter_enabled
+    enabled = valid_rows & (routed_lora_slots >= 0) & adapter_enabled[safe_lora_slots].bool()
+
+    # Base, inactive-adapter, and non-local EP rows use a sentinel group so
+    # token-permute moves them after every GMM group. Excluding them from the
+    # group counts avoids both unnecessary LoRA matmuls and unloaded weights.
+    active_group_ids = safe_lora_slots * num_experts + expert_ids
+    group_ids = torch.where(enabled, active_group_ids, num_groups).to(torch.int32)
     composite_group_list = torch.zeros(
         num_groups,
         dtype=torch.int64,
-        device=dispatched_group_ids.device,
+        device=routed_lora_slots.device,
     )
     composite_group_list.scatter_add_(
         0,
-        dispatched_group_ids,
-        torch.ones_like(dispatched_group_ids, dtype=torch.int64),
+        active_group_ids,
+        enabled.to(torch.int64),
     )
     return _CompositeLoraGMMRouting(
-        permutation=permutation,
+        group_ids=group_ids,
         group_list=composite_group_list,
-        enabled=grouped_enabled,
+        enabled=enabled,
     )
 
 
@@ -418,9 +441,12 @@ def _add_composite_lora_gmm(
     fully_sharded: bool = False,
     output_offset: int = 0,
 ) -> None:
-    """Add LoRA deltas after grouping rows by dynamic slot and expert."""
-    grouped_inputs = inputs.index_select(0, routing.permutation)
-    grouped_inputs = grouped_inputs * routing.enabled.unsqueeze(-1).to(inputs.dtype)
+    """Add LoRA deltas with MoE-native token permutation."""
+    grouped_inputs, reverse_mapping = torch_npu.npu_moe_token_permute(
+        tokens=inputs,
+        indices=routing.group_ids,
+        num_out_tokens=inputs.shape[0],
+    )
 
     current_output_offset = output_offset
     for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked, strict=True):
@@ -434,13 +460,13 @@ def _add_composite_lora_gmm(
             fully_sharded=fully_sharded,
         )
         delta = _grouped_lora_matmul(shrink, lora_b_flat, routing.group_list)
-        delta *= routing.enabled.unsqueeze(-1).to(delta.dtype)
-        output_size = delta.shape[-1]
-        output.narrow(-1, current_output_offset, output_size).index_add_(
-            0,
-            routing.permutation,
-            delta,
+        delta = torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=delta,
+            sorted_indices=reverse_mapping,
         )
+        delta.masked_fill_(~routing.enabled.unsqueeze(-1), 0)
+        output_size = delta.shape[-1]
+        output.narrow(-1, current_output_offset, output_size).add_(delta)
         current_output_offset += output_size
 
 
@@ -528,6 +554,8 @@ def _apply_dynamic_int8_moe_lora(
                 hidden_states=hidden_states,
                 group_list=mlp_compute_input.group_list,
                 group_list_type=mlp_compute_input.group_list_type,
+                expert_map=mlp_compute_input.expert_map,
+                routed_lora_slots=mlp_compute_input.routed_lora_slots,
             )
 
     lora_routing = None
@@ -548,11 +576,11 @@ def _apply_dynamic_int8_moe_lora(
             fully_sharded=lora_context.fully_sharded,
         )
     elif use_composite_lora_gmm:
+        assert mlp_compute_input.routed_lora_slots is not None
         composite_lora_routing = _build_composite_lora_gmm_routing(
             lora_context,
-            expanded_row_idx=mlp_compute_input.expanded_row_idx,
-            topk_ids=mlp_compute_input.topk_ids,
-            num_experts=mlp_compute_input.group_list.numel(),
+            routed_lora_slots=mlp_compute_input.routed_lora_slots,
+            group_list=mlp_compute_input.group_list,
         )
         _add_composite_lora_gmm(
             gate_up_out,
