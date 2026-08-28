@@ -23,13 +23,31 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _is_decode_only_batch
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
 FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "_fake_weight")
+
+
+@pytest.mark.parametrize(
+    ("num_computed_tokens", "num_prompt_tokens", "expected"),
+    [
+        ([0, 0], [8, 16], False),
+        ([8, 4], [8, 16], False),
+        ([8, 16], [8, 16], True),
+        ([12, 20], [8, 16], True),
+    ],
+)
+def test_is_decode_only_batch(num_computed_tokens, num_prompt_tokens, expected) -> None:
+    input_batch = MagicMock(
+        num_computed_tokens_cpu=np.asarray(num_computed_tokens),
+        num_prompt_tokens=np.asarray(num_prompt_tokens),
+    )
+
+    assert _is_decode_only_batch(input_batch, len(num_computed_tokens)) is expected
 
 
 def initialize_kv_cache(runner: NPUModelRunner):

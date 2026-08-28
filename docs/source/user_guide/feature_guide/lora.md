@@ -51,6 +51,22 @@ For W8A8 MoE, use the same flags together with `--quantization ascend` and a
 compatible quantized checkpoint. LoRA activations remain BF16/FP16 across the
 AllGather and are dynamically quantized only for the base expert GMMs.
 
+For W8A8 MoE with expert parallelism, set
+`--additional-config '{"enable_moe_lora_dual_stream": true}'` to run each base
+W13/W2 expert GMM on the main NPU stream while the corresponding LoRA delta is
+produced on a persistent auxiliary stream. The streams join before activation
+and before MoE combine. In model runner V1, dual-stream execution is enabled
+only when every request in the current batch is in decode. Prefill and mixed
+batches remain on one stream to avoid grouped-matmul cube/vector contention at
+larger token counts. On the AllGather path, LoRA-specific routing construction
+is submitted on the auxiliary stream before the base W13 GMM, after the main
+stream has submitted dynamic quantization. The routing and LoRA delta can then
+overlap the base GMM without making the base wait for routing completion.
+AlltoAll routing and communication retain their existing ordering. Base/LoRA
+overlap applies to both AllGather and AlltoAll EP; it is disabled for fully
+sharded LoRA. The feature allocates one temporary delta workspace per forward
+and remains opt-in.
+
 AllGather EP can use the expert-grouped GMM LoRA fast path when exactly one
 routed-expert adapter is active. The current fast path requires BF16
 activations, `top_k=6`, `max_loras=3`, `max_lora_rank=16`, and enough routed

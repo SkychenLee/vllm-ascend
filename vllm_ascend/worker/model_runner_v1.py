@@ -207,6 +207,14 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+def _is_decode_only_batch(input_batch, num_reqs: int) -> bool:
+    """Return whether every scheduled request has finished its prompt."""
+    # Both inputs are CPU NumPy buffers, so this check does not synchronize NPU.
+    num_computed_tokens = input_batch.num_computed_tokens_cpu[:num_reqs]
+    num_prompt_tokens = input_batch.num_prompt_tokens[:num_reqs]
+    return bool(np.all(num_computed_tokens >= num_prompt_tokens))
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -2024,6 +2032,7 @@ class NPUModelRunner(GPUModelRunner):
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        is_decode_only = _is_decode_only_batch(self.input_batch, num_reqs)
 
         # Run forward pass
         defer_kv_connector_finalize = self.speculative_config is not None and (
@@ -2044,6 +2053,7 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                is_decode_only=is_decode_only,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -3356,6 +3366,7 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                is_decode_only=uniform_decode and not with_prefill,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds

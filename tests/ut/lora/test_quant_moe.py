@@ -1,5 +1,6 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -14,8 +15,11 @@ from vllm_ascend.lora.quant_moe import (
     _build_composite_lora_gmm_routing,
     _build_single_lora_gmm_routing,
     _can_use_composite_lora_gmm,
+    _can_use_ep_moe_lora_aux_stream,
     _can_use_single_lora_gmm,
     _CompositeLoraGMMRouting,
+    _execute_moe_lora_in_parallel,
+    _new_lora_delta_workspace,
     _SingleLoraGMMRouting,
     quant_apply_mlp_with_moe_lora,
     validate_quant_moe_lora_activation_input,
@@ -24,6 +28,142 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput, MoEQu
 from vllm_ascend.quantization.quant_type import QuantType
 
 QUANT_MOE = "vllm_ascend.lora.quant_moe"
+
+
+@pytest.mark.parametrize("comm_type", [MoECommType.ALLGATHER, MoECommType.ALLTOALL])
+def test_ep_moe_lora_aux_stream_eligibility(comm_type) -> None:
+    context = SimpleNamespace(
+        use_ep=True,
+        fully_sharded=False,
+        aux_stream=object(),
+        events=tuple(object() for _ in range(4)),
+    )
+
+    assert _can_use_ep_moe_lora_aux_stream(context, comm_type, is_decode_only=True)
+    assert not _can_use_ep_moe_lora_aux_stream(context, comm_type, is_decode_only=False)
+    context.use_ep = False
+    assert not _can_use_ep_moe_lora_aux_stream(context, comm_type, is_decode_only=True)
+    context.use_ep = True
+    context.fully_sharded = True
+    assert not _can_use_ep_moe_lora_aux_stream(context, comm_type, is_decode_only=True)
+
+
+def test_execute_moe_lora_in_parallel_forks_and_joins_streams() -> None:
+    main_stream = MagicMock()
+    aux_stream = MagicMock()
+    start_event = MagicMock()
+    done_event = MagicMock()
+    base_result = torch.empty(1)
+    calls = []
+
+    with (
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=main_stream),
+        patch(f"{QUANT_MOE}.npu_stream_switch", return_value=nullcontext()),
+    ):
+        result = _execute_moe_lora_in_parallel(
+            lambda: calls.append("base") or base_result,
+            lambda: calls.append("lora"),
+            start_event,
+            done_event,
+            aux_stream,
+        )
+
+    assert result is base_result
+    assert calls == ["base", "lora"]
+    start_event.record.assert_called_once_with(main_stream)
+    aux_stream.wait_event.assert_called_once_with(start_event)
+    done_event.record.assert_called_once_with(aux_stream)
+    main_stream.wait_event.assert_called_once_with(done_event)
+
+
+def test_execute_moe_lora_in_parallel_enqueues_aux_prepare_before_base() -> None:
+    main_stream = MagicMock()
+    aux_stream = MagicMock()
+    start_event = MagicMock()
+    done_event = MagicMock()
+    base_result = torch.empty(1)
+    calls = []
+
+    with (
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=main_stream),
+        patch(f"{QUANT_MOE}.npu_stream_switch", side_effect=lambda *_args, **_kwargs: nullcontext()) as switch,
+    ):
+        result = _execute_moe_lora_in_parallel(
+            lambda: calls.append("base") or base_result,
+            lambda: calls.append("lora"),
+            start_event,
+            done_event,
+            aux_stream,
+            aux_prepare_fn=lambda: calls.append("prepare"),
+        )
+
+    assert result is base_result
+    assert calls == ["prepare", "base", "lora"]
+    start_event.record.assert_called_once_with(main_stream)
+    aux_stream.wait_event.assert_called_once_with(start_event)
+    assert switch.call_count == 2
+    done_event.record.assert_called_once_with(aux_stream)
+    main_stream.wait_event.assert_called_once_with(done_event)
+
+
+@pytest.mark.skipif(torch.npu.is_available() is not True, reason="requires an Ascend NPU")
+@pytest.mark.parametrize("with_aux_prepare", [False, True])
+def test_execute_moe_lora_in_parallel_supports_aclgraph_replay(with_aux_prepare) -> None:
+    static_input = torch.ones(16, device="npu", dtype=torch.float32)
+    aux_stream = torch.npu.Stream()
+    events = tuple(torch.npu.Event() for _ in range(2))
+
+    def run_parallel() -> torch.Tensor:
+        lora_delta = torch.empty_like(static_input)
+        prepared_input = torch.empty_like(static_input)
+
+        def base_fn() -> torch.Tensor:
+            return static_input * 2
+
+        def aux_prepare_fn() -> None:
+            prepared_input.copy_(static_input + 1)
+
+        def lora_fn() -> None:
+            lora_input = prepared_input if with_aux_prepare else static_input
+            lora_delta.copy_(lora_input * 3)
+
+        base_output = _execute_moe_lora_in_parallel(
+            base_fn,
+            lora_fn,
+            events[0],
+            events[1],
+            aux_stream,
+            aux_prepare_fn=aux_prepare_fn if with_aux_prepare else None,
+        )
+        return base_output.add_(lora_delta)
+
+    # Materialize lazy runtime resources before capture, like model warmup.
+    run_parallel()
+    torch.npu.synchronize()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        output = run_parallel()
+
+    static_input.fill_(2)
+    graph.replay()
+    torch.npu.synchronize()
+
+    expected = 13.0 if with_aux_prepare else 10.0
+    torch.testing.assert_close(output.cpu(), torch.full((16,), expected))
+
+
+def test_lora_delta_workspace_is_reused_for_w13_and_w2() -> None:
+    inputs = torch.empty(5, 4, dtype=torch.bfloat16)
+    w13_b = (torch.empty(2, 3, 16), torch.empty(2, 5, 16))
+    w2_b = (torch.empty(2, 4, 16),)
+
+    workspace, w13_output_size, w2_output_size = _new_lora_delta_workspace(inputs, w13_b, w2_b)
+
+    assert workspace.shape == (5, 8)
+    assert workspace.dtype == inputs.dtype
+    assert w13_output_size == 8
+    assert w2_output_size == 4
 
 
 def _make_input(**overrides) -> MoEMlpComputeInput:
@@ -127,6 +267,112 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         silu_out=activated,
         lora_routing=routing,
     )
+
+
+@pytest.mark.parametrize("comm_type", [MoECommType.ALLGATHER, MoECommType.ALLTOALL])
+def test_dynamic_int8_ep_lora_uses_aux_stream_delta_workspace(comm_type) -> None:
+    lora_context = _make_gmm_lora_context(use_ep=True)
+    lora_context.aux_stream = object()
+    lora_context.events = tuple(object() for _ in range(4))
+    mlp_input = _make_input(
+        lora_context=lora_context,
+        expanded_row_idx=None if comm_type == MoECommType.ALLTOALL else torch.tensor([0, 1], dtype=torch.int32),
+        topk_ids=None if comm_type == MoECommType.ALLTOALL else torch.tensor([[0], [1]], dtype=torch.int32),
+    )
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.zeros(2, 6, dtype=torch.bfloat16)
+    activated = torch.ones(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 0]))
+    call_order = []
+
+    quant_results = iter(
+        [
+            (quantized_input, input_scale),
+            (quantized_activated, activated_scale),
+        ]
+    )
+
+    def execute_parallel(base_fn, lora_fn, *_args, aux_prepare_fn=None):
+        call_order.append("execute")
+        if aux_prepare_fn is not None:
+            aux_prepare_fn()
+        base_output = base_fn()
+        lora_fn()
+        return base_output
+
+    def dynamic_quant(*_args, **_kwargs):
+        call_order.append("dynamic_quant")
+        return next(quant_results)
+
+    def base_w13_gmm(*_args, **_kwargs):
+        call_order.append("base_w13")
+        return [gate_up_out]
+
+    def recover_routing(*_args, **_kwargs):
+        call_order.append("routing")
+        return routing
+
+    def write_w13_delta(_context, *, gate_up_out, **_kwargs):
+        gate_up_out.fill_(2)
+
+    def write_w2_delta(_context, *, down_out, **_kwargs):
+        down_out.fill_(3)
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(
+            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+            side_effect=dynamic_quant,
+        ),
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", side_effect=base_w13_gmm, create=True),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(f"{QUANT_MOE}._can_use_single_lora_gmm", return_value=False),
+        patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=False),
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", side_effect=recover_routing) as recover_allgather,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_all2all", side_effect=recover_routing) as recover_all2all,
+        patch(f"{QUANT_MOE}._can_use_ep_moe_lora_aux_stream", return_value=True),
+        patch(f"{QUANT_MOE}._execute_moe_lora_in_parallel", side_effect=execute_parallel) as execute,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13", side_effect=write_w13_delta) as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2", side_effect=write_w2_delta) as apply_w2,
+    ):
+        extra_ctx.moe_comm_type = comm_type
+        output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    assert output is down_out
+    assert output_event is None
+    assert execute.call_count == 2
+    assert apply_w13.call_args.kwargs["gate_up_out"] is not gate_up_out
+    assert apply_w2.call_args.kwargs["down_out"] is not down_out
+    assert apply_w13.call_args.kwargs["gate_up_out"].data_ptr() == apply_w2.call_args.kwargs["down_out"].data_ptr()
+    assert torch.equal(gate_up_out, torch.full_like(gate_up_out, 2))
+    assert torch.equal(down_out, torch.full_like(down_out, 3))
+    if comm_type == MoECommType.ALLGATHER:
+        assert call_order == [
+            "dynamic_quant",
+            "execute",
+            "routing",
+            "base_w13",
+            "execute",
+            "dynamic_quant",
+        ]
+        recover_allgather.assert_called_once()
+        recover_all2all.assert_not_called()
+    else:
+        assert call_order == [
+            "routing",
+            "execute",
+            "dynamic_quant",
+            "base_w13",
+            "execute",
+            "dynamic_quant",
+        ]
+        recover_all2all.assert_called_once()
+        recover_allgather.assert_not_called()
 
 
 def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:

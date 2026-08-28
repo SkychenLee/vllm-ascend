@@ -111,6 +111,7 @@ def set_ascend_forward_context(
     has_sinks=False,
     input_ids=None,
     eplb_heat_collection_status: bool = False,
+    is_decode_only: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -145,6 +146,7 @@ def set_ascend_forward_context(
         tp_world_size = get_tensor_model_parallel_world_size()
 
         forward_context.in_profile_run = in_profile_run
+        forward_context.is_decode_only = is_decode_only
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
@@ -428,6 +430,7 @@ class _ExtraForwardContextProxy:
         "max_tokens_across_pcp",
         "num_accept_tokens",
         "in_profile_run",
+        "is_decode_only",
         "padded_num_tokens",
         "sinks",
         "eplb_heat_collection_status",

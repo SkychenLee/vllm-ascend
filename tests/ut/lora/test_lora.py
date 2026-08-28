@@ -50,6 +50,40 @@ def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
     assert wrapper.n_slices == 256 * 3
 
 
+def test_ascend_fused_moe_lora_initializes_aux_stream_for_ep() -> None:
+    parallel_config = SimpleNamespace(tp_size=1, tp_rank=0, ep_rank=0, use_ep=True)
+    base_layer = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            hidden_dim=4096,
+            num_local_experts=128,
+            num_experts=256,
+            intermediate_size_per_partition=256,
+            experts_per_token=8,
+            moe_parallel_config=parallel_config,
+            is_act_and_mul=True,
+        ),
+        _shared_experts=None,
+        quant_type=QuantType.W8A8,
+    )
+    aux_stream = Mock()
+    events = tuple(Mock() for _ in range(4))
+
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+        patch(
+            "vllm_ascend.lora.fused_moe.get_ascend_config",
+            return_value=SimpleNamespace(enable_moe_lora_dual_stream=True),
+        ),
+        patch("vllm_ascend.lora.fused_moe._get_moe_lora_aux_stream", return_value=aux_stream),
+        patch("vllm_ascend.lora.fused_moe.torch.npu.Event", side_effect=events),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(base_layer)
+
+    assert wrapper._lora_stream is aux_stream
+    assert wrapper._events == events
+
+
 def test_moe_lora_apply_uses_adapter_enabled() -> None:
     punica_wrapper = Mock()
     context = SimpleNamespace(
