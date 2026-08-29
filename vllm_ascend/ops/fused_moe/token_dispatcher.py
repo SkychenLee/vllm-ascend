@@ -429,9 +429,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
+        batch_descriptor = get_forward_context().batch_descriptor if is_forward_context_available() else None
         route_single_lora_slots = (
             MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
             and quant_type == QuantType.W8A8
+            and self.lora_context is not None
+            and getattr(self.lora_context, "aux_stream", None) is not None
+            and batch_descriptor is not None
+            and _EXTRA_CTX.is_decode_only is False
             and _can_prepare_single_lora_gmm(
                 self.lora_context,
                 num_routed_rows=num_tokens * self.top_k,
@@ -459,7 +464,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # has_lora is identical on every EP rank (unlike rank-local punica
         # state), so all ranks produce the same sideband shape; fall back to
         # the rank-local signal only when no descriptor is available.
-        batch_descriptor = get_forward_context().batch_descriptor if is_forward_context_available() else None
         if batch_descriptor is not None:
             batch_has_lora = batch_descriptor.has_lora
         else:

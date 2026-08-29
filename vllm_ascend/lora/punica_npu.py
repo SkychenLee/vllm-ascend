@@ -366,6 +366,31 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
 
+    @staticmethod
+    def prepare_fused_moe_lora_indices(
+        *,
+        expert_ids: torch.Tensor,
+        token_lora_mapping: torch.Tensor,
+        adapter_enabled: torch.Tensor,
+        num_experts: int,
+    ) -> torch.Tensor:
+        """Build the flattened ``(LoRA slot, expert)`` BGMV index once.
+
+        Quantized decode can prepare this tensor on the auxiliary stream while
+        the base W13 GMM is running, then reuse it for both W13 and W2. Keeping
+        the preparation outside :meth:`add_lora_fused_moe` avoids repeating
+        the clamp, adapter lookup, mask, and contiguous conversion twice per
+        MoE layer.
+        """
+        expert_idx = expert_ids.view(-1).to(torch.long)
+        lora_idx_safe = token_lora_mapping.clamp(min=0)
+        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+        return torch.where(
+            enabled,
+            lora_idx_safe * num_experts + expert_idx,
+            torch.full_like(token_lora_mapping, -1),
+        ).contiguous()
+
     def add_lora_fused_moe(
         self,
         y: torch.Tensor,
@@ -386,6 +411,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        bgmv_lora_indices: torch.Tensor | None = None,
     ) -> None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -418,16 +444,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
-        expert_idx = expert_ids.view(-1).to(torch.long)
         num_experts = lora_a_stacked[0].shape[1]
-
-        lora_idx_safe = token_lora_mapping.clamp(min=0)
-        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-        combined_idx = torch.where(
-            enabled,
-            lora_idx_safe * num_experts + expert_idx,
-            torch.full_like(token_lora_mapping, -1),
-        ).contiguous()
+        if bgmv_lora_indices is None:
+            bgmv_lora_indices = self.prepare_fused_moe_lora_indices(
+                expert_ids=expert_ids,
+                token_lora_mapping=token_lora_mapping,
+                adapter_enabled=adapter_enabled,
+                num_experts=num_experts,
+            )
 
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):
@@ -449,7 +473,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 device=x2d.device,
             )
 
-            self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+            self.bgmv_shrink(x2d, a_flat, shrink_out, bgmv_lora_indices, 1.0)
 
             if fully_sharded:
                 if local_rank == full_rank:
@@ -469,7 +493,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             if mul_routed_weight and topk_weights is not None:
                 delta = shrink_out * topk_weights.view(-1, 1)
 
-            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            self.bgmv_expand_slice(delta, b_flat, y2d, bgmv_lora_indices, cur_offset, out_size, add_inputs=True)
             cur_offset += out_size
 
     def add_lora_logits(

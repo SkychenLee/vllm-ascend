@@ -73,12 +73,10 @@ _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
 
 MOE_LORA_GMM_MIN_ROWS_PER_GROUP = 8
 
-# Temporary dual-stream benchmark isolation: force the single-adapter
-# expert-grouped GMM fast path off at both the AllGather token-dispatcher and
-# the MLP compute call sites so A/B runs measure dual-stream overlap on the
-# regular LoRA path only. The eligibility helpers keep their original
-# semantics so the fast-path unit tests stay valid.
-MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED = False
+# Use expert-grouped LoRA only for large V1 prefill batches. Decode is kept on
+# the regular BGMV path so it can overlap with the base MoE on the auxiliary
+# stream without changing the validated decode performance.
+MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED = True
 
 
 def register_quant_moe_lora_impl(
@@ -597,13 +595,18 @@ def _apply_dynamic_int8_moe_lora(
     use_single_lora_gmm = False
     use_composite_lora_gmm = False
     if comm_type == MoECommType.ALLGATHER:
-        use_single_lora_gmm = MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED and _can_use_single_lora_gmm(
-            lora_context,
-            hidden_states=hidden_states,
-            group_list=mlp_compute_input.group_list,
-            group_list_type=mlp_compute_input.group_list_type,
-            expert_map=mlp_compute_input.expert_map,
-            routed_lora_slots=mlp_compute_input.routed_lora_slots,
+        use_single_lora_gmm = (
+            MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
+            and getattr(lora_context, "aux_stream", None) is not None
+            and _EXTRA_CTX.is_decode_only is False
+            and _can_use_single_lora_gmm(
+                lora_context,
+                hidden_states=hidden_states,
+                group_list=mlp_compute_input.group_list,
+                group_list_type=mlp_compute_input.group_list_type,
+                expert_map=mlp_compute_input.expert_map,
+                routed_lora_slots=mlp_compute_input.routed_lora_slots,
+            )
         )
         if not use_single_lora_gmm:
             use_composite_lora_gmm = _can_use_composite_lora_gmm(
@@ -624,9 +627,10 @@ def _apply_dynamic_int8_moe_lora(
     lora_routing = None
     single_lora_routing = None
     composite_lora_routing = None
+    bgmv_lora_indices = None
 
     def prepare_lora_routing() -> None:
-        nonlocal lora_routing, single_lora_routing, composite_lora_routing
+        nonlocal lora_routing, single_lora_routing, composite_lora_routing, bgmv_lora_indices
         if use_single_lora_gmm:
             assert mlp_compute_input.routed_lora_slots is not None
             single_lora_routing = _build_single_lora_gmm_routing(
@@ -666,6 +670,19 @@ def _apply_dynamic_int8_moe_lora(
                 group_list=mlp_compute_input.group_list,
             )
 
+        # In decode-only AllGather dual-stream execution this callback runs on
+        # the auxiliary stream while the base W13 GMM is in flight. Prepare
+        # the BGMV gather index once here and reuse it for W13 and W2 instead
+        # of rebuilding it inside both LoRA applications.
+        if defer_allgather_lora_routing and lora_routing is not None:
+            expert_per_row, lora_per_row = lora_routing
+            bgmv_lora_indices = lora_context.punica_wrapper.prepare_fused_moe_lora_indices(
+                expert_ids=expert_per_row,
+                token_lora_mapping=lora_per_row,
+                adapter_enabled=lora_context.adapter_enabled,
+                num_experts=lora_context.w13_lora_a_stacked[0].shape[1],
+            )
+
     # AlltoAll routing consumes exchanged indices and keeps its existing
     # communication ordering. AllGather routing is LoRA-only, so pure-decode
     # dual-stream execution can construct it on the auxiliary stream while the
@@ -702,6 +719,7 @@ def _apply_dynamic_int8_moe_lora(
                 gate_up_out=output,
                 hidden_states=hidden_states,
                 lora_routing=lora_routing,
+                bgmv_lora_indices=bgmv_lora_indices,
             )
 
     input_dtype = hidden_states.dtype
@@ -820,6 +838,7 @@ def _apply_dynamic_int8_moe_lora(
                 down_out=output,
                 silu_out=activated,
                 lora_routing=lora_routing,
+                bgmv_lora_indices=bgmv_lora_indices,
             )
 
     def base_w2_fn() -> torch.Tensor:

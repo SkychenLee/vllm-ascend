@@ -184,7 +184,7 @@ def _make_input(**overrides) -> MoEMlpComputeInput:
         activation="silu",
         expanded_row_idx=torch.tensor([0, 1], dtype=torch.int32),
         topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
-        lora_context=SimpleNamespace(use_ep=False),
+        lora_context=SimpleNamespace(use_ep=False, fully_sharded=False),
     )
     values.update(overrides)
     return MoEMlpComputeInput(**values)
@@ -199,7 +199,7 @@ def _make_input(**overrides) -> MoEMlpComputeInput:
             _make_input(
                 expanded_row_idx=None,
                 topk_ids=None,
-                lora_context=SimpleNamespace(use_ep=True),
+                lora_context=SimpleNamespace(use_ep=True, fully_sharded=False),
             ),
         ),
     ],
@@ -260,12 +260,14 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         gate_up_out=gate_up_out,
         hidden_states=mlp_input.hidden_states,
         lora_routing=routing,
+        bgmv_lora_indices=None,
     )
     apply_w2.assert_called_once_with(
         mlp_input.lora_context,
         down_out=down_out,
         silu_out=activated,
         lora_routing=routing,
+        bgmv_lora_indices=None,
     )
 
 
@@ -274,6 +276,9 @@ def test_dynamic_int8_ep_lora_uses_aux_stream_delta_workspace(comm_type) -> None
     lora_context = _make_gmm_lora_context(use_ep=True)
     lora_context.aux_stream = object()
     lora_context.events = tuple(object() for _ in range(4))
+    prepared_indices = torch.tensor([0, 1], dtype=torch.long)
+    prepare_indices = MagicMock(return_value=prepared_indices)
+    lora_context.punica_wrapper.prepare_fused_moe_lora_indices = prepare_indices
     mlp_input = _make_input(
         lora_context=lora_context,
         expanded_row_idx=None if comm_type == MoECommType.ALLTOALL else torch.tensor([0, 1], dtype=torch.int32),
@@ -362,6 +367,14 @@ def test_dynamic_int8_ep_lora_uses_aux_stream_delta_workspace(comm_type) -> None
         ]
         recover_allgather.assert_called_once()
         recover_all2all.assert_not_called()
+        prepare_indices.assert_called_once_with(
+            expert_ids=routing[0],
+            token_lora_mapping=routing[1],
+            adapter_enabled=lora_context.adapter_enabled,
+            num_experts=lora_context.w13_lora_a_stacked[0].shape[1],
+        )
+        assert apply_w13.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
+        assert apply_w2.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
     else:
         assert call_order == [
             "routing",
@@ -373,6 +386,9 @@ def test_dynamic_int8_ep_lora_uses_aux_stream_delta_workspace(comm_type) -> None
         ]
         recover_all2all.assert_called_once()
         recover_allgather.assert_not_called()
+        prepare_indices.assert_not_called()
+        assert apply_w13.call_args.kwargs["bgmv_lora_indices"] is None
+        assert apply_w2.call_args.kwargs["bgmv_lora_indices"] is None
 
 
 def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
@@ -386,6 +402,7 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
         w2_lora_a_packed="w2_a_packed",
         w2_lora_b_packed="w2_b_packed",
         fully_sharded=False,
+        aux_stream=object(),
     )
     topk_scales = torch.tensor([[0.25], [0.5]], dtype=torch.bfloat16)
     routed_lora_slots = torch.tensor([0, -1], dtype=torch.long)
@@ -404,6 +421,7 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
     single_routing = SimpleNamespace(enabled="enabled")
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(f"{QUANT_MOE}.MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED", True),
         patch(
             f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
             side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
@@ -423,6 +441,7 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
         patch(f"{QUANT_MOE}.reset_lora_indices") as reset_indices,
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = False
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
     assert add_gmm.call_count == 2
@@ -447,6 +466,130 @@ def test_dynamic_int8_uses_single_lora_gmm_without_recovering_routing() -> None:
     apply_w13.assert_not_called()
     apply_w2.assert_not_called()
     reset_indices.assert_called_once_with(lora_context)
+
+
+@pytest.mark.parametrize(
+    ("fast_path_enabled", "is_decode_only", "has_aux_stream"),
+    [
+        (False, False, True),
+        (True, True, True),
+        (True, False, False),
+    ],
+)
+def test_dynamic_int8_single_lora_gmm_fallbacks(
+    fast_path_enabled: bool,
+    is_decode_only: bool,
+    has_aux_stream: bool,
+) -> None:
+    """Disabled, decode, and non-dual-stream batches all use BGMV."""
+    lora_context = SimpleNamespace(
+        w13_lora_a_stacked="w13_a",
+        w13_lora_b_stacked="w13_b",
+        w2_lora_a_stacked="w2_a",
+        w2_lora_b_stacked="w2_b",
+        fully_sharded=False,
+        aux_stream=object() if has_aux_stream else None,
+    )
+    mlp_input = _make_input(
+        lora_context=lora_context,
+    )
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+    activated = torch.ones(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 0]))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(
+            f"{QUANT_MOE}.MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED",
+            fast_path_enabled,
+        ),
+        patch(
+            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+            side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
+        ),
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(f"{QUANT_MOE}._can_use_single_lora_gmm", return_value=True) as can_single,
+        patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=False),
+        patch(f"{QUANT_MOE}._build_single_lora_gmm_routing") as build_routing,
+        patch(f"{QUANT_MOE}._add_single_lora_gmm") as add_gmm,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing) as recover,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = is_decode_only
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    can_single.assert_not_called()
+    build_routing.assert_not_called()
+    add_gmm.assert_not_called()
+    recover.assert_called_once()
+    apply_w13.assert_called_once()
+    apply_w2.assert_called_once()
+
+
+def test_dynamic_int8_uses_sideband_slots_routing_when_dispatched() -> None:
+    """When the dispatcher carried LoRA slots through the init-routing
+    sideband, the compute side rebuilds routing from those slots instead of
+    the scatter-based recovery."""
+    lora_context = SimpleNamespace(
+        w13_lora_a_stacked="w13_a",
+        w13_lora_b_stacked="w13_b",
+        w2_lora_a_stacked="w2_a",
+        w2_lora_b_stacked="w2_b",
+        fully_sharded=False,
+    )
+    routed_lora_slots = torch.tensor([0, -1], dtype=torch.long)
+    mlp_input = _make_input(
+        lora_context=lora_context,
+        routed_lora_slots=routed_lora_slots,
+    )
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+    activated = torch.ones(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 0]))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(
+            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+            side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
+        ),
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(f"{QUANT_MOE}._can_use_single_lora_gmm", return_value=False) as can_single,
+        patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=False) as can_composite,
+        patch(
+            f"{QUANT_MOE}._recover_moe_lora_routing_from_slots",
+            return_value=routing,
+        ) as recover_slots,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather") as recover_allgather,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    can_single.assert_not_called()
+    can_composite.assert_called_once()
+    recover_slots.assert_called_once_with(routed_lora_slots, mlp_input.group_list)
+    recover_allgather.assert_not_called()
+    apply_w13.assert_called_once()
+    assert apply_w13.call_args.kwargs["lora_routing"] is routing
+    apply_w2.assert_called_once()
+    assert apply_w2.call_args.kwargs["lora_routing"] is routing
 
 
 def test_dynamic_int8_allows_single_and_composite_lora_gmm_fast_paths_for_ep() -> None:

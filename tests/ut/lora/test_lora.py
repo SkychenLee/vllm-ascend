@@ -10,6 +10,7 @@ from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
+    _recover_moe_lora_routing_from_slots,
     has_lora,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
@@ -97,18 +98,21 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
         tp_rank=0,
     )
     routing = (torch.tensor([0]), torch.tensor([0]))
+    bgmv_lora_indices = torch.tensor([0])
 
     moe_lora_apply_w13(
         context,
         gate_up_out="gate_up_out",
         hidden_states="hidden_states",
         lora_routing=routing,
+        bgmv_lora_indices=bgmv_lora_indices,
     )
     moe_lora_apply_w2(
         context,
         down_out="down_out",
         silu_out="silu_out",
         lora_routing=routing,
+        bgmv_lora_indices=bgmv_lora_indices,
     )
 
     calls = punica_wrapper.add_lora_fused_moe.call_args_list
@@ -116,7 +120,46 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
     assert calls[1].kwargs["adapter_enabled"] == "all_enabled"
     assert calls[0].kwargs["fully_sharded"] is False
     assert calls[1].kwargs["fully_sharded"] is False
+    assert calls[0].kwargs["bgmv_lora_indices"] is bgmv_lora_indices
+    assert calls[1].kwargs["bgmv_lora_indices"] is bgmv_lora_indices
     assert calls[1].kwargs["offset"] == 0
+
+
+def test_prepare_fused_moe_lora_indices_encodes_and_masks_rows() -> None:
+    indices = PunicaWrapperNPU.prepare_fused_moe_lora_indices(
+        expert_ids=torch.tensor([1, 0, 1, 0]),
+        token_lora_mapping=torch.tensor([0, 1, -1, 2]),
+        adapter_enabled=torch.tensor([1, 0, 1]),
+        num_experts=2,
+    )
+
+    # slot 0/expert 1 -> 1; disabled slot 1 and base row -> -1;
+    # slot 2/expert 0 -> 4.
+    assert torch.equal(indices, torch.tensor([1, -1, -1, 4]))
+    assert indices.is_contiguous()
+
+
+def test_punica_fused_moe_reuses_prepared_bgmv_indices() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.prepare_fused_moe_lora_indices = Mock(side_effect=AssertionError("must reuse prepared indices"))
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+    prepared_indices = torch.tensor([1, -1, 4, -1])
+
+    wrapper.add_lora_fused_moe(
+        y=torch.zeros(4, 5),
+        x=torch.zeros(4, 3),
+        lora_a_stacked=(torch.zeros(3, 2, 2, 3),),
+        lora_b_stacked=(torch.zeros(3, 2, 5, 2),),
+        expert_ids=torch.tensor([1, 0, 0, 1]),
+        adapter_enabled=torch.tensor([1, 0, 1]),
+        token_lora_mapping=torch.tensor([0, -1, 2, -1]),
+        bgmv_lora_indices=prepared_indices,
+    )
+
+    wrapper.prepare_fused_moe_lora_indices.assert_not_called()
+    assert wrapper.bgmv_shrink.call_args.args[3] is prepared_indices
+    assert wrapper.bgmv_expand_slice.call_args.args[3] is prepared_indices
 
 
 def test_moe_lora_apply_propagates_fully_sharded_metadata() -> None:
@@ -315,16 +358,105 @@ def test_all2all_routing_handles_leading_and_consecutive_empty_experts() -> None
     assert torch.equal(lora_slots, torch.tensor([5, -1, 2]))
 
 
+def test_allgather_routing_float32_experiment_keeps_both_branches_correct() -> None:
+    """The float32 abs() experiment must not change either branch's output.
+
+    The source must compute the mapping in float32; the EP branch converts
+    only the scatter destination to long (scatter_add_ needs an integer
+    index), and the no-EP branch argsorts the float32 mapping directly.
+    """
+    source = inspect.getsource(_recover_moe_lora_routing_allgather)
+    assert "expanded_row_idx.to(torch.float32).abs()" in source
+    assert "expanded_row_idx.to(torch.long).abs()" not in source
+
+    # No-EP branch: full permutation inverted via argsort over float32.
+    context = SimpleNamespace(
+        top_k=2,
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([0, -1, 1])),
+    )
+    topk_ids = torch.tensor([[1, 0], [0, 1], [1, 1]])
+    expanded_row_idx = torch.tensor([2, 0, 1, 3, 4, 5])
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_allgather(context, expanded_row_idx, topk_ids)
+
+    assert torch.equal(expert_ids, torch.tensor([0, 0, 1, 1, 1, 1]))
+    assert torch.equal(lora_slots, torch.tensor([0, -1, 0, -1, 1, 1]))
+
+    # EP branch: scatter destinations must be long even with float32 mapping.
+    context = SimpleNamespace(
+        top_k=2,
+        allgather_lora_indices=torch.tensor([1, 2]),
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([9, 9])),
+    )
+    topk_ids = torch.tensor([[0, 2], [3, 1]])
+    expanded_row_idx = torch.tensor([-1, 0, 1, -1])
+    expert_map = torch.tensor([-1, -1, 0, 1])
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_allgather(
+        context,
+        expanded_row_idx,
+        topk_ids,
+        expert_map=expert_map,
+    )
+
+    assert torch.equal(expert_ids, torch.tensor([0, 1, 0, 0]))
+    assert torch.equal(lora_slots, torch.tensor([1, 2, -1, -1]))
+
+
+def test_routing_from_slots_recovers_experts_and_masks_tail() -> None:
+    # 3 local experts with counts [2, 0, 3]: expert 1 is empty so row 2
+    # belongs to expert 2, and only rows 0..4 are valid local rows. The
+    # final 3 sideband entries are undefined non-local EP tail garbage.
+    routed_lora_slots = torch.tensor([1, 1, 0, 2, 2, 99, 99, 99], dtype=torch.long)
+    group_list = torch.tensor([2, 0, 3], dtype=torch.int64)
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_from_slots(routed_lora_slots, group_list)
+
+    assert torch.equal(expert_ids, torch.tensor([0, 0, 2, 2, 2, 0, 0, 0]))
+    assert torch.equal(lora_slots, torch.tensor([1, 1, 0, 2, 2, -1, -1, -1]))
+
+
+def test_routing_from_slots_handles_leading_and_inner_empty_experts() -> None:
+    routed_lora_slots = torch.tensor([5, -1, 2], dtype=torch.long)
+    group_list = torch.tensor([0, 2, 0, 1], dtype=torch.int64)
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_from_slots(routed_lora_slots, group_list)
+
+    assert torch.equal(expert_ids, torch.tensor([1, 1, 3]))
+    assert torch.equal(lora_slots, torch.tensor([5, -1, 2]))
+
+
+def test_routing_from_slots_all_invalid_tail() -> None:
+    # Empty EP rank: every count is zero, so every sideband row is garbage.
+    routed_lora_slots = torch.tensor([7, 7, 7], dtype=torch.long)
+    group_list = torch.zeros(4, dtype=torch.int64)
+
+    expert_ids, lora_slots = _recover_moe_lora_routing_from_slots(routed_lora_slots, group_list)
+
+    assert torch.equal(expert_ids, torch.tensor([0, 0, 0]))
+    assert torch.equal(lora_slots, torch.tensor([-1, -1, -1]))
+
+
 @pytest.mark.parametrize(
     "routing_fn",
     [
         preprocess_lora_indices,
         _recover_moe_lora_routing_allgather,
         _recover_moe_lora_routing_all2all,
+        _recover_moe_lora_routing_from_slots,
     ],
 )
 def test_moe_lora_routing_does_not_use_repeat_interleave(routing_fn) -> None:
     assert ".repeat_interleave(" not in inspect.getsource(routing_fn)
+
+
+def test_moe_lora_routing_from_slots_avoids_dynamic_indexing() -> None:
+    source = inspect.getsource(_recover_moe_lora_routing_from_slots)
+    # The helper must be free of any tensor subscripting, slicing, gather or
+    # scatter style ops, and host syncs. ".size(0)" replaces ".shape[0]" so a
+    # plain "[" scan over the source is a valid static check.
+    for banned in ("[", ".scatter", ".index_select", ".item(", ".gather("):
+        assert banned not in source
 
 
 def test_has_lora_follows_batch_metadata() -> None:

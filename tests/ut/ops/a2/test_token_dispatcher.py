@@ -544,6 +544,7 @@ def test_allgather_w8a8_single_lora_routes_slots_without_scatter() -> None:
     lora_context = SimpleNamespace(
         use_ep=True,
         fully_sharded=False,
+        aux_stream=object(),
         top_k=6,
         allgather_lora_indices=token_lora_slots,
         punica_wrapper=SimpleNamespace(
@@ -593,6 +594,22 @@ def test_allgather_w8a8_single_lora_routes_slots_without_scatter() -> None:
 
     with (
         patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED",
+            True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_forward_context",
+            return_value=SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=True)),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._EXTRA_CTX",
+            SimpleNamespace(is_decode_only=False),
+        ),
+        patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
             return_value=SimpleNamespace(rank_in_group=0),
         ),
@@ -617,6 +634,261 @@ def test_allgather_w8a8_single_lora_routes_slots_without_scatter() -> None:
             )
         ),
     )
+
+
+def test_allgather_w8a8_single_lora_slots_disabled_without_dual_stream() -> None:
+    """Without a dual-stream context, prefill must not route GMM metadata."""
+    dispatcher = TokenDispatcherWithAllGather(
+        top_k=6,
+        num_experts=2,
+        num_local_experts=1,
+    )
+    num_tokens = 3
+    hidden_size = 4
+    num_routed_rows = num_tokens * dispatcher.top_k
+    token_lora_slots = torch.tensor([2, -1, 2], dtype=torch.long)
+    lora_context = SimpleNamespace(
+        use_ep=True,
+        fully_sharded=False,
+        top_k=6,
+        allgather_lora_indices=token_lora_slots,
+        punica_wrapper=SimpleNamespace(
+            no_lora=False,
+            num_active_moe_loras=1,
+            active_moe_lora_slot=2,
+        ),
+        max_loras=3,
+        single_lora_cache_slot=2,
+        w13_lora_a_stacked=(torch.zeros(3, 1, 16, hidden_size, dtype=torch.bfloat16),),
+        w13_lora_b_stacked=(torch.zeros(3, 1, 3, 16, dtype=torch.bfloat16),),
+        w2_lora_a_stacked=(torch.zeros(3, 1, 16, 3, dtype=torch.bfloat16),),
+        w2_lora_b_stacked=(torch.zeros(3, 1, hidden_size, 16, dtype=torch.bfloat16),),
+        w13_lora_a_packed=(torch.zeros(1, 16, hidden_size, dtype=torch.bfloat16),),
+        w13_lora_b_packed=(torch.zeros(1, 3, 16, dtype=torch.bfloat16),),
+        w2_lora_a_packed=(torch.zeros(1, 16, 3, dtype=torch.bfloat16),),
+        w2_lora_b_packed=(torch.zeros(1, hidden_size, 16, dtype=torch.bfloat16),),
+    )
+    dispatcher.set_lora_context(lora_context)
+
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
+    topk_ids = torch.tensor(
+        [[0, 1, 0, 1, 0, 1]] * num_tokens,
+        dtype=torch.int32,
+    )
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(num_tokens, dispatcher.top_k),
+        topk_ids=topk_ids,
+        expert_map=torch.tensor([0, -1], dtype=torch.int32),
+        quant_type=QuantType.W8A8,
+    )
+
+    init_routing_output = (
+        torch.randn(num_routed_rows, hidden_size, dtype=torch.bfloat16),
+        torch.arange(num_routed_rows, dtype=torch.int32),
+        torch.tensor([num_routed_rows], dtype=torch.int32),
+        torch.ones(num_routed_rows),
+    )
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED",
+            True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_single_lora_gmm",
+            return_value=True,
+        ) as can_prepare_single,
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    can_prepare_single.assert_not_called()
+    assert mock_init_routing.call_args.kwargs["scale"] is None
+    assert output.routed_lora_slots is None
+
+
+def _build_regular_sideband_fixture():
+    """Shared fixture for the regular decode-only dual-stream sideband gate."""
+    dispatcher = TokenDispatcherWithAllGather(
+        top_k=6,
+        num_experts=2,
+        num_local_experts=1,
+    )
+    num_tokens = 3
+    hidden_size = 4
+    num_routed_rows = num_tokens * dispatcher.top_k
+    # Rank-local state says no LoRA on this rank; the batch descriptor still
+    # reports has_lora=True because another EP rank carries LoRA tokens.
+    token_lora_slots = torch.tensor([1, -1, 1], dtype=torch.long)
+    lora_context = SimpleNamespace(
+        use_ep=True,
+        fully_sharded=False,
+        allgather_lora_indices=token_lora_slots,
+        aux_stream=object(),
+        punica_wrapper=SimpleNamespace(
+            no_lora=True,
+            num_active_moe_loras=1,
+            active_moe_lora_slot=0,
+        ),
+        max_loras=3,
+        single_lora_cache_slot=0,
+        w13_lora_a_stacked=(torch.zeros(3, 1, 16, hidden_size, dtype=torch.bfloat16),),
+        w13_lora_b_stacked=(torch.zeros(3, 1, 3, 16, dtype=torch.bfloat16),),
+        w2_lora_a_stacked=(torch.zeros(3, 1, 16, 3, dtype=torch.bfloat16),),
+        w2_lora_b_stacked=(torch.zeros(3, 1, hidden_size, 16, dtype=torch.bfloat16),),
+    )
+    dispatcher.set_lora_context(lora_context)
+
+    hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
+    topk_ids = torch.tensor(
+        [[0, 1, 0, 1, 0, 1]] * num_tokens,
+        dtype=torch.int32,
+    )
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(num_tokens, dispatcher.top_k),
+        topk_ids=topk_ids,
+        expert_map=torch.tensor([0, -1], dtype=torch.int32),
+        quant_type=QuantType.W8A8,
+    )
+
+    expanded_scale = torch.arange(num_routed_rows, dtype=torch.float32)
+    init_routing_output = (
+        torch.randn(num_routed_rows, hidden_size, dtype=torch.bfloat16),
+        torch.arange(num_routed_rows, dtype=torch.int32),
+        torch.tensor([num_routed_rows], dtype=torch.int32),
+        expanded_scale,
+    )
+    return dispatcher, token_dispatch_input, init_routing_output, token_lora_slots
+
+
+def test_allgather_w8a8_regular_sideband_routes_slots_for_decode_dual_stream() -> None:
+    dispatcher, token_dispatch_input, init_routing_output, token_lora_slots = _build_regular_sideband_fixture()
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_forward_context",
+            return_value=SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=True)),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_config",
+            return_value=SimpleNamespace(enable_moe_lora_dual_stream=True),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._EXTRA_CTX",
+            SimpleNamespace(is_decode_only=True),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_single_lora_gmm",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_composite_lora_gmm",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    routing_scale = mock_init_routing.call_args.kwargs["scale"]
+    assert torch.equal(routing_scale, token_lora_slots.to(torch.float32))
+    assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
+    # The regular path forwards the expert-major sideband as-is; the compute
+    # side masks the non-local tail.
+    assert torch.equal(output.routed_lora_slots, init_routing_output[3].to(torch.long))
+
+
+@pytest.mark.parametrize(
+    ("batch_descriptor", "is_decode_only", "dual_stream", "expect_sideband"),
+    [
+        # Batch without LoRA: no sideband even in decode dual-stream mode.
+        (
+            SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=False)),
+            True,
+            True,
+            False,
+        ),
+        # Prefill / mixed batch: single-stream ordering, no sideband.
+        (
+            SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=True)),
+            False,
+            True,
+            False,
+        ),
+        # Dual-stream disabled: original recovery path.
+        (
+            SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=True)),
+            True,
+            False,
+            False,
+        ),
+    ],
+)
+def test_allgather_w8a8_regular_sideband_fallbacks(
+    batch_descriptor,
+    is_decode_only,
+    dual_stream,
+    expect_sideband,
+) -> None:
+    dispatcher, token_dispatch_input, init_routing_output, token_lora_slots = _build_regular_sideband_fixture()
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_forward_context",
+            return_value=batch_descriptor,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_config",
+            return_value=SimpleNamespace(enable_moe_lora_dual_stream=dual_stream),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._EXTRA_CTX",
+            SimpleNamespace(is_decode_only=is_decode_only),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_single_lora_gmm",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_composite_lora_gmm",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    assert mock_init_routing.call_args.kwargs["scale"] is None
+    assert output.routed_lora_slots is None
 
 
 def test_allgather_w8a8_composite_lora_routes_slots_for_ep() -> None:
