@@ -37,6 +37,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
+    _recover_moe_lora_routing_from_slots,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
     reset_lora_indices,
@@ -71,6 +72,13 @@ class _SingleLoraGMMRouting:
 _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
 
 MOE_LORA_GMM_MIN_ROWS_PER_GROUP = 8
+
+# Temporary dual-stream benchmark isolation: force the single-adapter
+# expert-grouped GMM fast path off at both the AllGather token-dispatcher and
+# the MLP compute call sites so A/B runs measure dual-stream overlap on the
+# regular LoRA path only. The eligibility helpers keep their original
+# semantics so the fast-path unit tests stay valid.
+MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED = False
 
 
 def register_quant_moe_lora_impl(
@@ -589,7 +597,7 @@ def _apply_dynamic_int8_moe_lora(
     use_single_lora_gmm = False
     use_composite_lora_gmm = False
     if comm_type == MoECommType.ALLGATHER:
-        use_single_lora_gmm = _can_use_single_lora_gmm(
+        use_single_lora_gmm = MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED and _can_use_single_lora_gmm(
             lora_context,
             hidden_states=hidden_states,
             group_list=mlp_compute_input.group_list,
@@ -630,6 +638,20 @@ def _apply_dynamic_int8_moe_lora(
                 lora_context,
                 routed_lora_slots=mlp_compute_input.routed_lora_slots,
                 group_list=mlp_compute_input.group_list,
+            )
+        elif (
+            comm_type == MoECommType.ALLGATHER
+            and mlp_compute_input.routed_lora_slots is not None
+            and mlp_compute_input.routed_lora_slots.numel() == hidden_states.shape[0]
+        ):
+            # The dispatcher routed the per-token LoRA slot through the
+            # init-routing scale sideband (decode-only dual-stream regular
+            # path, or a fast GMM path whose compute-side eligibility did not
+            # hold). Rebuild routing from the expert-major sideband with
+            # static-shape ops instead of the scatter-based recovery.
+            lora_routing = _recover_moe_lora_routing_from_slots(
+                mlp_compute_input.routed_lora_slots,
+                mlp_compute_input.group_list,
             )
         elif comm_type == MoECommType.ALLGATHER:
             lora_routing = _recover_moe_lora_routing_allgather(

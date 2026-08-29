@@ -27,9 +27,10 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
@@ -40,6 +41,7 @@ from vllm_ascend.lora.fused_moe import (
     preprocess_lora_indices,
 )
 from vllm_ascend.lora.quant_moe import (
+    MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED,
     _can_prepare_composite_lora_gmm,
     _can_prepare_single_lora_gmm,
     validate_quant_moe_lora_activation_input,
@@ -427,12 +429,16 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
-        route_single_lora_slots = quant_type == QuantType.W8A8 and _can_prepare_single_lora_gmm(
-            self.lora_context,
-            num_routed_rows=num_tokens * self.top_k,
-            num_experts=self.num_experts_local,
-            group_list_type=1,
-            expert_map=expert_map,
+        route_single_lora_slots = (
+            MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
+            and quant_type == QuantType.W8A8
+            and _can_prepare_single_lora_gmm(
+                self.lora_context,
+                num_routed_rows=num_tokens * self.top_k,
+                num_experts=self.num_experts_local,
+                group_list_type=1,
+                expert_map=expert_map,
+            )
         )
         route_composite_lora_slots = (
             quant_type == QuantType.W8A8
@@ -446,7 +452,30 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 expert_map=expert_map,
             )
         )
-        route_lora_slots = route_single_lora_slots or route_composite_lora_slots
+        # Regular decode-only dual-stream sideband: when neither fast GMM
+        # path can run, still let init-routing carry the per-token LoRA slot
+        # so the compute side rebuilds routing from the expert-major sideband
+        # instead of the scatter-based recovery. The batch descriptor's
+        # has_lora is identical on every EP rank (unlike rank-local punica
+        # state), so all ranks produce the same sideband shape; fall back to
+        # the rank-local signal only when no descriptor is available.
+        batch_descriptor = get_forward_context().batch_descriptor if is_forward_context_available() else None
+        if batch_descriptor is not None:
+            batch_has_lora = batch_descriptor.has_lora
+        else:
+            batch_has_lora = has_lora(self.lora_context)
+        route_regular_lora_slots = (
+            quant_type == QuantType.W8A8
+            and not route_single_lora_slots
+            and not route_composite_lora_slots
+            and expert_map is not None
+            and self.lora_context is not None
+            and getattr(self.lora_context, "aux_stream", None) is not None
+            and get_ascend_config().enable_moe_lora_dual_stream
+            and _EXTRA_CTX.is_decode_only is True
+            and batch_has_lora
+        )
+        route_lora_slots = route_single_lora_slots or route_composite_lora_slots or route_regular_lora_slots
         routing_scale = dynamic_scale
         if route_lora_slots:
             if dynamic_scale is not None or quant_mode != -1:
@@ -454,6 +483,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             # In non-quant mode init-routing copies this per-token FP32
             # sideband into expert-major order. Carrying the slot itself keeps
             # both the active/base mask and adapter selection free of scatter.
+            # The [:num_tokens] slice is a zero-copy view, not an NPU kernel.
             routing_scale = (
                 get_allgather_lora_indices(self.lora_context)[:num_tokens].to(dtype=torch.float32).contiguous()
             )
@@ -482,20 +512,27 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                     f"{tuple(routed_scale.shape)} for routed activations "
                     f"{tuple(sorted_hidden_states.shape)}."
                 )
-            # active_expert_range leaves the non-local tail undefined. Mask it
-            # by the contiguous valid-row prefix instead of scattering local
-            # expert flags through expanded_row_idx.
-            row_ids = torch.arange(
-                routed_scale.shape[0],
-                dtype=expert_tokens.dtype,
-                device=routed_scale.device,
-            )
-            valid_rows = row_ids < expert_tokens.sum()
-            routed_lora_slots = torch.where(
-                valid_rows,
-                routed_scale.to(torch.long),
-                torch.full_like(row_ids, -1),
-            )
+            if route_regular_lora_slots:
+                # The compute-side helper masks the undefined non-local tail
+                # of this same expert-major sideband, so the dispatcher only
+                # converts the exact-shape view to long here. The reshape
+                # above is a zero-copy view, not an NPU kernel.
+                routed_lora_slots = routed_scale.to(torch.long)
+            else:
+                # active_expert_range leaves the non-local tail undefined. Mask it
+                # by the contiguous valid-row prefix instead of scattering local
+                # expert flags through expanded_row_idx.
+                row_ids = torch.arange(
+                    routed_scale.shape[0],
+                    dtype=expert_tokens.dtype,
+                    device=routed_scale.device,
+                )
+                valid_rows = row_ids < expert_tokens.sum()
+                routed_lora_slots = torch.where(
+                    valid_rows,
+                    routed_scale.to(torch.long),
+                    torch.full_like(row_ids, -1),
+                )
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,

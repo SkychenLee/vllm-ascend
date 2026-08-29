@@ -224,7 +224,11 @@ def _recover_moe_lora_routing_allgather(
     keep static shapes and avoid ``.item()`` or other host synchronization.
     """
     top_k = lora_context.top_k
-    expanded = expanded_row_idx.to(torch.long).abs()
+    # Performance experiment: keep the abs() mapping in float32 so the no-EP
+    # argsort below sorts float values directly. The EP branch converts only
+    # the scatter destination to long, since scatter_add_ requires an integer
+    # index tensor.
+    expanded = expanded_row_idx.to(torch.float32).abs()
     flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
     token_lora_indices = get_allgather_lora_indices(lora_context)
 
@@ -237,7 +241,7 @@ def _recover_moe_lora_routing_allgather(
         # overwrite a valid local row.
         local_expert_ids = expert_map[flat_expert_ids].to(torch.long)
         is_local = local_expert_ids >= 0
-        destination = expanded.clamp_(max=max(flat_expert_ids.numel() - 1, 0))
+        destination = expanded.to(torch.long).clamp_(max=max(flat_expert_ids.numel() - 1, 0))
 
         encoded_expert_ids = torch.where(
             is_local,
@@ -268,6 +272,46 @@ def _recover_moe_lora_routing_allgather(
     orig_token = inv_perm // top_k
     orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
     lora_per_row = token_lora_indices[orig_token]
+    return expert_per_row, lora_per_row
+
+
+def _recover_moe_lora_routing_from_slots(
+    routed_lora_slots: torch.Tensor,
+    group_list: torch.Tensor,
+):
+    """Recover per-row (expert_id, lora_slot) from init-routing sideband slots.
+
+    ``routed_lora_slots`` is the expert-major per-routed-row LoRA slot sideband
+    produced by ``npu_moe_init_routing`` (carried through the routing ``scale``
+    input); rows past the local valid prefix hold undefined garbage because
+    ``active_expert_range`` only guarantees the local prefix. ``group_list``
+    holds per-local-expert row counts (count mode).
+
+    Every intermediate has a static shape, no tensor indexing, no gather or
+    scatter, and no host synchronization, so this stays ACLGraph-capturable.
+    Invalid tail rows resolve to expert 0 / lora -1, which
+    ``add_lora_fused_moe`` skips via its -1 sentinel.
+    """
+    group_counts = group_list.to(torch.long)
+    expert_ends = torch.cumsum(group_counts, dim=0)
+    valid_count = group_counts.sum()
+    num_rows = routed_lora_slots.size(0)
+    row_ids = torch.arange(num_rows, dtype=torch.long, device=routed_lora_slots.device)
+    # searchsorted with right=True returns, for each row id, the number of
+    # expert ends at or before it -- exactly the owning expert index. Empty
+    # experts share an end and are skipped for free.
+    expert_ids = torch.searchsorted(expert_ends, row_ids, right=True)
+    valid_rows = row_ids < valid_count
+    expert_per_row = torch.where(
+        valid_rows,
+        expert_ids.clamp_max_(group_counts.numel() - 1),
+        torch.zeros_like(row_ids),
+    )
+    lora_per_row = torch.where(
+        valid_rows,
+        routed_lora_slots,
+        torch.full_like(routed_lora_slots, -1),
+    )
     return expert_per_row, lora_per_row
 
 
