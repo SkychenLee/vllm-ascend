@@ -608,7 +608,7 @@ def _apply_dynamic_int8_moe_lora(
                 routed_lora_slots=mlp_compute_input.routed_lora_slots,
             )
         )
-        if not use_single_lora_gmm:
+        if not use_single_lora_gmm and _EXTRA_CTX.is_decode_only is False:
             use_composite_lora_gmm = _can_use_composite_lora_gmm(
                 lora_context,
                 hidden_states=hidden_states,

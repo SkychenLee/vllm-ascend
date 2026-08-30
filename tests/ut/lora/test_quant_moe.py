@@ -570,7 +570,8 @@ def test_dynamic_int8_uses_sideband_slots_routing_when_dispatched() -> None:
         patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
         patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
         patch(f"{QUANT_MOE}._can_use_single_lora_gmm", return_value=False) as can_single,
-        patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=False) as can_composite,
+        patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=True) as can_composite,
+        patch(f"{QUANT_MOE}._build_composite_lora_gmm_routing") as build_composite_routing,
         patch(
             f"{QUANT_MOE}._recover_moe_lora_routing_from_slots",
             return_value=routing,
@@ -580,10 +581,12 @@ def test_dynamic_int8_uses_sideband_slots_routing_when_dispatched() -> None:
         patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = True
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
     can_single.assert_not_called()
-    can_composite.assert_called_once()
+    can_composite.assert_not_called()
+    build_composite_routing.assert_not_called()
     recover_slots.assert_called_once_with(routed_lora_slots, mlp_input.group_list)
     recover_allgather.assert_not_called()
     apply_w13.assert_called_once()
@@ -714,6 +717,7 @@ def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:
         patch(f"{QUANT_MOE}.reset_lora_indices") as reset_indices,
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = False
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
     build_routing.assert_called_once_with(

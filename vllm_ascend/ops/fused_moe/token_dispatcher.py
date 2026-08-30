@@ -429,14 +429,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
-        batch_descriptor = get_forward_context().batch_descriptor if is_forward_context_available() else None
+        if is_forward_context_available():
+            batch_descriptor = get_forward_context().batch_descriptor
+            is_decode_only = _EXTRA_CTX.is_decode_only
+        else:
+            batch_descriptor = None
+            is_decode_only = None
         route_single_lora_slots = (
             MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
             and quant_type == QuantType.W8A8
             and self.lora_context is not None
             and getattr(self.lora_context, "aux_stream", None) is not None
             and batch_descriptor is not None
-            and _EXTRA_CTX.is_decode_only is False
+            and is_decode_only is False
             and _can_prepare_single_lora_gmm(
                 self.lora_context,
                 num_routed_rows=num_tokens * self.top_k,
@@ -448,6 +453,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         route_composite_lora_slots = (
             quant_type == QuantType.W8A8
             and not route_single_lora_slots
+            and is_decode_only is False
             and _can_prepare_composite_lora_gmm(
                 self.lora_context,
                 hidden_dtype=hidden_states.dtype,
@@ -476,7 +482,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             and self.lora_context is not None
             and getattr(self.lora_context, "aux_stream", None) is not None
             and get_ascend_config().enable_moe_lora_dual_stream
-            and _EXTRA_CTX.is_decode_only is True
+            and is_decode_only is True
             and batch_has_lora
         )
         route_lora_slots = route_single_lora_slots or route_composite_lora_slots or route_regular_lora_slots

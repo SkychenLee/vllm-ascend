@@ -796,8 +796,8 @@ def test_allgather_w8a8_regular_sideband_routes_slots_for_decode_dual_stream() -
         ),
         patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_composite_lora_gmm",
-            return_value=False,
-        ),
+            return_value=True,
+        ) as can_prepare_composite,
         patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
             return_value=SimpleNamespace(rank_in_group=0),
@@ -810,6 +810,7 @@ def test_allgather_w8a8_regular_sideband_routes_slots_for_decode_dual_stream() -
         output = dispatcher.token_dispatch(token_dispatch_input)
 
     routing_scale = mock_init_routing.call_args.kwargs["scale"]
+    can_prepare_composite.assert_not_called()
     assert torch.equal(routing_scale, token_lora_slots.to(torch.float32))
     assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
     # The regular path forwards the expert-major sideband as-is; the compute
@@ -948,6 +949,18 @@ def test_allgather_w8a8_composite_lora_routes_slots_for_ep() -> None:
     )
 
     with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_forward_context",
+            return_value=SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=True)),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._EXTRA_CTX",
+            SimpleNamespace(is_decode_only=False),
+        ),
         patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
             return_value=SimpleNamespace(rank_in_group=0),
