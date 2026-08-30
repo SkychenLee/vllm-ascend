@@ -217,8 +217,12 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_enable_sp,
         mock_get_forward_context,
     ):
-        mock_context = MagicMock()
-        mock_context.max_tokens_across_dp = 4
+        mock_context = SimpleNamespace(
+            batch_descriptor=SimpleNamespace(has_lora=True),
+            max_tokens_across_dp=4,
+            moe_lora_allgather_indices=None,
+            moe_lora_allgather_slots=None,
+        )
         mock_get_forward_context.return_value = mock_context
 
         mock_dp_group = MagicMock()
@@ -236,10 +240,17 @@ class TestPrepareAndFinalize(unittest.TestCase):
             )
         )
 
-        layer.prepare(torch.randn(3, 8), torch.randn(3, 2))
+        with patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context",
+            return_value=mock_context,
+        ):
+            layer.prepare(torch.randn(3, 8), torch.randn(3, 2))
 
         expected = torch.tensor([2, -1, 1, -1, 2, -1, 1, -1])
         self.assertTrue(torch.equal(layer.lora_context.allgather_lora_indices, expected))
+        self.assertTrue(torch.equal(layer.lora_context.allgather_lora_slots, expected.to(torch.float32)))
+        self.assertIs(layer.lora_context.allgather_lora_indices, mock_context.moe_lora_allgather_indices)
+        self.assertIs(layer.lora_context.allgather_lora_slots, mock_context.moe_lora_allgather_slots)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
@@ -250,9 +261,13 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_tp_rank,
         mock_tp_size,
     ):
-        mock_context = MagicMock()
-        mock_context.num_tokens = 2
-        mock_context.padded_num_tokens = 2
+        mock_context = SimpleNamespace(
+            batch_descriptor=SimpleNamespace(has_lora=True),
+            num_tokens=2,
+            padded_num_tokens=2,
+            moe_lora_allgather_indices=None,
+            moe_lora_allgather_slots=None,
+        )
         mock_get_forward_context.return_value = mock_context
 
         layer = PrepareAndFinalizeWithAllGather(self.moe_config)
@@ -275,6 +290,10 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 create=True,
             ),
             patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant") as dynamic_quant,
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context",
+                return_value=mock_context,
+            ),
         ):
             output = layer._prepare_with_ep_group(
                 hidden_states,
@@ -290,4 +309,119 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 layer.lora_context.allgather_lora_indices,
                 torch.tensor([-1, -1]),
             )
+        )
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_allgather_ep_w8a8_base_batch_uses_quantized_fast_path(
+        self,
+        mock_get_forward_context,
+        mock_tp_rank,
+        mock_tp_size,
+    ):
+        mock_context = SimpleNamespace(
+            batch_descriptor=SimpleNamespace(has_lora=False),
+            num_tokens=2,
+            padded_num_tokens=2,
+            moe_lora_allgather_indices=None,
+            moe_lora_allgather_slots=None,
+        )
+        mock_get_forward_context.return_value = mock_context
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        layer.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(
+                    no_lora=True,
+                    token_lora_indices=torch.tensor([-1, -1]),
+                ),
+                use_ep=True,
+            )
+        )
+        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+        quantized_hidden_states = torch.zeros(2, 8, dtype=torch.int8)
+        pertoken_scale = torch.ones(2, dtype=torch.float32)
+
+        with (
+            patch.object(
+                torch.ops.vllm,
+                "maybe_all_gather_and_maybe_unpad",
+                side_effect=lambda tensor, *args: tensor,
+                create=True,
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant",
+                return_value=(quantized_hidden_states, pertoken_scale),
+            ) as dynamic_quant,
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context",
+                return_value=mock_context,
+            ),
+        ):
+            output = layer._prepare_with_ep_group(
+                hidden_states,
+                torch.randn(2, 2),
+                quant_type=QuantType.W8A8,
+            )
+
+        dynamic_quant.assert_called_once_with(hidden_states)
+        self.assertIs(output.hidden_states, quantized_hidden_states)
+        self.assertIs(output.pertoken_scale, pertoken_scale)
+        self.assertFalse(hasattr(layer.lora_context, "allgather_lora_indices"))
+        self.assertFalse(hasattr(layer.lora_context, "allgather_lora_slots"))
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass", return_value=False)
+    def test_allgather_reuses_lora_metadata_across_moe_layers(
+        self,
+        mock_enable_sp_by_pass,
+        mock_enable_sp,
+    ):
+        mock_context = SimpleNamespace(
+            batch_descriptor=SimpleNamespace(has_lora=True),
+            max_tokens_across_dp=3,
+            moe_lora_allgather_indices=None,
+            moe_lora_allgather_slots=None,
+        )
+        mock_dp_group = MagicMock()
+        mock_dp_group.all_gather.side_effect = lambda tensor, dim: torch.cat([tensor, tensor], dim=dim)
+        self.moe_config.dp_size = 2
+        self.moe_config.dp_group = mock_dp_group
+
+        layers = [PrepareAndFinalizeWithAllGather(self.moe_config) for _ in range(2)]
+        for layer in layers:
+            layer.set_lora_context(
+                SimpleNamespace(
+                    punica_wrapper=SimpleNamespace(
+                        no_lora=False,
+                        token_lora_indices=torch.tensor([2, -1, 1]),
+                    ),
+                    use_ep=True,
+                )
+            )
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context",
+                return_value=mock_context,
+            ),
+            patch(
+                "vllm_ascend.ascend_forward_context.get_forward_context",
+                return_value=mock_context,
+            ),
+        ):
+            for layer in layers:
+                layer.prepare(torch.randn(3, 8), torch.randn(3, 2))
+
+        # Hidden states and router logits are gathered for both layers. LoRA
+        # metadata is gathered only by the first layer: 2 + 1 + 2 calls.
+        self.assertEqual(mock_dp_group.all_gather.call_count, 5)
+        self.assertIs(
+            layers[1].lora_context.allgather_lora_indices,
+            mock_context.moe_lora_allgather_indices,
+        )
+        self.assertIs(
+            layers[1].lora_context.allgather_lora_slots,
+            mock_context.moe_lora_allgather_slots,
         )

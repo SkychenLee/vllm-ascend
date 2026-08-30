@@ -35,7 +35,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
-    get_allgather_lora_indices,
+    get_allgather_lora_slots,
     has_lora,
     postprocess_lora_indices,
     preprocess_lora_indices,
@@ -435,8 +435,13 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         else:
             batch_descriptor = None
             is_decode_only = None
+        if batch_descriptor is not None:
+            batch_has_lora = batch_descriptor.has_lora
+        else:
+            batch_has_lora = has_lora(self.lora_context)
         route_single_lora_slots = (
-            MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
+            batch_has_lora
+            and MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
             and quant_type == QuantType.W8A8
             and self.lora_context is not None
             and getattr(self.lora_context, "aux_stream", None) is not None
@@ -451,7 +456,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             )
         )
         route_composite_lora_slots = (
-            quant_type == QuantType.W8A8
+            batch_has_lora
+            and quant_type == QuantType.W8A8
             and not route_single_lora_slots
             and is_decode_only is False
             and _can_prepare_composite_lora_gmm(
@@ -470,12 +476,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # has_lora is identical on every EP rank (unlike rank-local punica
         # state), so all ranks produce the same sideband shape; fall back to
         # the rank-local signal only when no descriptor is available.
-        if batch_descriptor is not None:
-            batch_has_lora = batch_descriptor.has_lora
-        else:
-            batch_has_lora = has_lora(self.lora_context)
         route_regular_lora_slots = (
-            quant_type == QuantType.W8A8
+            batch_has_lora
+            and quant_type == QuantType.W8A8
             and not route_single_lora_slots
             and not route_composite_lora_slots
             and expert_map is not None
@@ -483,7 +486,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             and getattr(self.lora_context, "aux_stream", None) is not None
             and get_ascend_config().enable_moe_lora_dual_stream
             and is_decode_only is True
-            and batch_has_lora
         )
         route_lora_slots = route_single_lora_slots or route_composite_lora_slots or route_regular_lora_slots
         routing_scale = dynamic_scale
@@ -493,10 +495,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             # In non-quant mode init-routing copies this per-token FP32
             # sideband into expert-major order. Carrying the slot itself keeps
             # both the active/base mask and adapter selection free of scatter.
-            # The [:num_tokens] slice is a zero-copy view, not an NPU kernel.
-            routing_scale = (
-                get_allgather_lora_indices(self.lora_context)[:num_tokens].to(dtype=torch.float32).contiguous()
-            )
+            # ``narrow`` is a zero-copy view. AllGather prepare creates the
+            # FP32 sideband once per forward, rather than once per MoE layer.
+            routing_scale = get_allgather_lora_slots(self.lora_context).narrow(0, 0, num_tokens)
 
         sorted_hidden_states, expanded_row_idx, expert_tokens, expanded_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,

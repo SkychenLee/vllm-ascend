@@ -346,15 +346,45 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     """
 
     def _clear_allgather_lora_indices(self) -> None:
-        if self.lora_context is not None and hasattr(self.lora_context, "allgather_lora_indices"):
-            delattr(self.lora_context, "allgather_lora_indices")
+        if self.lora_context is None:
+            return
+        for field in ("allgather_lora_indices", "allgather_lora_slots"):
+            if hasattr(self.lora_context, field):
+                delattr(self.lora_context, field)
 
     def _needs_allgather_lora_indices(self) -> bool:
+        if self.lora_context is None:
+            return False
+
+        # ``punica_wrapper.no_lora`` is rank-local, while BatchDescriptor is
+        # built from the global scheduled batch and is identical on every EP
+        # rank. A globally base-only batch must bypass metadata collectives and
+        # the LoRA-aware W8A8 path altogether.
+        batch_descriptor = getattr(get_forward_context(), "batch_descriptor", None)
+        batch_has_lora = getattr(batch_descriptor, "has_lora", None)
+        if batch_has_lora is not None:
+            return bool(batch_has_lora)
+
         # ``punica_wrapper.no_lora`` is rank-local. Every EP rank must join
-        # this metadata collective because another rank may carry LoRA tokens.
-        return self.lora_context is not None and (
-            getattr(self.lora_context, "use_ep", False) or not self.lora_context.punica_wrapper.no_lora
+        # this metadata collective when no global descriptor is available,
+        # because another rank may carry LoRA tokens.
+        return getattr(self.lora_context, "use_ep", False) or not self.lora_context.punica_wrapper.no_lora
+
+    def _get_cached_allgather_lora_metadata(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.lora_context is None:
+            return None, None
+        forward_context = get_forward_context()
+        return (
+            getattr(forward_context, "moe_lora_allgather_indices", None),
+            getattr(forward_context, "moe_lora_allgather_slots", None),
         )
+
+    def _cache_allgather_lora_metadata(self, lora_indices: torch.Tensor) -> torch.Tensor:
+        forward_context = get_forward_context()
+        lora_slots = lora_indices.to(dtype=torch.float32).contiguous()
+        forward_context.moe_lora_allgather_indices = lora_indices
+        forward_context.moe_lora_allgather_slots = lora_slots
+        return lora_slots
 
     def _get_local_lora_indices(self, num_tokens: int) -> torch.Tensor | None:
         if not self._needs_allgather_lora_indices():
@@ -380,9 +410,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         split_indices = self.lora_context.split_lora_indices
         return split_indices[:local_num_tokens]
 
-    def _set_allgather_lora_indices(self, lora_indices: torch.Tensor | None) -> None:
+    def _set_allgather_lora_indices(
+        self,
+        lora_indices: torch.Tensor | None,
+        lora_slots: torch.Tensor | None = None,
+    ) -> None:
         if lora_indices is not None:
             self.lora_context.allgather_lora_indices = lora_indices
+            if lora_slots is not None:
+                self.lora_context.allgather_lora_slots = lora_slots
 
     def prepare(
         self,
@@ -409,7 +445,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
         pertoken_scale = None
-        lora_indices = self._get_sp_lora_indices(hidden_states.shape[0])
+        cached_lora_indices, cached_lora_slots = self._get_cached_allgather_lora_metadata()
+        lora_indices = cached_lora_indices
+        gather_lora_indices = lora_indices is None and self._needs_allgather_lora_indices()
+        if gather_lora_indices:
+            lora_indices = self._get_sp_lora_indices(hidden_states.shape[0])
         # Quantized MoE LoRA needs the routed activations in BF16/FP16. Gather
         # them first and defer dynamic quantization to the local base GMM.
         if quant_type == QuantType.W8A8 and lora_indices is None:
@@ -428,7 +468,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
-        if lora_indices is not None:
+        if gather_lora_indices:
             lora_indices = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(lora_indices, True, True)
 
         # TODO(fuzhihong): To adapt to self.num_token in the all_gather_input_id_with_dp_group method,
@@ -452,17 +492,19 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                         if pertoken_scale.dim() == 1
                         else nn.functional.pad(pertoken_scale, (0, 0, 0, pad_size))
                     )
-                if lora_indices is not None:
+                if gather_lora_indices:
                     lora_indices = nn.functional.pad(lora_indices, (0, pad_size), value=-1)
 
             hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
             router_logits = get_pcp_group().all_gather(router_logits, dim=0)
             if pertoken_scale is not None:
                 pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
-            if lora_indices is not None:
+            if gather_lora_indices:
                 lora_indices = get_pcp_group().all_gather(lora_indices, dim=0)
 
-        self._set_allgather_lora_indices(lora_indices)
+        if gather_lora_indices:
+            cached_lora_slots = self._cache_allgather_lora_metadata(lora_indices)
+        self._set_allgather_lora_indices(lora_indices, cached_lora_slots)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
@@ -490,7 +532,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             MoEPrepareOutput with global tensors.
         """
         self.enable_shared_expert_dp = enable_shared_expert_dp
-        lora_indices = self._get_local_lora_indices(hidden_states.shape[0])
+        cached_lora_indices, cached_lora_slots = self._get_cached_allgather_lora_metadata()
+        lora_indices = cached_lora_indices
+        gather_lora_indices = lora_indices is None and self._needs_allgather_lora_indices()
+        if gather_lora_indices:
+            lora_indices = self._get_local_lora_indices(hidden_states.shape[0])
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -499,13 +545,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
-                if lora_indices is not None:
+                if gather_lora_indices:
                     lora_indices = nn.functional.pad(lora_indices, (0, pad_size), value=-1)
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
-            if lora_indices is not None:
+            if gather_lora_indices:
                 lora_indices = self.moe_config.dp_group.all_gather(lora_indices, 0)
 
         if self.moe_config.pcp_size > 1:
@@ -516,7 +562,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
-                if lora_indices is not None:
+                if gather_lora_indices:
                     lora_indices = nn.functional.pad(lora_indices, (0, pad_size), value=-1)
 
             hidden_states = get_pcp_group().all_gather(
@@ -527,10 +573,12 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
-            if lora_indices is not None:
+            if gather_lora_indices:
                 lora_indices = get_pcp_group().all_gather(lora_indices, dim=0)
 
-        self._set_allgather_lora_indices(lora_indices)
+        if gather_lora_indices:
+            cached_lora_slots = self._cache_allgather_lora_metadata(lora_indices)
+        self._set_allgather_lora_indices(lora_indices, cached_lora_slots)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,

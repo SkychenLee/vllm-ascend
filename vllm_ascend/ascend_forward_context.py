@@ -147,6 +147,11 @@ def set_ascend_forward_context(
 
         forward_context.in_profile_run = in_profile_run
         forward_context.is_decode_only = is_decode_only
+        # LoRA token metadata is identical for every MoE layer in a model
+        # forward. The AllGather backend populates these fields on the first
+        # layer and reuses them for the remaining layers.
+        forward_context.moe_lora_allgather_indices = None
+        forward_context.moe_lora_allgather_slots = None
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing

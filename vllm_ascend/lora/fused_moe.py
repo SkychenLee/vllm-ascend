@@ -33,6 +33,7 @@ from functools import cache
 
 import torch
 from torch import nn
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
@@ -50,6 +51,7 @@ _MOE_LORA_INDEX_FIELDS = (
     "permuted_lora_indices",
     "exchanged_lora_indices",
     "allgather_lora_indices",
+    "allgather_lora_slots",
 )
 
 _MAX_FUSED_DECODE_ROUTED_ROWS = 4096
@@ -65,7 +67,20 @@ def _get_moe_lora_aux_stream() -> torch.npu.Stream:
 
 def has_lora(lora_context) -> bool:
     """Return whether this rank must execute the LoRA-aware MoE path."""
-    return lora_context is not None and (
+    if lora_context is None:
+        return False
+
+    # ``punica_wrapper.no_lora`` is refreshed from rank-local token metadata.
+    # Prefer the global batch descriptor when available so every EP rank makes
+    # the same choice and a base-only request cannot enter the LoRA kernels
+    # merely because adapters are loaded in the server.
+    if is_forward_context_available():
+        batch_descriptor = getattr(get_forward_context(), "batch_descriptor", None)
+        batch_has_lora = getattr(batch_descriptor, "has_lora", None)
+        if batch_has_lora is not None:
+            return bool(batch_has_lora)
+
+    return (
         getattr(lora_context, "allgather_lora_indices", None) is not None or not lora_context.punica_wrapper.no_lora
     )
 
@@ -82,6 +97,19 @@ def get_allgather_lora_indices(lora_context) -> torch.Tensor:
     if gathered_indices is not None:
         return gathered_indices
     return lora_context.punica_wrapper.token_lora_indices
+
+
+def get_allgather_lora_slots(lora_context) -> torch.Tensor:
+    """Return FP32 LoRA slots aligned with AllGather input rows.
+
+    AllGather prepare caches this sideband once per model forward so every MoE
+    layer can feed init-routing without launching another integer-to-FP32 cast.
+    The fallback keeps non-AllGather callers and direct unit tests compatible.
+    """
+    gathered_slots = getattr(lora_context, "allgather_lora_slots", None)
+    if gathered_slots is not None:
+        return gathered_slots
+    return get_allgather_lora_indices(lora_context).to(dtype=torch.float32).contiguous()
 
 
 def prepare_lora_indices(

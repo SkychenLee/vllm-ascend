@@ -536,15 +536,29 @@ def test_moe_lora_routing_from_slots_avoids_dynamic_indexing() -> None:
 
 
 def test_has_lora_follows_batch_metadata() -> None:
-    assert not has_lora(None)
-    assert not has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)))
-    assert has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
-    assert has_lora(
-        SimpleNamespace(
-            allgather_lora_indices=torch.tensor([-1]),
-            punica_wrapper=SimpleNamespace(no_lora=True),
+    with patch("vllm_ascend.lora.fused_moe.is_forward_context_available", return_value=False):
+        assert not has_lora(None)
+        assert not has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True)))
+        assert has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
+        assert has_lora(
+            SimpleNamespace(
+                allgather_lora_indices=torch.tensor([-1]),
+                punica_wrapper=SimpleNamespace(no_lora=True),
+            )
         )
-    )
+
+
+@pytest.mark.parametrize("batch_has_lora", [False, True])
+def test_has_lora_prefers_global_batch_descriptor(batch_has_lora: bool) -> None:
+    rank_local_active_context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
+    with (
+        patch("vllm_ascend.lora.fused_moe.is_forward_context_available", return_value=True),
+        patch(
+            "vllm_ascend.lora.fused_moe.get_forward_context",
+            return_value=SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=batch_has_lora)),
+        ),
+    ):
+        assert has_lora(rank_local_active_context) is batch_has_lora
 
 
 @pytest.mark.parametrize(
