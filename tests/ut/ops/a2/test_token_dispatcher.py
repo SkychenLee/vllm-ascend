@@ -815,7 +815,8 @@ def test_allgather_w8a8_regular_sideband_routes_slots_for_decode_dual_stream() -
     assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
     # The regular path forwards the expert-major sideband as-is; the compute
     # side masks the non-local tail.
-    assert torch.equal(output.routed_lora_slots, init_routing_output[3].to(torch.long))
+    assert output.routed_lora_slots.data_ptr() == init_routing_output[3].data_ptr()
+    assert output.routed_lora_slots.dtype == torch.float32
 
 
 @pytest.mark.parametrize(

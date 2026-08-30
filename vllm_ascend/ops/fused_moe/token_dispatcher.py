@@ -524,10 +524,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 )
             if route_regular_lora_slots:
                 # The compute-side helper masks the undefined non-local tail
-                # of this same expert-major sideband, so the dispatcher only
-                # converts the exact-shape view to long here. The reshape
-                # above is a zero-copy view, not an NPU kernel.
-                routed_lora_slots = routed_scale.to(torch.long)
+                # of this same expert-major sideband. Keep init-routing's
+                # FP32 output unchanged here: decode converts and combines it
+                # into the final int64 BGMV index on the auxiliary stream,
+                # removing a cast kernel from the dispatcher/main stream.
+                routed_lora_slots = routed_scale
             else:
                 # active_expert_range leaves the non-local tail undefined. Mask it
                 # by the contiguous valid-row prefix instead of scattering local

@@ -16,6 +16,21 @@
 import torch
 
 
+def moe_lora_prepare_bgmv_indices(
+    routed_lora_slots: torch.Tensor,
+    group_list: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.empty_like(routed_lora_slots, dtype=torch.int64)
+    torch.ops._C_ascend.moe_lora_prepare_bgmv_indices(
+        routed_lora_slots,
+        group_list,
+        adapter_enabled,
+        output,
+    )
+    return output
+
+
 def bgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,

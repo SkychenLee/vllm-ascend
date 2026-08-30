@@ -67,6 +67,9 @@ namespace {
 
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
+constexpr int64_t MAX_MOE_LORA_DECODE_ROUTED_ROWS = 4096;
+constexpr int64_t MAX_MOE_LORA_LOCAL_EXPERTS = 256;
+constexpr int64_t MAX_MOE_LORA_SLOTS = 256;
 
 struct DevicePrintPayload {
     std::string message;
@@ -311,6 +314,59 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     } else {
         return AscendType::FP16;
     }
+}
+
+void moe_lora_prepare_bgmv_indices(at::Tensor &routed_lora_slots, at::Tensor &group_list,
+                                   at::Tensor &adapter_enabled, at::Tensor &output)
+{
+    TORCH_CHECK(routed_lora_slots.scalar_type() == torch::kFloat,
+                "routed_lora_slots must be float32");
+    TORCH_CHECK(group_list.scalar_type() == torch::kLong, "group_list must be int64");
+    TORCH_CHECK(adapter_enabled.scalar_type() == torch::kInt,
+                "adapter_enabled must be int32");
+    TORCH_CHECK(output.scalar_type() == torch::kLong, "output must be int64");
+    TORCH_CHECK(routed_lora_slots.dim() == 1 && group_list.dim() == 1 &&
+                    adapter_enabled.dim() == 1 && output.dim() == 1,
+                "all inputs and output must be one-dimensional");
+    TORCH_CHECK(output.size(0) == routed_lora_slots.size(0),
+                "output and routed_lora_slots must have the same length");
+    TORCH_CHECK(routed_lora_slots.is_contiguous() && group_list.is_contiguous() &&
+                    adapter_enabled.is_contiguous() && output.is_contiguous(),
+                "all inputs and output must be contiguous");
+    TORCH_CHECK(adapter_enabled.numel() > 0, "adapter_enabled must not be empty");
+    TORCH_CHECK(output.numel() <= MAX_MOE_LORA_DECODE_ROUTED_ROWS,
+                "moe_lora_prepare_bgmv_indices supports at most ",
+                MAX_MOE_LORA_DECODE_ROUTED_ROWS,
+                " decode routed rows");
+    TORCH_CHECK(group_list.numel() <= MAX_MOE_LORA_LOCAL_EXPERTS,
+                "moe_lora_prepare_bgmv_indices supports at most ",
+                MAX_MOE_LORA_LOCAL_EXPERTS,
+                " local experts");
+    TORCH_CHECK(adapter_enabled.numel() <= MAX_MOE_LORA_SLOTS,
+                "moe_lora_prepare_bgmv_indices supports at most ", MAX_MOE_LORA_SLOTS,
+                " LoRA slots");
+    if (output.numel() == 0) {
+        return;
+    }
+
+    void* routed_lora_slots_ptr = routed_lora_slots.data_ptr();
+    void* group_list_ptr = group_list.data_ptr();
+    void* adapter_enabled_ptr = adapter_enabled.data_ptr();
+    void* output_ptr = output.data_ptr();
+    uint32_t num_rows = output.size(0);
+    uint32_t num_experts = group_list.size(0);
+    uint32_t num_loras = adapter_enabled.size(0);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("moe_lora_prepare_bgmv_indices");
+    cmd.SetCustomHandler([stream, routed_lora_slots_ptr, group_list_ptr, adapter_enabled_ptr,
+                          output_ptr, num_rows, num_experts, num_loras]() -> int {
+        moe_lora_prepare_bgmv_indices_impl(stream, routed_lora_slots_ptr, group_list_ptr,
+                                           adapter_enabled_ptr, output_ptr, num_rows,
+                                           num_experts, num_loras);
+        return 0;
+    });
+    cmd.Run();
 }
 
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
@@ -2126,6 +2182,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
+    ops.def(
+        "moe_lora_prepare_bgmv_indices(Tensor routed_lora_slots, Tensor group_list, "
+        "Tensor adapter_enabled, Tensor! output) -> ()");
+    ops.impl("moe_lora_prepare_bgmv_indices", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prepare_bgmv_indices);
+
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 

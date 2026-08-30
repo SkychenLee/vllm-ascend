@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
+    _prepare_moe_lora_bgmv_indices_from_slots,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     _recover_moe_lora_routing_from_slots,
@@ -648,15 +649,25 @@ def _apply_dynamic_int8_moe_lora(
             and mlp_compute_input.routed_lora_slots is not None
             and mlp_compute_input.routed_lora_slots.numel() == hidden_states.shape[0]
         ):
-            # The dispatcher routed the per-token LoRA slot through the
-            # init-routing scale sideband (decode-only dual-stream regular
-            # path, or a fast GMM path whose compute-side eligibility did not
-            # hold). Rebuild routing from the expert-major sideband with
-            # static-shape ops instead of the scatter-based recovery.
-            lora_routing = _recover_moe_lora_routing_from_slots(
-                mlp_compute_input.routed_lora_slots,
-                mlp_compute_input.group_list,
-            )
+            if defer_allgather_lora_routing:
+                # Decode dual-stream consumes only the final BGMV index. Build
+                # it directly from dispatch counts/slots on the auxiliary
+                # stream instead of materializing and recombining two routing
+                # tensors.
+                bgmv_lora_indices = _prepare_moe_lora_bgmv_indices_from_slots(
+                    mlp_compute_input.routed_lora_slots,
+                    mlp_compute_input.group_list,
+                    lora_context.adapter_enabled,
+                    getattr(lora_context, "moe_lora_expert_ids_with_tail", None),
+                )
+            else:
+                # Non-decode fallback still exposes the generic two-tensor
+                # routing contract used by the regular Punica path.
+                lora_routing = _recover_moe_lora_routing_from_slots(
+                    mlp_compute_input.routed_lora_slots,
+                    mlp_compute_input.group_list,
+                    getattr(lora_context, "moe_lora_expert_ids_with_tail", None),
+                )
         elif comm_type == MoECommType.ALLGATHER:
             lora_routing = _recover_moe_lora_routing_allgather(
                 lora_context,
@@ -674,7 +685,7 @@ def _apply_dynamic_int8_moe_lora(
         # the auxiliary stream while the base W13 GMM is in flight. Prepare
         # the BGMV gather index once here and reuse it for W13 and W2 instead
         # of rebuilding it inside both LoRA applications.
-        if defer_allgather_lora_routing and lora_routing is not None:
+        if defer_allgather_lora_routing and lora_routing is not None and bgmv_lora_indices is None:
             expert_per_row, lora_per_row = lora_routing
             bgmv_lora_indices = lora_context.punica_wrapper.prepare_fused_moe_lora_indices(
                 expert_ids=expert_per_row,
@@ -713,7 +724,7 @@ def _apply_dynamic_int8_moe_lora(
                 fully_sharded=lora_context.fully_sharded,
             )
         else:
-            assert lora_routing is not None
+            assert lora_routing is not None or bgmv_lora_indices is not None
             moe_lora_apply_w13(
                 lora_context,
                 gate_up_out=output,
@@ -832,7 +843,7 @@ def _apply_dynamic_int8_moe_lora(
             )
             reset_lora_indices(lora_context)
         else:
-            assert lora_routing is not None
+            assert lora_routing is not None or bgmv_lora_indices is not None
             moe_lora_apply_w2(
                 lora_context,
                 down_out=output,

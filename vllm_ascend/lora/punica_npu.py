@@ -400,7 +400,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         *,
         topk_weights: torch.Tensor | None = None,
         sorted_token_ids: torch.Tensor | None = None,
-        expert_ids: torch.Tensor,
+        expert_ids: torch.Tensor | None,
         num_tokens_post_padded: torch.Tensor | None = None,
         max_lora_rank: int = 0,
         top_k_num: int = 1,
@@ -446,6 +446,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y2d = y.view(-1, y.shape[-1])
         num_experts = lora_a_stacked[0].shape[1]
         if bgmv_lora_indices is None:
+            if expert_ids is None:
+                raise AssertionError("MoE LoRA requires expert_ids when BGMV indices are not precomputed.")
             bgmv_lora_indices = self.prepare_fused_moe_lora_indices(
                 expert_ids=expert_ids,
                 token_lora_mapping=token_lora_mapping,

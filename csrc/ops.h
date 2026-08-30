@@ -24,6 +24,16 @@
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {
+  extern void moe_lora_prepare_bgmv_indices_impl(
+        void *stream,
+        void *routed_lora_slots,
+        void *group_list,
+        void *adapter_enabled,
+        void *output,
+        uint32_t num_rows,
+        uint32_t num_experts,
+        uint32_t num_loras);
+
   extern void bgmv_shrink_impl(
         AscendType type,
         void *stream,

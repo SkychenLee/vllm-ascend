@@ -4,10 +4,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+import torch_npu  # noqa: F401 -- registers torch.npu and NPU operators
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
+    _expand_moe_lora_expert_ids_from_counts,
+    _prepare_moe_lora_bgmv_indices_from_slots,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
     _recover_moe_lora_routing_from_slots,
@@ -97,21 +100,18 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
         fully_sharded=False,
         tp_rank=0,
     )
-    routing = (torch.tensor([0]), torch.tensor([0]))
     bgmv_lora_indices = torch.tensor([0])
 
     moe_lora_apply_w13(
         context,
         gate_up_out="gate_up_out",
         hidden_states="hidden_states",
-        lora_routing=routing,
         bgmv_lora_indices=bgmv_lora_indices,
     )
     moe_lora_apply_w2(
         context,
         down_out="down_out",
         silu_out="silu_out",
-        lora_routing=routing,
         bgmv_lora_indices=bgmv_lora_indices,
     )
 
@@ -122,6 +122,8 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
     assert calls[1].kwargs["fully_sharded"] is False
     assert calls[0].kwargs["bgmv_lora_indices"] is bgmv_lora_indices
     assert calls[1].kwargs["bgmv_lora_indices"] is bgmv_lora_indices
+    assert calls[0].kwargs["expert_ids"] is None
+    assert calls[1].kwargs["expert_ids"] is None
     assert calls[1].kwargs["offset"] == 0
 
 
@@ -407,7 +409,12 @@ def test_routing_from_slots_recovers_experts_and_masks_tail() -> None:
     # 3 local experts with counts [2, 0, 3]: expert 1 is empty so row 2
     # belongs to expert 2, and only rows 0..4 are valid local rows. The
     # final 3 sideband entries are undefined non-local EP tail garbage.
-    routed_lora_slots = torch.tensor([1, 1, 0, 2, 2, 99, 99, 99], dtype=torch.long)
+    # Match npu_moe_init_routing's FP32 scale sideband. The helper performs
+    # the only conversion to the int64 type consumed by BGMV.
+    routed_lora_slots = torch.tensor(
+        [1, 1, 0, 2, 2, float("nan"), float("inf"), float("-inf")],
+        dtype=torch.float32,
+    )
     group_list = torch.tensor([2, 0, 3], dtype=torch.int64)
 
     expert_ids, lora_slots = _recover_moe_lora_routing_from_slots(routed_lora_slots, group_list)
@@ -437,17 +444,86 @@ def test_routing_from_slots_all_invalid_tail() -> None:
     assert torch.equal(lora_slots, torch.tensor([-1, -1, -1]))
 
 
+def test_prepare_bgmv_indices_from_slots_combines_and_masks_once() -> None:
+    routed_lora_slots = torch.tensor([1, 1, 0, 2, 2, 99, 99, 99], dtype=torch.long)
+    group_list = torch.tensor([2, 0, 3], dtype=torch.int64)
+    adapter_enabled = torch.tensor([1, 0, 1], dtype=torch.bool)
+    expert_ids_with_tail = torch.tensor([0, 1, 2, -1], dtype=torch.long)
+
+    indices = _prepare_moe_lora_bgmv_indices_from_slots(
+        routed_lora_slots,
+        group_list,
+        adapter_enabled,
+        expert_ids_with_tail,
+    )
+
+    # Slot 1 is disabled, slot 0/expert 2 maps to 2, slot 2/expert 2 maps
+    # to 8, and the undefined non-local tail is masked before adapter lookup.
+    assert torch.equal(indices, torch.tensor([-1, -1, 2, 8, 8, -1, -1, -1]))
+    assert indices.dtype == torch.int64
+    assert indices.is_contiguous()
+
+
+@pytest.mark.skipif(torch.npu.is_available() is not True, reason="requires an Ascend NPU")
+def test_prepare_bgmv_indices_from_slots_supports_dynamic_aclgraph_replay() -> None:
+    device = torch.device("npu:0")
+    routed_lora_slots = torch.full((8,), 99, dtype=torch.float32, device=device)
+    group_list = torch.zeros(3, dtype=torch.int64, device=device)
+    adapter_enabled = torch.tensor([1, 0, 1], dtype=torch.int32, device=device)
+    expert_ids_with_tail = torch.tensor([0, 1, 2, -1], dtype=torch.long, device=device)
+
+    def prepare_indices() -> torch.Tensor:
+        return _prepare_moe_lora_bgmv_indices_from_slots(
+            routed_lora_slots,
+            group_list,
+            adapter_enabled,
+            expert_ids_with_tail,
+        )
+
+    prepare_indices()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        graph_output = prepare_indices()
+
+    variants = (
+        ([2, 0, 3], [1, 1, 0, 2, 2, float("nan"), float("inf"), float("-inf")]),
+        ([0, 2, 0], [2, 0, float("nan"), float("inf"), float("-inf"), 99, 99, 99]),
+        ([0, 0, 0], [float("nan"), float("inf"), float("-inf"), 99, 99, 99, 99, 99]),
+    )
+    for counts, slots in variants:
+        group_list.copy_(torch.tensor(counts, dtype=torch.int64, device=device))
+        routed_lora_slots.copy_(torch.tensor(slots, dtype=torch.float32, device=device))
+        graph.replay()
+        torch.npu.synchronize()
+        actual = graph_output.cpu().clone()
+        expected = _prepare_moe_lora_bgmv_indices_from_slots(
+            routed_lora_slots,
+            group_list,
+            adapter_enabled.bool(),
+            expert_ids_with_tail,
+        ).cpu()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "routing_fn",
     [
         preprocess_lora_indices,
         _recover_moe_lora_routing_allgather,
         _recover_moe_lora_routing_all2all,
-        _recover_moe_lora_routing_from_slots,
     ],
 )
 def test_moe_lora_routing_does_not_use_repeat_interleave(routing_fn) -> None:
     assert ".repeat_interleave(" not in inspect.getsource(routing_fn)
+
+
+def test_slot_routing_repeat_interleave_has_static_output_size() -> None:
+    source = inspect.getsource(_expand_moe_lora_expert_ids_from_counts)
+    assert "torch.repeat_interleave(" in source
+    assert "output_size=num_rows" in source
+    assert ".searchsorted(" not in source
+    assert ".cumsum(" not in source
 
 
 def test_moe_lora_routing_from_slots_avoids_dynamic_indexing() -> None:

@@ -587,12 +587,80 @@ def test_dynamic_int8_uses_sideband_slots_routing_when_dispatched() -> None:
     can_single.assert_not_called()
     can_composite.assert_not_called()
     build_composite_routing.assert_not_called()
-    recover_slots.assert_called_once_with(routed_lora_slots, mlp_input.group_list)
+    recover_slots.assert_called_once_with(routed_lora_slots, mlp_input.group_list, None)
     recover_allgather.assert_not_called()
     apply_w13.assert_called_once()
     assert apply_w13.call_args.kwargs["lora_routing"] is routing
     apply_w2.assert_called_once()
     assert apply_w2.call_args.kwargs["lora_routing"] is routing
+
+
+def test_dynamic_int8_decode_sideband_builds_bgmv_indices_directly_on_aux_stream() -> None:
+    lora_context = _make_gmm_lora_context(use_ep=True)
+    lora_context.aux_stream = object()
+    lora_context.events = tuple(object() for _ in range(4))
+    lora_context.moe_lora_expert_ids_with_tail = torch.tensor([0, 1, -1])
+    routed_lora_slots = torch.tensor([0, -1], dtype=torch.long)
+    mlp_input = _make_input(
+        lora_context=lora_context,
+        routed_lora_slots=routed_lora_slots,
+    )
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.zeros(2, 6, dtype=torch.bfloat16)
+    activated = torch.ones(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
+    prepared_indices = torch.tensor([0, -1], dtype=torch.long)
+
+    quant_results = iter(
+        [
+            (quantized_input, input_scale),
+            (quantized_activated, activated_scale),
+        ]
+    )
+
+    def execute_parallel(base_fn, lora_fn, *_args, aux_prepare_fn=None):
+        if aux_prepare_fn is not None:
+            aux_prepare_fn()
+        output = base_fn()
+        lora_fn()
+        return output
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant", side_effect=lambda **_kwargs: next(quant_results)),
+        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(f"{QUANT_MOE}._can_use_ep_moe_lora_aux_stream", return_value=True),
+        patch(f"{QUANT_MOE}._execute_moe_lora_in_parallel", side_effect=execute_parallel),
+        patch(
+            f"{QUANT_MOE}._prepare_moe_lora_bgmv_indices_from_slots",
+            return_value=prepared_indices,
+        ) as prepare_slots,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_from_slots") as recover_slots,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather") as recover_allgather,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = True
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    prepare_slots.assert_called_once_with(
+        routed_lora_slots,
+        mlp_input.group_list,
+        lora_context.adapter_enabled,
+        lora_context.moe_lora_expert_ids_with_tail,
+    )
+    recover_slots.assert_not_called()
+    recover_allgather.assert_not_called()
+    assert apply_w13.call_args.kwargs["lora_routing"] is None
+    assert apply_w13.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
+    assert apply_w2.call_args.kwargs["lora_routing"] is None
+    assert apply_w2.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
 
 
 def test_dynamic_int8_allows_single_and_composite_lora_gmm_fast_paths_for_ep() -> None:

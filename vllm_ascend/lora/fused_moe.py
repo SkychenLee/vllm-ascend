@@ -41,6 +41,7 @@ from vllm.lora.layers.utils import _get_lora_device
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.lora.lora_ops import moe_lora_prepare_bgmv_indices
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -50,6 +51,10 @@ _MOE_LORA_INDEX_FIELDS = (
     "exchanged_lora_indices",
     "allgather_lora_indices",
 )
+
+_MAX_FUSED_DECODE_ROUTED_ROWS = 4096
+_MAX_FUSED_LOCAL_EXPERTS = 256
+_MAX_FUSED_LORA_SLOTS = 256
 
 
 @cache
@@ -275,9 +280,39 @@ def _recover_moe_lora_routing_allgather(
     return expert_per_row, lora_per_row
 
 
+def _expand_moe_lora_expert_ids_from_counts(
+    group_list: torch.Tensor,
+    num_rows: int,
+    expert_ids_with_tail: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Expand count-mode expert groups to a static-length row mapping.
+
+    ``output_size`` keeps ``repeat_interleave`` ACLGraph-safe even though the
+    individual expert counts change between decode steps.  A final ``-1``
+    group fills the non-local EP tail, so callers do not need ``cumsum``,
+    ``searchsorted``, or a separate row-id tensor.
+    """
+    group_counts = group_list.to(torch.long)
+    num_experts = group_counts.numel()
+    if expert_ids_with_tail is None:
+        expert_ids_with_tail = torch.cat(
+            (
+                torch.arange(num_experts, dtype=torch.long, device=group_list.device),
+                torch.full((1,), -1, dtype=torch.long, device=group_list.device),
+            )
+        )
+    tail_count = (num_rows - group_counts.sum()).view(1)
+    return torch.repeat_interleave(
+        expert_ids_with_tail,
+        torch.cat((group_counts, tail_count)),
+        output_size=num_rows,
+    )
+
+
 def _recover_moe_lora_routing_from_slots(
     routed_lora_slots: torch.Tensor,
     group_list: torch.Tensor,
+    expert_ids_with_tail: torch.Tensor | None = None,
 ):
     """Recover per-row (expert_id, lora_slot) from init-routing sideband slots.
 
@@ -287,32 +322,86 @@ def _recover_moe_lora_routing_from_slots(
     ``active_expert_range`` only guarantees the local prefix. ``group_list``
     holds per-local-expert row counts (count mode).
 
-    Every intermediate has a static shape, no tensor indexing, no gather or
-    scatter, and no host synchronization, so this stays ACLGraph-capturable.
-    Invalid tail rows resolve to expert 0 / lora -1, which
-    ``add_lora_fused_moe`` skips via its -1 sentinel.
+    ``repeat_interleave`` receives an explicit host-known output size, so its
+    result remains static across ACLGraph replays. Invalid tail rows resolve
+    to expert 0 / lora -1, which ``add_lora_fused_moe`` skips via its -1
+    sentinel.
     """
-    group_counts = group_list.to(torch.long)
-    expert_ends = torch.cumsum(group_counts, dim=0)
-    valid_count = group_counts.sum()
     num_rows = routed_lora_slots.size(0)
-    row_ids = torch.arange(num_rows, dtype=torch.long, device=routed_lora_slots.device)
-    # searchsorted with right=True returns, for each row id, the number of
-    # expert ends at or before it -- exactly the owning expert index. Empty
-    # experts share an end and are skipped for free.
-    expert_ids = torch.searchsorted(expert_ends, row_ids, right=True)
-    valid_rows = row_ids < valid_count
-    expert_per_row = torch.where(
-        valid_rows,
-        expert_ids.clamp_max_(group_counts.numel() - 1),
-        torch.zeros_like(row_ids),
+    expanded_expert_ids = _expand_moe_lora_expert_ids_from_counts(
+        group_list,
+        num_rows,
+        expert_ids_with_tail,
     )
+    valid_rows = expanded_expert_ids >= 0
+    expert_per_row = expanded_expert_ids.clamp_min(0)
     lora_per_row = torch.where(
         valid_rows,
         routed_lora_slots,
         torch.full_like(routed_lora_slots, -1),
     )
     return expert_per_row, lora_per_row
+
+
+def _prepare_moe_lora_bgmv_indices_from_slots(
+    routed_lora_slots: torch.Tensor,
+    group_list: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+    expert_ids_with_tail: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build the final ``(LoRA slot, expert)`` BGMV index in one pass.
+
+    Decode AllGather uses this instead of materializing separate expert and
+    LoRA row mappings and then combining them in Punica. The routed sideband's
+    undefined EP tail is clamped before the adapter lookup and masked by the
+    ``-1`` expert sentinel produced by the count expansion.
+    """
+    can_use_fused_kernel = (
+        routed_lora_slots.dtype == torch.float32
+        and group_list.dtype == torch.int64
+        and adapter_enabled.dtype == torch.int32
+        and routed_lora_slots.is_contiguous()
+        and group_list.is_contiguous()
+        and adapter_enabled.is_contiguous()
+        and routed_lora_slots.numel() <= _MAX_FUSED_DECODE_ROUTED_ROWS
+        and group_list.numel() <= _MAX_FUSED_LOCAL_EXPERTS
+        and adapter_enabled.numel() <= _MAX_FUSED_LORA_SLOTS
+        and hasattr(torch.ops._C_ascend, "moe_lora_prepare_bgmv_indices")
+    )
+    if can_use_fused_kernel:
+        return moe_lora_prepare_bgmv_indices(
+            routed_lora_slots,
+            group_list,
+            adapter_enabled,
+        )
+
+    num_rows = routed_lora_slots.size(0)
+    num_experts = group_list.numel()
+    expert_ids = _expand_moe_lora_expert_ids_from_counts(
+        group_list,
+        num_rows,
+        expert_ids_with_tail,
+    )
+    valid_rows = expert_ids >= 0
+    # active_expert_range leaves the non-local FP32 sideband undefined; it may
+    # contain NaN rather than an ordinary out-of-range number. Mask the tail
+    # before conversion so NaN cannot become INT64_MIN and index outside
+    # adapter_enabled.
+    local_lora_slots = torch.where(
+        valid_rows,
+        routed_lora_slots,
+        torch.zeros_like(routed_lora_slots),
+    )
+    safe_lora_slots = local_lora_slots.clamp(
+        min=0,
+        max=adapter_enabled.numel() - 1,
+    ).to(torch.long)
+    enabled = valid_rows & (local_lora_slots >= 0) & adapter_enabled[safe_lora_slots].bool()
+    return torch.where(
+        enabled,
+        safe_lora_slots * num_experts + expert_ids,
+        torch.full_like(expert_ids, -1),
+    ).contiguous()
 
 
 def _recover_moe_lora_routing_all2all(
@@ -370,7 +459,7 @@ def moe_lora_apply_w13(
     *,
     gate_up_out,
     hidden_states,
-    lora_routing,
+    lora_routing=None,
     bgmv_lora_indices: torch.Tensor | None = None,
 ):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
@@ -382,11 +471,19 @@ def moe_lora_apply_w13(
             caller via _recover_moe_lora_routing (AllGather) or
             _recover_moe_lora_routing_all2all (AlltoAll).
     """
-    expert_per_row, lora_per_row = lora_routing
+    if lora_routing is None:
+        if bgmv_lora_indices is None:
+            raise AssertionError("MoE LoRA requires recovered routing or prepared BGMV indices.")
+        expert_per_row = None
+        lora_per_row = None
+        row_indices = bgmv_lora_indices
+    else:
+        expert_per_row, lora_per_row = lora_routing
+        row_indices = expert_per_row
     # EP rank may receive 0 dispatched tokens when all tokens route to
     # experts on other ranks. Skip LoRA to avoid passing empty tensors
     # to add_lora_fused_moe (which can trigger NPU kernel crashes).
-    if expert_per_row.numel() == 0:
+    if row_indices.numel() == 0:
         return
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
@@ -406,7 +503,7 @@ def moe_lora_apply_w2(
     *,
     down_out,
     silu_out,
-    lora_routing,
+    lora_routing=None,
     bgmv_lora_indices: torch.Tensor | None = None,
 ):
     """Add the w2 LoRA delta into ``down_out`` (in place), after the down GMM.
@@ -414,10 +511,18 @@ def moe_lora_apply_w2(
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
     is the activation output that fed the base down GMM.
     """
-    expert_per_row, lora_per_row = lora_routing
+    if lora_routing is None:
+        if bgmv_lora_indices is None:
+            raise AssertionError("MoE LoRA requires recovered routing or prepared BGMV indices.")
+        expert_per_row = None
+        lora_per_row = None
+        row_indices = bgmv_lora_indices
+    else:
+        expert_per_row, lora_per_row = lora_routing
+        row_indices = expert_per_row
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
     # kernel crashes with empty tensors.
-    if expert_per_row.numel() == 0:
+    if row_indices.numel() == 0:
         return
     offset = 0
     if lora_context.fully_sharded:
@@ -525,6 +630,19 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             lora_context.w2_lora_b_packed,
         ) = packed_weights
         lora_context.single_lora_cache_slot = self._single_lora_cache_slot
+        # Decode routing expands count-mode local expert groups on every MoE
+        # layer. Keep the values (including the invalid-tail sentinel) at a
+        # stable device address so graph replay does not recreate arange/cat.
+        lora_context.moe_lora_expert_ids_with_tail = torch.cat(
+            (
+                torch.arange(
+                    self.local_num_experts,
+                    dtype=torch.long,
+                    device=self.device,
+                ),
+                torch.full((1,), -1, dtype=torch.long, device=self.device),
+            )
+        )
         return lora_context
 
     def create_lora_weights(self, max_loras, lora_config, model_config=None) -> None:
