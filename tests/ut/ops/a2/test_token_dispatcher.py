@@ -978,15 +978,11 @@ def test_allgather_w8a8_composite_lora_routes_slots_for_ep() -> None:
     assert torch.equal(routing_scale, token_lora_slots.to(torch.float32))
     assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
     assert output.dynamic_scale is None
-    assert torch.equal(
-        output.routed_lora_slots,
-        torch.cat(
-            (
-                valid_slots.to(torch.long),
-                torch.full((num_routed_rows - num_valid_rows,), -1),
-            )
-        ),
-    )
+    # Composite routing consumes the raw FP32 init-routing sideband and masks
+    # the undefined non-local tail together with group-ID/count generation.
+    assert output.routed_lora_slots.dtype == torch.float32
+    assert torch.equal(output.routed_lora_slots, expanded_slots)
+    assert torch.all(output.routed_lora_slots[num_valid_rows:] == 99.0)
 
 
 def test_allgather_bf16_lora_skips_quant_backend_validation():

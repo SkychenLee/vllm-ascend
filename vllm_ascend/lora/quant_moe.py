@@ -43,6 +43,7 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w13,
     reset_lora_indices,
 )
+from vllm_ascend.lora.lora_ops import moe_lora_prepare_composite_gmm_routing
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -73,6 +74,13 @@ class _SingleLoraGMMRouting:
 _QUANT_MOE_LORA_IMPLS: dict[QuantType, QuantMoELoRAImpl] = {}
 
 MOE_LORA_GMM_MIN_ROWS_PER_GROUP = 8
+# NPU microbenchmarks show that compacting the expert-parallel tail recovers
+# its device-to-host synchronization cost once the full permutation would move
+# at least 192 MiB. This only applies to large mixed-LoRA prefill batches.
+MOE_LORA_COMPACT_PERMUTE_MIN_BYTES = 192 * 1024 * 1024
+MAX_FUSED_COMPOSITE_ROUTED_ROWS = 262144
+MAX_FUSED_COMPOSITE_LOCAL_EXPERTS = 256
+MAX_FUSED_COMPOSITE_LORA_SLOTS = 256
 
 # Use expert-grouped LoRA only for large V1 prefill batches. Decode is kept on
 # the regular BGMV path so it can overlap with the base MoE on the auxiliary
@@ -382,6 +390,34 @@ def _build_composite_lora_gmm_routing(
     num_experts = group_list.numel()
     max_loras = lora_context.w13_lora_a_stacked[0].shape[0]
     num_groups = max_loras * num_experts
+    adapter_enabled = lora_context.adapter_enabled
+    fused_adapter_enabled = adapter_enabled[:max_loras]
+    can_use_fused_kernel = (
+        routed_lora_slots.dtype == torch.float32
+        and group_list.dtype == torch.int64
+        and adapter_enabled.dtype == torch.int32
+        and routed_lora_slots.is_contiguous()
+        and group_list.is_contiguous()
+        and fused_adapter_enabled.is_contiguous()
+        and adapter_enabled.numel() >= max_loras
+        and routed_lora_slots.numel() <= MAX_FUSED_COMPOSITE_ROUTED_ROWS
+        and num_experts <= MAX_FUSED_COMPOSITE_LOCAL_EXPERTS
+        and num_experts % 4 == 0
+        and max_loras <= MAX_FUSED_COMPOSITE_LORA_SLOTS
+        and hasattr(torch.ops._C_ascend, "moe_lora_prepare_composite_gmm_routing")
+    )
+    if can_use_fused_kernel:
+        group_ids, composite_group_list, enabled = moe_lora_prepare_composite_gmm_routing(
+            routed_lora_slots,
+            group_list,
+            fused_adapter_enabled,
+        )
+        return _CompositeLoraGMMRouting(
+            group_ids=group_ids,
+            group_list=composite_group_list,
+            enabled=enabled,
+        )
+
     row_ids = torch.arange(
         routed_lora_slots.shape[0],
         dtype=group_list.dtype,
@@ -394,8 +430,7 @@ def _build_composite_lora_gmm_routing(
         right=True,
     ).clamp_(max=num_experts - 1)
 
-    safe_lora_slots = routed_lora_slots.clamp(min=0, max=max_loras - 1)
-    adapter_enabled = lora_context.adapter_enabled
+    safe_lora_slots = routed_lora_slots.clamp(min=0, max=max_loras - 1).to(torch.long)
     enabled = valid_rows & (routed_lora_slots >= 0) & adapter_enabled[safe_lora_slots].bool()
 
     # Base, inactive-adapter, and non-local EP rows use a sentinel group so
@@ -517,10 +552,20 @@ def _add_composite_lora_gmm(
     output_offset: int = 0,
 ) -> None:
     """Add LoRA deltas with MoE-native token permutation."""
+    compact_permute = inputs.numel() * inputs.element_size() >= MOE_LORA_COMPACT_PERMUTE_MIN_BYTES
+    if compact_permute:
+        # Composite GMM is prefill-only. For large EP batches, the measured
+        # saving from not moving the non-local/sentinel tail exceeds this one
+        # device synchronization. Decode and smaller prefill never enter it.
+        num_out_tokens = int(routing.group_list.sum().item())
+        if num_out_tokens == 0:
+            return
+    else:
+        num_out_tokens = inputs.shape[0]
     grouped_inputs, reverse_mapping = torch_npu.npu_moe_token_permute(
         tokens=inputs,
         indices=routing.group_ids,
-        num_out_tokens=inputs.shape[0],
+        num_out_tokens=num_out_tokens,
     )
 
     current_output_offset = output_offset
@@ -539,7 +584,8 @@ def _add_composite_lora_gmm(
             permuted_tokens=delta,
             sorted_indices=reverse_mapping,
         )
-        delta.masked_fill_(~routing.enabled.unsqueeze(-1), 0)
+        if not compact_permute:
+            delta.masked_fill_(~routing.enabled.unsqueeze(-1), 0)
         output_size = delta.shape[-1]
         output.narrow(-1, current_output_offset, output_size).add_(delta)
         current_output_offset += output_size

@@ -522,12 +522,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                     f"{tuple(routed_scale.shape)} for routed activations "
                     f"{tuple(sorted_hidden_states.shape)}."
                 )
-            if route_regular_lora_slots:
-                # The compute-side helper masks the undefined non-local tail
-                # of this same expert-major sideband. Keep init-routing's
-                # FP32 output unchanged here: decode converts and combines it
-                # into the final int64 BGMV index on the auxiliary stream,
-                # removing a cast kernel from the dispatcher/main stream.
+            if route_regular_lora_slots or route_composite_lora_slots:
+                # The compute-side fused helpers mask the undefined non-local
+                # tail using the expert counts. Keep init-routing's FP32 output
+                # unchanged: decode produces the final BGMV index and composite
+                # prefill produces group IDs/counts without dispatcher-side
+                # arange/sum/cast/where kernels.
                 routed_lora_slots = routed_scale
             else:
                 # active_expert_range leaves the non-local tail undefined. Mask it

@@ -1134,6 +1134,71 @@ def test_build_composite_lora_gmm_routing_moves_nonlocal_ep_tail_to_sentinel() -
     assert torch.equal(routing.enabled, torch.tensor([False, True, False, False, False, False]))
 
 
+def test_build_composite_lora_gmm_routing_uses_fused_kernel() -> None:
+    context = SimpleNamespace(
+        adapter_enabled=torch.tensor([1, 0, 1, 0], dtype=torch.int32),
+        w13_lora_a_stacked=(torch.empty(3, 4, 16, 4),),
+    )
+    routed_lora_slots = torch.tensor(
+        [0.0, 2.0, -1.0, 0.0, 2.0, -1.0, 0.0, 2.0],
+        dtype=torch.float32,
+    )
+    group_list = torch.tensor([2, 2, 2, 2], dtype=torch.int64)
+    expected = (
+        torch.arange(8, dtype=torch.int32),
+        torch.arange(12, dtype=torch.int64),
+        torch.ones(8, dtype=torch.bool),
+    )
+
+    with (
+        patch.object(
+            torch.ops._C_ascend,
+            "moe_lora_prepare_composite_gmm_routing",
+            create=True,
+        ),
+        patch(
+            f"{QUANT_MOE}.moe_lora_prepare_composite_gmm_routing",
+            return_value=expected,
+        ) as prepare_routing,
+    ):
+        routing = _build_composite_lora_gmm_routing(
+            context,
+            routed_lora_slots=routed_lora_slots,
+            group_list=group_list,
+        )
+
+    prepare_routing.assert_called_once()
+    assert prepare_routing.call_args.args[0] is routed_lora_slots
+    assert prepare_routing.call_args.args[1] is group_list
+    assert torch.equal(prepare_routing.call_args.args[2], context.adapter_enabled[:3])
+    assert routing.group_ids is expected[0]
+    assert routing.group_list is expected[1]
+    assert routing.enabled is expected[2]
+
+
+def test_build_composite_lora_gmm_routing_falls_back_for_unsupported_shape() -> None:
+    context = SimpleNamespace(
+        adapter_enabled=torch.tensor([1, 1, 1], dtype=torch.int32),
+        w13_lora_a_stacked=(torch.empty(3, 2, 16, 4),),
+    )
+    routed_lora_slots = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
+    group_list = torch.tensor([2, 2], dtype=torch.int64)
+
+    with patch(
+        f"{QUANT_MOE}.moe_lora_prepare_composite_gmm_routing",
+    ) as prepare_routing:
+        routing = _build_composite_lora_gmm_routing(
+            context,
+            routed_lora_slots=routed_lora_slots,
+            group_list=group_list,
+        )
+
+    prepare_routing.assert_not_called()
+    assert torch.equal(routing.group_ids, torch.tensor([0, 2, 5, 6], dtype=torch.int32))
+    assert torch.equal(routing.group_list, torch.tensor([1, 0, 1, 0, 0, 1]))
+    assert torch.equal(routing.enabled, torch.tensor([True, True, True, False]))
+
+
 def test_composite_lora_gmm_reorders_masks_and_restores_rows() -> None:
     output = torch.zeros(3, 2)
     inputs = torch.tensor([[1.0], [2.0], [3.0]])
@@ -1186,6 +1251,51 @@ def test_composite_lora_gmm_reorders_masks_and_restores_rows() -> None:
     assert grouped_matmul.call_args_list[0].args[1].shape == (6, 16, 1)
     assert grouped_matmul.call_args_list[1].args[1].shape == (6, 2, 16)
     assert torch.equal(output, torch.tensor([[0.0, 0.0], [30.0, 31.0], [10.0, 11.0]]))
+
+
+def test_composite_lora_gmm_compacts_large_ep_tail() -> None:
+    output = torch.zeros(3, 2)
+    inputs = torch.tensor([[1.0], [2.0], [3.0]])
+    lora_a = (torch.zeros(3, 2, 16, 1),)
+    lora_b = (torch.zeros(3, 2, 2, 16),)
+    routing = _CompositeLoraGMMRouting(
+        group_ids=torch.tensor([6, 5, 0], dtype=torch.int32),
+        group_list=torch.tensor([1, 0, 0, 0, 0, 1]),
+        enabled=torch.tensor([False, True, True]),
+    )
+    grouped_inputs = torch.tensor([[3.0], [2.0]])
+    reverse_mapping = torch.tensor([1, 2, 0], dtype=torch.int32)
+    shrink = torch.zeros(2, 16)
+    delta = torch.tensor([[10.0, 11.0], [30.0, 31.0]])
+    restored_delta = torch.tensor([[0.0, 0.0], [30.0, 31.0], [10.0, 11.0]])
+
+    with (
+        patch(f"{QUANT_MOE}.MOE_LORA_COMPACT_PERMUTE_MIN_BYTES", 0),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_moe_token_permute",
+            return_value=(grouped_inputs, reverse_mapping),
+            create=True,
+        ) as token_permute,
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_moe_token_unpermute",
+            return_value=restored_delta,
+            create=True,
+        ),
+        patch(
+            f"{QUANT_MOE}._grouped_lora_matmul",
+            side_effect=[shrink, delta],
+        ),
+    ):
+        _add_composite_lora_gmm(
+            output,
+            inputs,
+            lora_a,
+            lora_b,
+            routing=routing,
+        )
+
+    assert token_permute.call_args.kwargs["num_out_tokens"] == 2
+    assert torch.equal(output, restored_delta)
 
 
 def test_single_lora_gmm_uses_packed_weights_and_adds_each_output_slice() -> None:

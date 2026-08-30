@@ -31,6 +31,30 @@ def moe_lora_prepare_bgmv_indices(
     return output
 
 
+def moe_lora_prepare_composite_gmm_routing(
+    routed_lora_slots: torch.Tensor,
+    group_list: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_groups = group_list.numel() * adapter_enabled.numel()
+    group_ids = torch.empty_like(routed_lora_slots, dtype=torch.int32)
+    composite_group_list = torch.empty(
+        num_groups,
+        dtype=torch.int64,
+        device=group_list.device,
+    )
+    enabled = torch.empty_like(routed_lora_slots, dtype=torch.bool)
+    torch.ops._C_ascend.moe_lora_prepare_composite_gmm_routing(
+        routed_lora_slots,
+        group_list,
+        adapter_enabled,
+        group_ids,
+        composite_group_list,
+        enabled,
+    )
+    return group_ids, composite_group_list, enabled
+
+
 def bgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,
