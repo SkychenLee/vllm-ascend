@@ -747,7 +747,7 @@ def _apply_dynamic_int8_moe_lora(
     if not defer_allgather_lora_routing:
         prepare_lora_routing()
 
-    def apply_w13_lora(output: torch.Tensor) -> None:
+    def apply_w13_lora(output: torch.Tensor, *, add_inputs: bool = True) -> None:
         if use_single_lora_gmm:
             assert single_lora_routing is not None
             _add_single_lora_gmm(
@@ -777,6 +777,7 @@ def _apply_dynamic_int8_moe_lora(
                 hidden_states=hidden_states,
                 lora_routing=lora_routing,
                 bgmv_lora_indices=bgmv_lora_indices,
+                add_inputs=add_inputs,
             )
 
     input_dtype = hidden_states.dtype
@@ -820,8 +821,7 @@ def _apply_dynamic_int8_moe_lora(
         lora_delta_w13 = lora_delta_workspace[..., :w13_output_size]
 
         def lora_w13_fn() -> None:
-            lora_delta_w13.zero_()
-            apply_w13_lora(lora_delta_w13)
+            apply_w13_lora(lora_delta_w13, add_inputs=False)
 
         w13_base_fn = base_w13_fn
         w13_aux_prepare_fn: Callable[[], None] | None = None
@@ -857,7 +857,7 @@ def _apply_dynamic_int8_moe_lora(
     if mlp_compute_input.topk_scales is not None:
         activated *= mlp_compute_input.topk_scales
 
-    def apply_w2_lora(output: torch.Tensor) -> None:
+    def apply_w2_lora(output: torch.Tensor, *, add_inputs: bool = True) -> None:
         output_offset = 0
         if lora_context.fully_sharded:
             output_offset = lora_context.w2_lora_b_stacked[0].shape[-2] * lora_context.tp_rank
@@ -896,6 +896,7 @@ def _apply_dynamic_int8_moe_lora(
                 silu_out=activated,
                 lora_routing=lora_routing,
                 bgmv_lora_indices=bgmv_lora_indices,
+                add_inputs=add_inputs,
             )
 
     def base_w2_fn() -> torch.Tensor:
@@ -929,8 +930,7 @@ def _apply_dynamic_int8_moe_lora(
         lora_delta_w2 = lora_delta_workspace[..., :w2_output_size]
 
         def lora_w2_fn() -> None:
-            lora_delta_w2.zero_()
-            apply_w2_lora(lora_delta_w2)
+            apply_w2_lora(lora_delta_w2, add_inputs=False)
 
         down_out = _execute_moe_lora_in_parallel(
             base_w2_fn,

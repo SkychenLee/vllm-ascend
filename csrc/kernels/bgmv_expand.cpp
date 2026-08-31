@@ -17,7 +17,7 @@
 #include "kernel_operator.h"
 #include "types.h"
 
-template <typename scalar_t>
+template <typename scalar_t, bool ADD_INPUTS>
 class BGMVExpand {
 public:
     using X_T = float;
@@ -74,12 +74,14 @@ public:
 
         pipe_->InitBuffer(inQueueX_, 1, NUM_ELEMENTS_PER_REPEAT * sizeof(X_T));
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, W_IN_TILE_NUM_ELEMENTS * sizeof(W_T));
-        pipe_->InitBuffer(inQueueY_, BUFFER_NUM, Y_OUT_TILE_NUM_ELEMENTS * sizeof(Y_T));
+        if constexpr (ADD_INPUTS) {
+            pipe_->InitBuffer(inQueueY_, BUFFER_NUM, Y_OUT_TILE_NUM_ELEMENTS * sizeof(Y_T));
+            pipe_->InitBuffer(inBufferY_, Y_OUT_TILE_NUM_ELEMENTS * sizeof(float));
+        }
         pipe_->InitBuffer(outQueueY_, BUFFER_NUM, Y_OUT_TILE_NUM_ELEMENTS * sizeof(Y_T));
 
         pipe_->InitBuffer(dupBufferX_, NUM_ELEMENTS_PER_REPEAT * sizeof(float));
         pipe_->InitBuffer(tmpBufferW_, W_IN_TILE_NUM_ELEMENTS * sizeof(float));
-        pipe_->InitBuffer(inBufferY_, Y_OUT_TILE_NUM_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(tmpBufferY_, Y_OUT_TILE_NUM_ELEMENTS * sizeof(float));
 
         // Each compute iteration would generate not one, but several output elements.
@@ -103,6 +105,9 @@ public:
             // Set up LoRA index
             CopyInIndex(idx);
             if (reqLoRAIndex_ < 0) {
+                if constexpr (!ADD_INPUTS) {
+                    ClearOutput();
+                }
                 continue;
             }
             reqLoRAWeightOffset_ = reqLoRAIndex_ * singleLoRAWeightLen_;
@@ -110,12 +115,14 @@ public:
             CopyInX(idx);
             int32_t numStreamOut = outputHiddenDim_ / Y_OUT_TILE_NUM_ELEMENTS;
             for (int32_t i = 0; i < numStreamOut; i++) {
-                CopyInY(i);
+                if constexpr (ADD_INPUTS) {
+                    CopyInY(i);
+                }
                 for (int32_t j = 0; j < numStreamInPerOutputTile_; j++) {
                     CopyInW(i * numStreamInPerOutputTile_ + j);
                     Compute(j * numOutputElementsPerInputTile_);
                 }
-                ScaleOutput();
+                FinalizeOutput();
                 CopyOut(i);
             }
             ComputeLastIteration();
@@ -123,6 +130,28 @@ public:
     }
 
 private:
+    __aicore__ inline void ClearOutput()
+    {
+        int32_t numStreamOut = outputHiddenDim_ / Y_OUT_TILE_NUM_ELEMENTS;
+        for (int32_t i = 0; i < numStreamOut; i++) {
+            EnqueueZeroOutput();
+            CopyOut(i);
+        }
+        int32_t remainingY = outputHiddenDim_ % Y_OUT_TILE_NUM_ELEMENTS;
+        if (remainingY != 0) {
+            EnqueueZeroOutput(remainingY);
+            CopyOut(numStreamOut, remainingY);
+        }
+    }
+
+    __aicore__ inline void EnqueueZeroOutput(int32_t numElements = Y_OUT_TILE_NUM_ELEMENTS)
+    {
+        AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.AllocTensor<Y_T>();
+        Duplicate(yOutLocal, static_cast<Y_T>(0), numElements);
+        AscendC::PipeBarrier<PIPE_V>();
+        outQueueY_.EnQue<Y_T>(yOutLocal);
+    }
+
     __aicore__ inline void CopyInIndex(const int64_t idx)
     {
         // Look up the LoRA index
@@ -140,7 +169,9 @@ private:
         int32_t numCompleteWTileInForLastIteration = remainingW / W_IN_TILE_NUM_ELEMENTS;
         int32_t remainingWForLastRepeat = remainingW % W_IN_TILE_NUM_ELEMENTS;
 
-        CopyInY(numStreamOut, remainingY);
+        if constexpr (ADD_INPUTS) {
+            CopyInY(numStreamOut, remainingY);
+        }
 
         int32_t outputIdx = 0;
         for (outputIdx = 0; outputIdx < numCompleteWTileInForLastIteration; outputIdx++) {
@@ -159,7 +190,7 @@ private:
             Compute(lastComputeOutputElement, lastRepeatCount, pairReduceRepeat16, pairReduceRepeat32);
         }
 
-        ScaleOutput(remainingY);
+        FinalizeOutput(remainingY);
         CopyOut(numStreamOut, remainingY);
     }
 
@@ -213,17 +244,19 @@ private:
         inQueueW_.EnQue(wLocal);
     }
 
-    __aicore__ inline void ScaleOutput(int32_t numElements = Y_OUT_TILE_NUM_ELEMENTS)
+    __aicore__ inline void FinalizeOutput(int32_t numElements = Y_OUT_TILE_NUM_ELEMENTS)
     {
         AscendC::LocalTensor<float> yLocal = tmpBufferY_.Get<float>();
-        AscendC::LocalTensor<Y_T> yInLocal = inQueueY_.DeQue<Y_T>();
-        AscendC::LocalTensor<float> yInLocalFP32 = inBufferY_.Get<float>();
-        Cast(yInLocalFP32, yInLocal, AscendC::RoundMode::CAST_NONE, numElements);
-        AscendC::PipeBarrier<PIPE_V>();
-        inQueueY_.FreeTensor(yInLocal);
+        if constexpr (ADD_INPUTS) {
+            AscendC::LocalTensor<Y_T> yInLocal = inQueueY_.DeQue<Y_T>();
+            AscendC::LocalTensor<float> yInLocalFP32 = inBufferY_.Get<float>();
+            Cast(yInLocalFP32, yInLocal, AscendC::RoundMode::CAST_NONE, numElements);
+            AscendC::PipeBarrier<PIPE_V>();
+            inQueueY_.FreeTensor(yInLocal);
 
-        Add(yLocal, yLocal, yInLocalFP32, numElements);
-        AscendC::PipeBarrier<PIPE_V>();
+            Add(yLocal, yLocal, yInLocalFP32, numElements);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
 
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.AllocTensor<Y_T>();
         Cast(yOutLocal, yLocal, AscendC::RoundMode::CAST_RINT, numElements);
@@ -326,40 +359,55 @@ private:
 
 };
 
-#define BGMV_EXPAND_TYPE_DECLARE(TYPE)                                                                                 \
-    extern "C" __global__ __aicore__ void bgmv_expand_##TYPE(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
-                                                             uint32_t indicesSize, __gm__ void* yIn, __gm__ void* yOut,\
-                                                             uint32_t batchSize, uint32_t numTokensPerCore,            \
-                                                             uint32_t maxLoRARank, uint32_t outputHiddenDim,           \
-                                                             uint32_t sliceOffset, uint32_t outputFullDim)             \
+#define BGMV_EXPAND_TYPE_DECLARE(TYPE, NAME, ADD_INPUTS)                                                              \
+    extern "C" __global__ __aicore__ void bgmv_expand_##NAME(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
+                                                             uint32_t indicesSize, __gm__ void* yIn, __gm__ void* yOut, \
+                                                             uint32_t batchSize, uint32_t numTokensPerCore,             \
+                                                             uint32_t maxLoRARank, uint32_t outputHiddenDim,            \
+                                                             uint32_t sliceOffset, uint32_t outputFullDim)              \
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
-        BGMVExpand<TYPE> op(&pipe);                                                                                    \
+        BGMVExpand<TYPE, ADD_INPUTS> op(&pipe);                                                                        \
         op.Init(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,                  \
                 outputHiddenDim, sliceOffset, outputFullDim);                                                          \
         op.Process();                                                                                                  \
     }
 
 // declare all dtype kernel
-BGMV_EXPAND_TYPE_DECLARE(half)
+BGMV_EXPAND_TYPE_DECLARE(half, half, true)
+BGMV_EXPAND_TYPE_DECLARE(half, overwrite_half, false)
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
+    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t, bfloat16_t, true)
+    BGMV_EXPAND_TYPE_DECLARE(bfloat16_t, overwrite_bfloat16_t, false)
 #endif
 
 namespace vllm_ascend {
 extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* yIn, void* yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
-                             uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
+                             uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim, bool addInputs)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore,
-                                                        maxLoRARank, outputHiddenDim, sliceOffset, outputFullDim);
+        if (addInputs) {
+            bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
+                                                            numTokensPerCore, maxLoRARank, outputHiddenDim, sliceOffset,
+                                                            outputFullDim);
+        } else {
+            bgmv_expand_overwrite_half<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank, outputHiddenDim,
+                sliceOffset, outputFullDim);
+        }
     } else if (type == AscendType::BF16) {
         #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-        bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
+        if (addInputs) {
+            bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
                                                                   numTokensPerCore, maxLoRARank, outputHiddenDim,
                                                                   sliceOffset, outputFullDim);
+        } else {
+            bgmv_expand_overwrite_bfloat16_t<<<blockDim, nullptr, stream>>>(
+                x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank, outputHiddenDim,
+                sliceOffset, outputFullDim);
+        }
         #endif
     } else {
         return;

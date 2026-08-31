@@ -80,9 +80,7 @@ def has_lora(lora_context) -> bool:
         if batch_has_lora is not None:
             return bool(batch_has_lora)
 
-    return (
-        getattr(lora_context, "allgather_lora_indices", None) is not None or not lora_context.punica_wrapper.no_lora
-    )
+    return getattr(lora_context, "allgather_lora_indices", None) is not None or not lora_context.punica_wrapper.no_lora
 
 
 def reset_lora_indices(lora_context) -> None:
@@ -489,6 +487,7 @@ def moe_lora_apply_w13(
     hidden_states,
     lora_routing=None,
     bgmv_lora_indices: torch.Tensor | None = None,
+    add_inputs: bool = True,
 ):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
@@ -523,6 +522,7 @@ def moe_lora_apply_w13(
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
         bgmv_lora_indices=bgmv_lora_indices,
+        add_inputs=add_inputs,
     )
 
 
@@ -533,6 +533,7 @@ def moe_lora_apply_w2(
     silu_out,
     lora_routing=None,
     bgmv_lora_indices: torch.Tensor | None = None,
+    add_inputs: bool = True,
 ):
     """Add the w2 LoRA delta into ``down_out`` (in place), after the down GMM.
 
@@ -567,6 +568,7 @@ def moe_lora_apply_w2(
         offset=offset,
         token_lora_mapping=lora_per_row,
         bgmv_lora_indices=bgmv_lora_indices,
+        add_inputs=add_inputs,
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for

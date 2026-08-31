@@ -74,7 +74,8 @@ namespace vllm_ascend {
         uint32_t lora_rank,
         uint32_t output_hidden_dim,
         uint32_t slice_offset,
-        uint32_t output_full_dim);
+        uint32_t output_full_dim,
+        bool add_inputs);
 
     extern void sgmv_shrink_impl(
         AscendType type,

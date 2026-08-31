@@ -412,6 +412,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
         bgmv_lora_indices: torch.Tensor | None = None,
+        add_inputs: bool = True,
     ) -> None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -430,11 +431,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         existing per-(lora, expert) weight stacks:
             combined_idx[row] = lora_id[row] * num_experts + expert_id[row]
         or -1 when the row has no active adapter, mirroring the -1 sentinel
-        ``PunicaWrapperBase.token_lora_indices`` already uses. bgmv_shrink/
-        bgmv_expand skip any row whose index is negative (leaving the
-        zero-initialized shrink buffer / unmodified ``y`` in place), so
-        inactive rows get a zero delta for free -- no Python-level branching
-        needed.
+        ``PunicaWrapperBase.token_lora_indices`` already uses. In auxiliary
+        overwrite mode, bgmv_shrink skips inactive rows and bgmv_expand clears
+        their target slices inside its existing kernel. This avoids separate
+        zero-fill launches while preserving the additive fallback semantics.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config
@@ -456,6 +456,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             )
 
         cur_offset = offset
+        shrink_factory = torch.zeros if add_inputs else torch.empty
         for slice_idx in range(len(lora_a_stacked)):
             # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
             # Flattening the leading two dims turns "gather by (lora, expert)"
@@ -469,7 +470,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
             # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
             # (its X_T), so the shrink buffer is fp32.
-            shrink_out = torch.zeros(
+            shrink_out = shrink_factory(
                 (x2d.shape[0], local_rank),
                 dtype=torch.float32,
                 device=x2d.device,
@@ -495,7 +496,15 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             if mul_routed_weight and topk_weights is not None:
                 delta = shrink_out * topk_weights.view(-1, 1)
 
-            self.bgmv_expand_slice(delta, b_flat, y2d, bgmv_lora_indices, cur_offset, out_size, add_inputs=True)
+            self.bgmv_expand_slice(
+                delta,
+                b_flat,
+                y2d,
+                bgmv_lora_indices,
+                cur_offset,
+                out_size,
+                add_inputs=add_inputs,
+            )
             cur_offset += out_size
 
     def add_lora_logits(

@@ -261,6 +261,7 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         hidden_states=mlp_input.hidden_states,
         lora_routing=routing,
         bgmv_lora_indices=None,
+        add_inputs=True,
     )
     apply_w2.assert_called_once_with(
         mlp_input.lora_context,
@@ -268,6 +269,7 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         silu_out=activated,
         lora_routing=routing,
         bgmv_lora_indices=None,
+        add_inputs=True,
     )
 
 
@@ -354,6 +356,8 @@ def test_dynamic_int8_ep_lora_uses_aux_stream_delta_workspace(comm_type) -> None
     assert apply_w13.call_args.kwargs["gate_up_out"] is not gate_up_out
     assert apply_w2.call_args.kwargs["down_out"] is not down_out
     assert apply_w13.call_args.kwargs["gate_up_out"].data_ptr() == apply_w2.call_args.kwargs["down_out"].data_ptr()
+    assert apply_w13.call_args.kwargs["add_inputs"] is False
+    assert apply_w2.call_args.kwargs["add_inputs"] is False
     assert torch.equal(gate_up_out, torch.full_like(gate_up_out, 2))
     assert torch.equal(down_out, torch.full_like(down_out, 3))
     if comm_type == MoECommType.ALLGATHER:

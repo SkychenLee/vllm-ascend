@@ -157,11 +157,13 @@ def test_punica_fused_moe_reuses_prepared_bgmv_indices() -> None:
         adapter_enabled=torch.tensor([1, 0, 1]),
         token_lora_mapping=torch.tensor([0, -1, 2, -1]),
         bgmv_lora_indices=prepared_indices,
+        add_inputs=False,
     )
 
     wrapper.prepare_fused_moe_lora_indices.assert_not_called()
     assert wrapper.bgmv_shrink.call_args.args[3] is prepared_indices
     assert wrapper.bgmv_expand_slice.call_args.args[3] is prepared_indices
+    assert wrapper.bgmv_expand_slice.call_args.kwargs["add_inputs"] is False
 
 
 def test_moe_lora_apply_propagates_fully_sharded_metadata() -> None:
@@ -183,6 +185,7 @@ def test_moe_lora_apply_propagates_fully_sharded_metadata() -> None:
         gate_up_out="gate_up_out",
         hidden_states="hidden_states",
         lora_routing=routing,
+        add_inputs=False,
     )
     moe_lora_apply_w2(
         context,
@@ -194,6 +197,8 @@ def test_moe_lora_apply_propagates_fully_sharded_metadata() -> None:
     calls = punica_wrapper.add_lora_fused_moe.call_args_list
     assert calls[0].kwargs["fully_sharded"] is True
     assert calls[1].kwargs["fully_sharded"] is True
+    assert calls[0].kwargs["add_inputs"] is False
+    assert calls[1].kwargs["add_inputs"] is True
     assert calls[1].kwargs["offset"] == 48
 
 

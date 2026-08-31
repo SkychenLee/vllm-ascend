@@ -53,7 +53,13 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
 
 
 def bgmv_expand_meta(
-    x: torch.Tensor, weight: torch.Tensor, indices: torch.Tensor, y: torch.Tensor, slice_offset: int, slice_size: int
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    indices: torch.Tensor,
+    y: torch.Tensor,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = True,
 ):
     y_out = torch.empty_like(y)
     return y_out
