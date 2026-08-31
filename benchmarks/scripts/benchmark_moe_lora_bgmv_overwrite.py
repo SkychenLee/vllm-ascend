@@ -69,6 +69,18 @@ def _weights(
     return a_weights, b_weights
 
 
+def _difference_stats(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float | int | bool]:
+    actual_cpu = actual.cpu()
+    expected_cpu = expected.cpu()
+    difference = (actual_cpu.float() - expected_cpu.float()).abs()
+    return {
+        "bitwise_equal": torch.equal(actual_cpu, expected_cpu),
+        "mismatched_elements": int(torch.count_nonzero(actual_cpu != expected_cpu)),
+        "max_abs_error": float(difference.max()),
+        "mean_abs_error": float(difference.mean()),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=48)
@@ -105,6 +117,8 @@ def main() -> None:
     baseline()
     fused()
     torch.npu.synchronize()
+    w13_difference = _difference_stats(w13_fused, w13_baseline)
+    w2_difference = _difference_stats(w2_fused, w2_baseline)
     torch.testing.assert_close(w13_fused.cpu(), w13_baseline.cpu(), atol=2e-2, rtol=2e-2)
     torch.testing.assert_close(w2_fused.cpu(), w2_baseline.cpu(), atol=2e-2, rtol=2e-2)
 
@@ -118,6 +132,8 @@ def main() -> None:
         "fused_us": fused_us,
         "speedup_percent": (baseline_us - fused_us) / baseline_us * 100,
         "removed_zero_fill_launches_per_layer": 5,
+        "w13_difference": w13_difference,
+        "w2_difference": w2_difference,
     }
     payload = json.dumps(result, indent=2)
     print(payload)

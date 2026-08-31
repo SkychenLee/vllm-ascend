@@ -1302,13 +1302,13 @@ def test_composite_lora_gmm_compacts_large_ep_tail() -> None:
     assert torch.equal(output, restored_delta)
 
 
-def test_single_lora_gmm_uses_packed_weights_and_adds_each_output_slice() -> None:
-    output = torch.zeros(2, 5, dtype=torch.bfloat16)
+def test_single_lora_gmm_masks_inactive_ep_tail_for_each_output_slice() -> None:
+    output = torch.full((2, 5), 7, dtype=torch.bfloat16)
     inputs = torch.ones(2, 4, dtype=torch.bfloat16)
     lora_a = tuple(torch.zeros(shape, dtype=torch.bfloat16) for shape in ((2, 16, 4), (2, 16, 4)))
     lora_b = tuple(torch.zeros(shape, dtype=torch.bfloat16) for shape in ((2, 2, 16), (2, 3, 16)))
     shrink = torch.zeros(2, 16, dtype=torch.bfloat16)
-    group_list = torch.ones(2, dtype=torch.int64)
+    group_list = torch.tensor([1, 0], dtype=torch.int64)
     routing = _SingleLoraGMMRouting(
         enabled=torch.tensor([True, False]),
     )
@@ -1318,9 +1318,9 @@ def test_single_lora_gmm_uses_packed_weights_and_adds_each_output_slice() -> Non
             f"{QUANT_MOE}._grouped_lora_matmul",
             side_effect=[
                 shrink,
-                torch.tensor([[1, 1], [0, 0]], dtype=torch.bfloat16),
+                torch.tensor([[1, 1], [99, 99]], dtype=torch.bfloat16),
                 shrink,
-                torch.tensor([[2, 2, 2], [0, 0, 0]], dtype=torch.bfloat16),
+                torch.tensor([[2, 2, 2], [99, 99, 99]], dtype=torch.bfloat16),
             ],
         ) as grouped_matmul,
         patch(
@@ -1346,9 +1346,9 @@ def test_single_lora_gmm_uses_packed_weights_and_adds_each_output_slice() -> Non
     for call in grouped_matmul.call_args_list:
         assert call.args[1].shape[0] == 2
         assert call.args[2] is group_list
-    assert torch.equal(output[0, :2], torch.ones(2, dtype=torch.bfloat16))
-    assert torch.equal(output[0, 2:], torch.full((3,), 2, dtype=torch.bfloat16))
-    assert torch.equal(output[1], torch.zeros(5, dtype=torch.bfloat16))
+    assert torch.equal(output[0, :2], torch.full((2,), 8, dtype=torch.bfloat16))
+    assert torch.equal(output[0, 2:], torch.full((3,), 9, dtype=torch.bfloat16))
+    assert torch.equal(output[1], torch.full((5,), 7, dtype=torch.bfloat16))
 
 
 def test_single_lora_gmm_fully_sharded_gathers_rank_and_uses_output_offset() -> None:

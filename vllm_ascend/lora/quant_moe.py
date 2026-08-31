@@ -536,6 +536,12 @@ def _add_single_lora_gmm(
             lora_b,
             group_list,
         )
+        # Count-mode GMM only defines the local expert prefix under EP. Some
+        # CANN versions leave rows beyond ``group_list.sum()`` untouched, so
+        # an allocator-dependent value can otherwise flow into activation and
+        # token-combine. The routed mask already marks both base rows and the
+        # non-local tail; clear them before accumulating the LoRA delta.
+        delta.masked_fill_(~routing.enabled.unsqueeze(-1), 0)
         output_size = delta.shape[-1]
         output.narrow(-1, current_output_offset, output_size).add_(delta)
         current_output_offset += output_size
