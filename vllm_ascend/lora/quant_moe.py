@@ -677,6 +677,11 @@ def _apply_dynamic_int8_moe_lora(
         is_decode_only=_EXTRA_CTX.is_decode_only is True,
     )
     defer_allgather_lora_routing = use_aux_stream and comm_type == MoECommType.ALLGATHER
+    force_ep_decode_recover = (
+        comm_type == MoECommType.ALLGATHER
+        and getattr(lora_context, "use_ep", False)
+        and _EXTRA_CTX.is_decode_only is True
+    )
     lora_routing = None
     single_lora_routing = None
     composite_lora_routing = None
@@ -698,6 +703,7 @@ def _apply_dynamic_int8_moe_lora(
             )
         elif (
             comm_type == MoECommType.ALLGATHER
+            and not force_ep_decode_recover
             and mlp_compute_input.routed_lora_slots is not None
             and mlp_compute_input.routed_lora_slots.numel() == hidden_states.shape[0]
         ):
@@ -745,6 +751,10 @@ def _apply_dynamic_int8_moe_lora(
                 adapter_enabled=lora_context.adapter_enabled,
                 num_experts=lora_context.w13_lora_a_stacked[0].shape[1],
             )
+            # The auxiliary path only consumes the compact BGMV index after
+            # preparation. Drop the two intermediate routing tensors so W13
+            # and W2 cannot accidentally select the generic routing branch.
+            lora_routing = None
 
     # AlltoAll routing consumes exchanged indices and keeps its existing
     # communication ordering. AllGather routing is LoRA-only, so pure-decode

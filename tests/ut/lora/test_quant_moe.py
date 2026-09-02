@@ -599,7 +599,7 @@ def test_dynamic_int8_uses_sideband_slots_routing_when_dispatched() -> None:
     assert apply_w2.call_args.kwargs["lora_routing"] is routing
 
 
-def test_dynamic_int8_decode_sideband_builds_bgmv_indices_directly_on_aux_stream() -> None:
+def test_dynamic_int8_ep_decode_uses_recover_even_with_sideband_slots() -> None:
     lora_context = _make_gmm_lora_context(use_ep=True)
     lora_context.aux_stream = object()
     lora_context.events = tuple(object() for _ in range(4))
@@ -617,6 +617,10 @@ def test_dynamic_int8_decode_sideband_builds_bgmv_indices_directly_on_aux_stream
     activated_scale = torch.ones(2)
     down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
     prepared_indices = torch.tensor([0, -1], dtype=torch.long)
+    recovered_routing = (torch.tensor([0, 1]), torch.tensor([0, -1]))
+    lora_context.punica_wrapper.prepare_fused_moe_lora_indices = MagicMock(
+        return_value=prepared_indices,
+    )
 
     quant_results = iter(
         [
@@ -645,7 +649,10 @@ def test_dynamic_int8_decode_sideband_builds_bgmv_indices_directly_on_aux_stream
             return_value=prepared_indices,
         ) as prepare_slots,
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_from_slots") as recover_slots,
-        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather") as recover_allgather,
+        patch(
+            f"{QUANT_MOE}._recover_moe_lora_routing_allgather",
+            return_value=recovered_routing,
+        ) as recover_allgather,
         patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
         patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
     ):
@@ -653,14 +660,20 @@ def test_dynamic_int8_decode_sideband_builds_bgmv_indices_directly_on_aux_stream
         extra_ctx.is_decode_only = True
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
-    prepare_slots.assert_called_once_with(
-        routed_lora_slots,
-        mlp_input.group_list,
-        lora_context.adapter_enabled,
-        lora_context.moe_lora_expert_ids_with_tail,
-    )
+    prepare_slots.assert_not_called()
     recover_slots.assert_not_called()
-    recover_allgather.assert_not_called()
+    recover_allgather.assert_called_once_with(
+        lora_context,
+        mlp_input.expanded_row_idx,
+        mlp_input.topk_ids,
+        expert_map=mlp_input.expert_map,
+    )
+    lora_context.punica_wrapper.prepare_fused_moe_lora_indices.assert_called_once_with(
+        expert_ids=recovered_routing[0],
+        token_lora_mapping=recovered_routing[1],
+        adapter_enabled=lora_context.adapter_enabled,
+        num_experts=lora_context.w13_lora_a_stacked[0].shape[1],
+    )
     assert apply_w13.call_args.kwargs["lora_routing"] is None
     assert apply_w13.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
     assert apply_w2.call_args.kwargs["lora_routing"] is None

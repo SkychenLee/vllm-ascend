@@ -335,6 +335,47 @@ def test_allgather_ep_routing_uses_gathered_adapters_and_local_experts() -> None
     assert torch.equal(lora_slots, torch.tensor([1, 2, -1, -1]))
 
 
+def test_allgather_ep_recover_matches_no_ep_reference() -> None:
+    """EP must preserve the no-EP recover result for its local experts."""
+    token_lora_indices = torch.tensor([0, 1, -1, 2])
+    topk_ids = torch.tensor([[5, 1], [0, 7], [2, 1], [6, 3]])
+    no_ep_context = SimpleNamespace(
+        top_k=2,
+        punica_wrapper=SimpleNamespace(token_lora_indices=token_lora_indices),
+    )
+    # Full source-to-destination permutation for all eight global experts.
+    no_ep_row_idx = torch.tensor([5, 1, 0, 7, 3, 2, 6, 4])
+    global_experts, no_ep_lora_slots = _recover_moe_lora_routing_allgather(
+        no_ep_context,
+        no_ep_row_idx,
+        topk_ids,
+    )
+
+    # Rank 1 owns global experts [4, 8). Only sources 0, 3 and 6 have valid
+    # local destinations; active_expert_range leaves every other entry -1.
+    expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
+    ep_row_idx = torch.tensor([0, -1, -1, 2, -1, -1, 1, -1])
+    ep_context = SimpleNamespace(
+        top_k=2,
+        allgather_lora_indices=token_lora_indices,
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.full((4,), 9)),
+    )
+    ep_experts, ep_lora_slots = _recover_moe_lora_routing_allgather(
+        ep_context,
+        ep_row_idx,
+        topk_ids,
+        expert_map=expert_map,
+    )
+
+    local_rows = global_experts >= 4
+    expected_experts = global_experts[local_rows] - 4
+    expected_lora_slots = no_ep_lora_slots[local_rows]
+    num_local_rows = expected_experts.numel()
+    assert torch.equal(ep_experts[:num_local_rows], expected_experts)
+    assert torch.equal(ep_lora_slots[:num_local_rows], expected_lora_slots)
+    assert torch.all(ep_lora_slots[num_local_rows:] == -1)
+
+
 def test_all2all_routing_uses_local_experts_and_exchanged_adapters() -> None:
     context = SimpleNamespace(
         local_num_experts=3,

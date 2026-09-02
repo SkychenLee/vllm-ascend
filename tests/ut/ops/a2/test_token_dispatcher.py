@@ -770,8 +770,8 @@ def _build_regular_sideband_fixture():
     return dispatcher, token_dispatch_input, init_routing_output, token_lora_slots
 
 
-def test_allgather_w8a8_regular_sideband_routes_slots_for_decode_dual_stream() -> None:
-    dispatcher, token_dispatch_input, init_routing_output, token_lora_slots = _build_regular_sideband_fixture()
+def test_allgather_w8a8_decode_dual_stream_keeps_recover_routing() -> None:
+    dispatcher, token_dispatch_input, init_routing_output, _ = _build_regular_sideband_fixture()
 
     with (
         patch(
@@ -809,14 +809,10 @@ def test_allgather_w8a8_regular_sideband_routes_slots_for_decode_dual_stream() -
     ):
         output = dispatcher.token_dispatch(token_dispatch_input)
 
-    routing_scale = mock_init_routing.call_args.kwargs["scale"]
     can_prepare_composite.assert_not_called()
-    assert torch.equal(routing_scale, token_lora_slots.to(torch.float32))
+    assert mock_init_routing.call_args.kwargs["scale"] is None
     assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
-    # The regular path forwards the expert-major sideband as-is; the compute
-    # side masks the non-local tail.
-    assert output.routed_lora_slots.data_ptr() == init_routing_output[3].data_ptr()
-    assert output.routed_lora_slots.dtype == torch.float32
+    assert output.routed_lora_slots is None
 
 
 @pytest.mark.parametrize(

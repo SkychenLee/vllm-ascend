@@ -469,25 +469,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 expert_map=expert_map,
             )
         )
-        # Regular decode-only dual-stream sideband: when neither fast GMM
-        # path can run, still let init-routing carry the per-token LoRA slot
-        # so the compute side rebuilds routing from the expert-major sideband
-        # instead of the scatter-based recovery. The batch descriptor's
-        # has_lora is identical on every EP rank (unlike rank-local punica
-        # state), so all ranks produce the same sideband shape; fall back to
-        # the rank-local signal only when no descriptor is available.
-        route_regular_lora_slots = (
-            batch_has_lora
-            and quant_type == QuantType.W8A8
-            and not route_single_lora_slots
-            and not route_composite_lora_slots
-            and expert_map is not None
-            and self.lora_context is not None
-            and getattr(self.lora_context, "aux_stream", None) is not None
-            and get_ascend_config().enable_moe_lora_dual_stream
-            and is_decode_only is True
-        )
-        route_lora_slots = route_single_lora_slots or route_composite_lora_slots or route_regular_lora_slots
+        # Decode intentionally does not route LoRA slots through the
+        # init-routing scale sideband.  EP decode uses the same
+        # expanded_row_idx/topk_ids recovery contract as the validated no-EP
+        # path; the recovery itself is still deferred to the auxiliary stream.
+        # Keep the sideband only for the prefill-only GMM paths.
+        route_lora_slots = route_single_lora_slots or route_composite_lora_slots
         routing_scale = dynamic_scale
         if route_lora_slots:
             if dynamic_scale is not None or quant_mode != -1:
@@ -523,12 +510,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                     f"{tuple(routed_scale.shape)} for routed activations "
                     f"{tuple(sorted_hidden_states.shape)}."
                 )
-            if route_regular_lora_slots or route_composite_lora_slots:
+            if route_composite_lora_slots:
                 # The compute-side fused helpers mask the undefined non-local
                 # tail using the expert counts. Keep init-routing's FP32 output
-                # unchanged: decode produces the final BGMV index and composite
-                # prefill produces group IDs/counts without dispatcher-side
-                # arange/sum/cast/where kernels.
+                # unchanged: composite prefill produces group IDs/counts
+                # without dispatcher-side arange/sum/cast/where kernels.
                 routed_lora_slots = routed_scale
             else:
                 # active_expert_range leaves the non-local tail undefined. Mask it
