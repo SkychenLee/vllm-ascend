@@ -8,7 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.kv_cache_coordinator import SpecGroup
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    generate_scheduler_kv_cache_config,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -690,6 +695,165 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+    assert KVCacheSpecRegistry.get_manager_class(mamba_spec) is AscendMambaManager
+
+
+@pytest.mark.parametrize(
+    (
+        "block_size",
+        "hash_block_size",
+        "alignment_tokens",
+        "cached_token_boundaries",
+        "expected_hit_length",
+    ),
+    [
+        pytest.param(16, 16, 16, (16,), 0, id="single-state-drops-to-empty"),
+        pytest.param(16, 16, 16, (16, 32, 48), 32, id="page-aligned"),
+        pytest.param(16, 16, 32, (32, 64), 32, id="hybrid-lcm-aligned"),
+        pytest.param(8, 2, 2, (8, 10), 8, id="fine-grained-partial-hit"),
+    ],
+)
+def test_ascend_mamba_manager_drops_eagle_tail_state(
+    block_size: int,
+    hash_block_size: int,
+    alignment_tokens: int,
+    cached_token_boundaries: tuple[int, ...],
+    expected_hit_length: int,
+) -> None:
+    """Do not reuse the Mamba state that may include rejected MTP drafts."""
+    group_id = 0
+    max_length = cached_token_boundaries[-1]
+    num_hashes = max_length // hash_block_size
+    block_hashes = [BlockHash(f"blk{i:04d}".encode()) for i in range(num_hashes)]
+    block_pool = BlockPool(
+        num_gpu_blocks=32,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    cached_blocks = block_pool.get_new_blocks(len(cached_token_boundaries))
+    for token_boundary, block in zip(cached_token_boundaries, cached_blocks, strict=True):
+        hash_idx = token_boundary // hash_block_size - 1
+        block_pool._insert_block_hash(
+            make_block_hash_with_group_id(block_hashes[hash_idx], group_id),
+            block,
+            num_tokens=token_boundary,
+        )
+
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    full_hit_blocks, full_hit_length = AscendMambaManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[group_id],
+        block_pool=block_pool,
+        kv_cache_spec=mamba_spec,
+        alignment_tokens=alignment_tokens,
+        drop_eagle_block=False,
+    )
+    safe_hit_blocks, safe_hit_length = AscendMambaManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[group_id],
+        block_pool=block_pool,
+        kv_cache_spec=mamba_spec,
+        alignment_tokens=alignment_tokens,
+        drop_eagle_block=True,
+    )
+
+    assert full_hit_length == max_length
+    assert full_hit_blocks[0][-1] is cached_blocks[-1]
+    assert safe_hit_length == expected_hit_length
+    # Mamba hits are null-padded and retain only the rightmost real state.
+    # The safe result must reselect the previous state, not pop the tail list.
+    if expected_hit_length == 0:
+        assert safe_hit_blocks[0] == []
+    else:
+        assert safe_hit_blocks[0][-1] is cached_blocks[-2]
+
+
+@pytest.mark.parametrize(
+    ("block_size", "hash_block_size"),
+    [
+        pytest.param(16, 16, id="page-aligned"),
+        pytest.param(2048, 16, id="fine-grained-short-prefix"),
+    ],
+)
+def test_hybrid_coordinator_mamba_drop_keeps_safe_prefix_hit(
+    block_size: int,
+    hash_block_size: int,
+) -> None:
+    """Give Mamba a lookahead margin before dropping its unsafe MTP tail.
+
+    Full attention runs first and already reduces the shared candidate by one
+    drop unit. Mamba must inspect one unit beyond that candidate and then drop
+    back to the same boundary; otherwise it reduces the combined hit a second
+    time and short repeated prefixes collapse to zero.
+    """
+    full_group_id = 0
+    mamba_group_id = 1
+    max_length = 2 * hash_block_size
+    block_hashes = [BlockHash(f"blk{i:04d}".encode()) for i in range(2)]
+    block_pool = BlockPool(
+        num_gpu_blocks=16,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    for group_id in (full_group_id, mamba_group_id):
+        cached_blocks = block_pool.get_new_blocks(2)
+        for idx, block in enumerate(cached_blocks):
+            block_pool._insert_block_hash(
+                make_block_hash_with_group_id(block_hashes[idx], group_id),
+                block,
+                num_tokens=(idx + 1) * hash_block_size,
+            )
+
+    full_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+        ],
+    )
+    coordinator.block_pool = block_pool
+    coordinator.dcp_world_size = 1
+    coordinator.enable_caching = True
+    coordinator.enable_partial_hash_hits = hash_block_size < block_size
+    coordinator.hash_block_size = hash_block_size
+    coordinator.scheduler_block_size = block_size
+    coordinator.lcm_block_size = block_size
+    coordinator.attention_groups = [
+        SpecGroup(full_spec, [full_group_id], FullAttentionManager, True),
+        SpecGroup(mamba_spec, [mamba_group_id], AscendMambaManager, True),
+    ]
+
+    cache_hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
+        block_hashes,
+        max_cache_hit_length=max_length,
+    )
+
+    assert hit_length == hash_block_size
+    assert cache_hit_blocks[full_group_id]
+    assert cache_hit_blocks[mamba_group_id]
 
 
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:

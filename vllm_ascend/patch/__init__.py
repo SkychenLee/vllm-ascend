@@ -157,6 +157,10 @@
 #       hit for Mamba groups. Upstream's min-reduction across all KV groups
 #       collapses the FullAttention hit length to 0, preventing partial
 #       FullAttention-only prefix cache reuse on the D side.
+#       With MTP/EAGLE, the coordinator also withholds the lookahead margin
+#       from Mamba because upstream MambaManager ignores drop_eagle_block.
+#       AscendMambaManager handles that drop, so withholding the margin makes
+#       FullAttention and Mamba each reduce the shared hit once, often to zero.
 #    How:
 #       For Mamba hybrid models,
 #       num_new_local_computed_tokens should be the FA hit
@@ -165,6 +169,9 @@
 #       external = total - local_computed.
 #       Using the FA hit skips re-transferring FA blocks
 #       already cached on D-side.
+#       Give every MTP/EAGLE group one drop-unit lookahead. The Ascend Mamba
+#       manager lowers its ceiling by that unit and therefore returns the same
+#       safe boundary already selected by FullAttention.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/42524
 #       https://github.com/vllm-project/vllm/pull/44243
@@ -227,18 +234,25 @@
 #       1. Upstream hybrid prefix cache lookup does not support DCP.
 #       2. Upstream MambaManager#get_num_blocks_to_allocate give the
 #          wrong number of blocks when an external cache hit occurred
+#       3. Upstream MambaManager ignores drop_eagle_block, so prefix caching
+#          can reuse a recurrent state containing rejected MTP draft tokens.
 #    How:
 #       1. Replace MambaManager with AscendMambaManager for prefix cache hit lookup
 #          on hybrid Mamba paths (logical mamba block_size when caching is enabled).
 #       2. Override the get_num_blocks_to_allocate method to fix the number of blocks
 #          when hitting the external cache and loading synchronously
+#       3. Move the MTP/EAGLE lookup ceiling to the previous state boundary instead
+#          of popping the null-padded Mamba hit result.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm/pull/40996
 #       2. https://github.com/vllm-project/vllm/pull/46892
+#       3. https://github.com/vllm-project/vllm/pull/48375
 #    Future Plan:
 #       1. Remove this patch once the supported upstream revision includes
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
+#       3. Remove the MTP/EAGLE workaround once the supported upstream revision
+#          honors drop_eagle_block for both full-page and partial Mamba hits.
 #
 # ** 13. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

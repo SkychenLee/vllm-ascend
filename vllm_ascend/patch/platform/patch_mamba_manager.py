@@ -35,6 +35,18 @@ class AscendMambaManager(MambaManager):
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+        assert isinstance(kv_cache_spec, MambaSpec), "AscendMambaManager can only be used for mamba groups"
+        if drop_eagle_block and max_length > 0:
+            # The last matched Mamba state may have been written over draft
+            # tokens that MTP verification later rejects. Unlike attention
+            # hits, Mamba hits are null-padded and contain only the rightmost
+            # real state, so popping the result would remove the state itself.
+            # Exclude that boundary from the lookup instead. Fine-grained
+            # partial hits use one hash/alignment unit; regular hits use one
+            # Mamba page.
+            drop_unit = min(alignment_tokens, kv_cache_spec.block_size)
+            max_length = max(0, max_length - drop_unit)
+
         return super().find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_length,
@@ -44,7 +56,9 @@ class AscendMambaManager(MambaManager):
             alignment_tokens=alignment_tokens,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
-            drop_eagle_block=drop_eagle_block,
+            # Ascend owns the ceiling adjustment above. Keep this false so a
+            # future upstream implementation cannot apply the drop twice.
+            drop_eagle_block=False,
         )
 
     def get_num_blocks_to_allocate(

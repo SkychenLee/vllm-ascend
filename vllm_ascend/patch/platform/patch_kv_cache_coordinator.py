@@ -438,8 +438,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 drop_eagle_block = use_eagle and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    # Eagle needs to match one more block and then pop the last.
+                if drop_eagle_block:
+                    # Eagle needs to match one more drop unit before removing
+                    # the unsafe tail. AscendMambaManager performs that removal
+                    # by lowering its lookup ceiling, so Mamba needs the same
+                    # lookahead margin as attention groups. Without it, the
+                    # preceding full-attention lookup reduces the shared
+                    # candidate once and Mamba reduces it a second time.
                     eagle_margin = (
                         self.hash_block_size
                         if self.enable_partial_hash_hits
