@@ -148,6 +148,11 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             skip_topk=self.skip_topk,
             topk_indices_buffer=self.topk_indices_buffer,
         )
+        # LoRA wrappers are installed after model construction. The backend
+        # implementation caches plain Python references, so model-tree alias
+        # replacement cannot update them automatically. Rebind once on the
+        # first LoRA-enabled forward, before the custom op enters DSA impl.
+        self._dsa_impl_lora_rebind_pending = get_current_vllm_config().lora_config is not None
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -161,6 +166,9 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
+        if self._dsa_impl_lora_rebind_pending:
+            self.dsa_attn.impl.refresh_lora_module_references(self)
+            self._dsa_impl_lora_rebind_pending = False
         need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
         output_shape = hidden_states.shape
 

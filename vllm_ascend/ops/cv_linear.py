@@ -28,15 +28,23 @@ class CVLinearWrapper:
     def __init__(self, linear):
         self.linear = linear
 
+        # LoRA replaces LinearBase modules with wrapper modules whose forward
+        # applies both the quantized base projection and the LoRA delta. Those
+        # wrappers deliberately do not expose ``quant_method``: splitting
+        # their execution here would bypass the delta and silently run the
+        # base model. Treat any such wrapper as an indivisible linear and use
+        # its full forward path below.
+        self._requires_full_forward = getattr(linear, "quant_method", None) is None
+
         # Detect whether TP communication operations exist
-        self._has_communication = self._detect_communication(linear)
+        self._has_communication = not self._requires_full_forward and self._detect_communication(linear)
 
         # Detect quantization scheme
         # Handles two cases:
         # 1. linear.quant_method is directly AscendW8A8DynamicLinearMethod
         # 2. linear.quant_method is a wrapper class, requiring .quant_method to get the actual quantization method
-        self._quant_method = linear.quant_method
-        self._is_w8a8_dynamic = self._detect_w8a8_dynamic(linear.quant_method)
+        self._quant_method = getattr(linear, "quant_method", None)
+        self._is_w8a8_dynamic = self._detect_w8a8_dynamic(self._quant_method)
 
     @staticmethod
     def _detect_w8a8_dynamic(quant_method):
@@ -81,7 +89,7 @@ class CVLinearWrapper:
             (quantized_x, pertoken_scale): Quantized tensor and scaling factor.
             For linear layers with communication or without quantization, returns (x, None).
         """
-        if self._has_communication:
+        if self._requires_full_forward or self._has_communication:
             return x, None
 
         if self._is_w8a8_dynamic:
@@ -102,7 +110,7 @@ class CVLinearWrapper:
         Returns:
             Matrix multiplication result
         """
-        if self._has_communication:
+        if self._requires_full_forward or self._has_communication:
             return self.linear.forward(quantized_x)
 
         if self._is_w8a8_dynamic:

@@ -1562,6 +1562,74 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
     @staticmethod
+    def _unwrap_lora_base_layer(linear):
+        """Return the fused-op-compatible base linear from a LoRA wrapper."""
+        return getattr(linear, "base_layer", linear)
+
+    @staticmethod
+    def _compressor_has_lora_wrapper(compressor: Any | None) -> bool:
+        if compressor is None:
+            return False
+        return any(
+            hasattr(getattr(compressor, name, None), "base_layer")
+            for name in ("wkv", "wgate")
+        )
+
+    def refresh_lora_module_references(self, dsa_modules: Any) -> bool:
+        """Refresh linear aliases after vLLM installs LoRA wrappers.
+
+        ``DSAAttention.impl`` is not an ``nn.Module`` and therefore is not
+        visited when vLLM replaces model-tree linear layers with LoRA
+        wrappers. Without this refresh it retains the pre-LoRA LinearBase
+        objects and silently bypasses every DSA LoRA delta.
+
+        The fused CANN compressor consumes base weight tensors directly and
+        currently has no per-token LoRA inputs. Applying LoRA only to the
+        surrounding DSA projections creates an inconsistent learned
+        transformation and can regress accuracy. Treat DSA rebinding as an
+        atomic operation: if either compressor is LoRA-wrapped, keep every
+        cached DSA alias on the base model until the fused operator gains an
+        explicit LoRA interface.
+        """
+        indexer = dsa_modules.indexer
+        if self._compressor_has_lora_wrapper(dsa_modules.compressor) or (
+            indexer is not None
+            and self._compressor_has_lora_wrapper(indexer.compressor)
+        ):
+            return False
+
+        self.wq_a = dsa_modules.wq_a
+        self.wq_b = dsa_modules.wq_b
+        self.wkv = dsa_modules.wkv
+        self.wo_b = dsa_modules.wo_b
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
+
+        self.indexer = dsa_modules.indexer
+        if self.indexer is not None:
+            self.inderxer_wq_b = self.indexer.wq_b
+            self.cv_inderxer_wq_b = CVLinearWrapper(self.inderxer_wq_b)
+            self.weights_proj = self.indexer.weights_proj
+            self.indexer_compress = self.indexer.compressor
+            self.indexcom_wkv = self._unwrap_lora_base_layer(
+                self.indexer.compressor.wkv
+            )
+            self.indexcom_wgate = self._unwrap_lora_base_layer(
+                self.indexer.compressor.wgate
+            )
+
+        self.compressor = dsa_modules.compressor
+        if self.compressor is not None:
+            self.compressor_wkv = self._unwrap_lora_base_layer(
+                self.compressor.wkv
+            )
+            self.compressor_wgate = self._unwrap_lora_base_layer(
+                self.compressor.wgate
+            )
+        return True
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
