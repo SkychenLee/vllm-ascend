@@ -1,5 +1,6 @@
 import gc
 
+import pytest
 import torch
 
 from vllm_ascend.utils import enable_custom_op
@@ -20,12 +21,14 @@ def bgmv_shrink_cpu_impl(
 
 
 @torch.inference_mode()
-def test_bgmv_shrink():
+@pytest.mark.parametrize("lora_rank", [4, 16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_bgmv_shrink(lora_rank: int, dtype: torch.dtype):
     B = 1
-    x = torch.randn([B, 128], dtype=torch.float16)
-    w = torch.randn([64, 16, 128], dtype=torch.float16)
+    x = torch.randn([B, 128], dtype=dtype)
+    w = torch.randn([64, lora_rank, 128], dtype=dtype)
     indices = torch.zeros([B], dtype=torch.int64)
-    y = torch.zeros([B, 16])
+    y = torch.zeros([B, lora_rank])
 
     x_npu = x.npu()
     w_npu = w.npu()

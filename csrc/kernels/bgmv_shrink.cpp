@@ -26,6 +26,7 @@ public:
 
     static constexpr uint64_t BUFFER_NUM = 1;
     static constexpr uint64_t TILE_LENGTH = 11776;  // optimal performance tile length
+    static constexpr uint64_t DATA_COPY_ALIGNMENT = 32;
 
 public:
     __aicore__ inline BGMVShrink(AscendC::TPipe *pipe) : pipe_(pipe) {}
@@ -51,8 +52,9 @@ public:
         pipe_->InitBuffer(tmpBufferX_, TILE_LENGTH * sizeof(float));
         pipe_->InitBuffer(tmpBufferW_, TILE_LENGTH * sizeof(float));
         
-        pipe_->InitBuffer(outQueueY_, 1, maxLoRARank_ * sizeof(Y_T));
-        pipe_->InitBuffer(outBufferY_, maxLoRARank_ * sizeof(float));
+        uint64_t outputBufferBytes = AlignBytes(maxLoRARank_ * sizeof(Y_T));
+        pipe_->InitBuffer(outQueueY_, 1, outputBufferBytes);
+        pipe_->InitBuffer(outBufferY_, outputBufferBytes);
     }
 
     __aicore__ inline void Process()
@@ -83,6 +85,11 @@ public:
     }
 
 private:
+    __aicore__ inline static uint64_t AlignBytes(uint64_t bytes)
+    {
+        return (bytes + DATA_COPY_ALIGNMENT - 1) / DATA_COPY_ALIGNMENT * DATA_COPY_ALIGNMENT;
+    }
+
     template <bool INCREMENTAL_MODE>
     __aicore__ inline void ProcessImpl(const int64_t idx)
     {
@@ -188,7 +195,9 @@ private:
     __aicore__ inline void CopyOut(const int64_t idx)
     {
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.DeQue<Y_T>();
-        DataCopy(yOutGm_[maxLoRARank_ * idx], yOutLocal, maxLoRARank_);
+        AscendC::DataCopyExtParams copyParams{
+            1, static_cast<uint32_t>(maxLoRARank_ * sizeof(Y_T)), 0, 0, 0};
+        AscendC::DataCopyPad(yOutGm_[maxLoRARank_ * idx], yOutLocal, copyParams);
         outQueueY_.FreeTensor(yOutLocal);
     }
 
