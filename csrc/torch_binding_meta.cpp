@@ -1,9 +1,6 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
-#include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
-#include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
