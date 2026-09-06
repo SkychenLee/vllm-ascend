@@ -18,7 +18,13 @@ DSV4 DSA overlap、shared-expert overlap、DSpark、单 LoRA GMM 或 composite G
 因此其数学增量为零，但仍经过普通 LoRA 计算路径，没有按零权重特殊跳过。
 `news2026` 使用真实 rank-32 社区权重，故服务的 `max-lora-rank` 必须为 32。
 
-当前 DSA 实现在 compressor 被 LoRA 包装时保留基座引用。这轮 `news2026` 分数只用于
+后续隔离变更：已回退 `cdd2ceac9` 的 DSA LoRA 接入，移除首次 forward 的 wrapper 重绑定、
+compressor wrapper 检查/解包以及 CVLinear 对 LoRA wrapper 的完整 forward 兜底。
+DSA 恢复使用构造时缓存的基座线性层引用，不再接入这些投影的 adapter 增量；
+MoE LoRA、DSA 基座低秩参数及原有多流能力不变。此次回退尚未重新进行整模型精度评测，
+也未同步或重启远端服务，不能将下文历史分数视为回退后的结果。
+
+下文评测时的 DSA 实现在 compressor 被 LoRA 包装时保留基座引用。这轮 `news2026` 分数只用于
 同一实现的 EP/非 EP 对照，不代表社区 adapter 的完整 target-module 精度，也不是官方 benchmark 分数。
 
 ## 本轮发现与修复
