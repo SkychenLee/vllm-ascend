@@ -73,6 +73,16 @@ else:
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
+_ALLGATHER_REDUCESCATTER_BACKEND = "allgather_reducescatter"
+
+
+def _uses_moe_lora_allgather(vllm_config: VllmConfig) -> bool:
+    parallel_config = vllm_config.parallel_config
+    return (
+        getattr(vllm_config, "lora_config", None) is not None
+        and parallel_config.enable_expert_parallel
+        and parallel_config.all2all_backend == _ALLGATHER_REDUCESCATTER_BACKEND
+    )
 
 
 def config_deprecated_logging():
@@ -614,8 +624,11 @@ class NPUPlatform(Platform):
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-            if not vllm_config.compilation_config.pass_config.enable_sp:
+            uses_moe_lora_allgather = _uses_moe_lora_allgather(vllm_config)
+            if not vllm_config.compilation_config.pass_config.enable_sp and not uses_moe_lora_allgather:
                 parallel_config.all2all_backend = "flashinfer_all2allv"
+            elif uses_moe_lora_allgather:
+                logger.info("Preserving allgather_reducescatter for expert-parallel MoE LoRA")
             if is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:

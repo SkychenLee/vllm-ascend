@@ -21,8 +21,6 @@ def _run_projection(
     *,
     add_inputs: bool,
 ) -> None:
-    if add_inputs:
-        output.zero_()
     offset = 0
     shrink_factory = torch.zeros if add_inputs else torch.empty
     for a_weight, b_weight in zip(a_weights, b_weights, strict=True):
@@ -49,6 +47,22 @@ def _benchmark(fn: Callable[[], None], *, warmup: int, iterations: int) -> float
     start = time.perf_counter()
     for _ in range(iterations):
         fn()
+    torch.npu.synchronize()
+    return (time.perf_counter() - start) * 1_000_000 / iterations
+
+
+def _benchmark_graph(fn: Callable[[], None], *, warmup: int, iterations: int) -> float:
+    fn()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        fn()
+    for _ in range(warmup):
+        graph.replay()
+    torch.npu.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        graph.replay()
     torch.npu.synchronize()
     return (time.perf_counter() - start) * 1_000_000 / iterations
 
@@ -85,6 +99,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=48)
     parser.add_argument("--num-weight-sets", type=int, default=32)
+    parser.add_argument("--rank", type=int, default=16, choices=(8, 16, 32, 64))
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--iterations", type=int, default=200)
     parser.add_argument("--output-json")
@@ -92,7 +107,7 @@ def main() -> None:
 
     hidden_size = 4096
     intermediate_size = 2048
-    rank = 16
+    rank = args.rank
     indices = torch.arange(args.rows, dtype=torch.int64, device="npu").remainder(args.num_weight_sets)
     indices[2::4] = -1
 
@@ -100,40 +115,97 @@ def main() -> None:
     w13_a, w13_b = _weights(args.num_weight_sets, hidden_size, (intermediate_size, intermediate_size), rank)
     w13_baseline = torch.empty(args.rows, intermediate_size * 2, dtype=torch.bfloat16, device="npu")
     w13_fused = torch.empty_like(w13_baseline)
+    w13_fp32 = torch.empty_like(w13_baseline, dtype=torch.float32)
 
     w2_input = torch.randn(args.rows, intermediate_size, dtype=torch.bfloat16, device="npu")
     w2_a, w2_b = _weights(args.num_weight_sets, intermediate_size, (hidden_size,), rank)
     w2_baseline = torch.empty(args.rows, hidden_size, dtype=torch.bfloat16, device="npu")
     w2_fused = torch.empty_like(w2_baseline)
+    w2_fp32 = torch.empty_like(w2_baseline, dtype=torch.float32)
 
     def baseline() -> None:
+        w13_baseline.zero_()
         _run_projection(w13_input, w13_a, w13_b, indices, w13_baseline, add_inputs=True)
+        w2_baseline.zero_()
         _run_projection(w2_input, w2_a, w2_b, indices, w2_baseline, add_inputs=True)
 
     def fused() -> None:
         _run_projection(w13_input, w13_a, w13_b, indices, w13_fused, add_inputs=False)
         _run_projection(w2_input, w2_a, w2_b, indices, w2_fused, add_inputs=False)
 
+    def fp32_fused() -> None:
+        _run_projection(w13_input, w13_a, w13_b, indices, w13_fp32, add_inputs=False)
+        _run_projection(w2_input, w2_a, w2_b, indices, w2_fp32, add_inputs=False)
+
     baseline()
     fused()
+    fp32_fused()
     torch.npu.synchronize()
     w13_difference = _difference_stats(w13_fused, w13_baseline)
     w2_difference = _difference_stats(w2_fused, w2_baseline)
     torch.testing.assert_close(w13_fused.cpu(), w13_baseline.cpu(), atol=2e-2, rtol=2e-2)
     torch.testing.assert_close(w2_fused.cpu(), w2_baseline.cpu(), atol=2e-2, rtol=2e-2)
 
+    w13_base = torch.randn_like(w13_baseline)
+    w2_base = torch.randn_like(w2_baseline)
+    w13_direct = w13_base.clone()
+    w2_direct = w2_base.clone()
+    _run_projection(w13_input, w13_a, w13_b, indices, w13_direct, add_inputs=True)
+    _run_projection(w2_input, w2_a, w2_b, indices, w2_direct, add_inputs=True)
+    w13_fp32_merged = w13_base.clone().add_(w13_fp32)
+    w2_fp32_merged = w2_base.clone().add_(w2_fp32)
+    w13_bf16_merged = w13_base.clone()
+    w2_bf16_merged = w2_base.clone()
+    torch.npu.synchronize()
+    w13_fp32_merge_difference = _difference_stats(w13_fp32_merged, w13_direct)
+    w2_fp32_merge_difference = _difference_stats(w2_fp32_merged, w2_direct)
+    assert w13_fp32_merge_difference["bitwise_equal"]
+    assert w2_fp32_merge_difference["bitwise_equal"]
+
     baseline_us = _benchmark(baseline, warmup=args.warmup, iterations=args.iterations)
     fused_us = _benchmark(fused, warmup=args.warmup, iterations=args.iterations)
+    fp32_fused_us = _benchmark(fp32_fused, warmup=args.warmup, iterations=args.iterations)
+    graph_fused_us = _benchmark_graph(
+        fused,
+        warmup=args.warmup,
+        iterations=args.iterations,
+    )
+    graph_fp32_fused_us = _benchmark_graph(
+        fp32_fused,
+        warmup=args.warmup,
+        iterations=args.iterations,
+    )
+
+    def merge_bf16() -> None:
+        w13_bf16_merged.add_(w13_fused)
+        w2_bf16_merged.add_(w2_fused)
+
+    def merge_fp32() -> None:
+        w13_fp32_merged.add_(w13_fp32)
+        w2_fp32_merged.add_(w2_fp32)
+
+    bf16_merge_us = _benchmark(merge_bf16, warmup=args.warmup, iterations=args.iterations)
+    fp32_merge_us = _benchmark(merge_fp32, warmup=args.warmup, iterations=args.iterations)
     result = {
         "rows": args.rows,
         "num_weight_sets": args.num_weight_sets,
         "rank": rank,
         "baseline_us": baseline_us,
         "fused_us": fused_us,
+        "fp32_fused_us": fp32_fused_us,
+        "fp32_output_overhead_percent": (fp32_fused_us - fused_us) / fused_us * 100,
+        "bf16_merge_us": bf16_merge_us,
+        "fp32_merge_us": fp32_merge_us,
+        "fp32_merge_overhead_percent": (fp32_merge_us - bf16_merge_us) / bf16_merge_us * 100,
+        "graph_fused_us": graph_fused_us,
+        "graph_fp32_fused_us": graph_fp32_fused_us,
+        "graph_fp32_output_overhead_percent": (graph_fp32_fused_us - graph_fused_us) / graph_fused_us * 100,
         "speedup_percent": (baseline_us - fused_us) / baseline_us * 100,
         "removed_zero_fill_launches_per_layer": 5,
         "w13_difference": w13_difference,
         "w2_difference": w2_difference,
+        "w13_fp32_merge_difference": w13_fp32_merge_difference,
+        "w2_fp32_merge_difference": w2_fp32_merge_difference,
     }
     payload = json.dumps(result, indent=2)
     print(payload)

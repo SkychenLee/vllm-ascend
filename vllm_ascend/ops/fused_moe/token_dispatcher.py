@@ -41,8 +41,10 @@ from vllm_ascend.lora.fused_moe import (
     preprocess_lora_indices,
 )
 from vllm_ascend.lora.quant_moe import (
+    MOE_LORA_COMPOSITE_GMM_FAST_PATH_ENABLED,
     MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED,
     _can_prepare_composite_lora_gmm,
+    _can_prepare_prefill_bgmv_sideband,
     _can_prepare_single_lora_gmm,
     validate_quant_moe_lora_activation_input,
 )
@@ -457,6 +459,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
         route_composite_lora_slots = (
             batch_has_lora
+            and MOE_LORA_COMPOSITE_GMM_FAST_PATH_ENABLED
             and quant_type == QuantType.W8A8
             and not route_single_lora_slots
             and is_decode_only is False
@@ -469,12 +472,28 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 expert_map=expert_map,
             )
         )
+        route_prefill_bgmv_slots = (
+            batch_has_lora
+            and not route_single_lora_slots
+            and not route_composite_lora_slots
+            and quant_type == QuantType.W8A8
+            and is_decode_only is False
+            and _can_prepare_prefill_bgmv_sideband(
+                self.lora_context,
+                hidden_dtype=hidden_states.dtype,
+                num_routed_rows=num_tokens * self.top_k,
+                group_list_type=1,
+                expert_map=expert_map,
+            )
+        )
         # Decode intentionally does not route LoRA slots through the
         # init-routing scale sideband.  EP decode uses the same
         # expanded_row_idx/topk_ids recovery contract as the validated no-EP
         # path; the recovery itself is still deferred to the auxiliary stream.
-        # Keep the sideband only for the prefill-only GMM paths.
-        route_lora_slots = route_single_lora_slots or route_composite_lora_slots
+        # Keep the sideband only for explicitly enabled prefill experiments;
+        # the default prefill path fuses expanded_row_idx directly and avoids
+        # adding scale traffic to init-routing.
+        route_lora_slots = route_single_lora_slots or route_composite_lora_slots or route_prefill_bgmv_slots
         routing_scale = dynamic_scale
         if route_lora_slots:
             if dynamic_scale is not None or quant_mode != -1:
@@ -510,7 +529,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                     f"{tuple(routed_scale.shape)} for routed activations "
                     f"{tuple(sorted_hidden_states.shape)}."
                 )
-            if route_composite_lora_slots:
+            if route_composite_lora_slots or route_prefill_bgmv_slots:
                 # The compute-side fused helpers mask the undefined non-local
                 # tail using the expert counts. Keep init-routing's FP32 output
                 # unchanged: composite prefill produces group IDs/counts

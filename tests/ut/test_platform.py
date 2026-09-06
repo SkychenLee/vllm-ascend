@@ -9,7 +9,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.platform import NPUPlatform, _uses_moe_lora_allgather
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -84,6 +84,26 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
+
+    def test_uses_moe_lora_allgather(self):
+        cases = [
+            (True, True, "allgather_reducescatter", True),
+            (False, True, "allgather_reducescatter", False),
+            (True, False, "allgather_reducescatter", False),
+            (True, True, "flashinfer_all2allv", False),
+        ]
+        for has_lora, enable_expert_parallel, backend, expected in cases:
+            with self.subTest(
+                has_lora=has_lora,
+                enable_expert_parallel=enable_expert_parallel,
+                backend=backend,
+            ):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.lora_config = MagicMock() if has_lora else None
+                vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
+                vllm_config.parallel_config.all2all_backend = backend
+
+                self.assertEqual(_uses_moe_lora_allgather(vllm_config), expected)
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())

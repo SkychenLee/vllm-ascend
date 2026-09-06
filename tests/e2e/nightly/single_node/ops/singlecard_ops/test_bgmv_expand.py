@@ -90,7 +90,44 @@ def test_bgmv_expand(dtype: torch.dtype, slice_size: int, add_inputs: bool):
 
 
 @torch.inference_mode()
-def test_bgmv_expand_overwrite_aclgraph_clears_stale_rows():
+@pytest.mark.parametrize("weight_dtype", [torch.float16, torch.bfloat16])
+def test_bgmv_expand_overwrite_fp32_output(weight_dtype: torch.dtype):
+    batch_size = 4
+    slice_offset = 128
+    slice_size = 2048
+    x = torch.randn([batch_size, 16], dtype=torch.float32)
+    w = torch.randn([2, slice_size, 16], dtype=weight_dtype)
+    indices = torch.tensor([0, -1, 1, -1], dtype=torch.int64)
+    y = torch.randn([batch_size, slice_size + 256], dtype=torch.float32)
+
+    expected = bgmv_expand_cpu_impl(
+        x,
+        w,
+        indices,
+        y,
+        slice_offset,
+        slice_size,
+        False,
+    )
+    actual = torch.ops._C_ascend.bgmv_expand(
+        x.npu(),
+        w.npu(),
+        indices.npu(),
+        y.clone().npu(),
+        slice_offset,
+        slice_size,
+        False,
+    )
+
+    torch.testing.assert_close(actual.cpu(), expected, atol=BF16_ATOL, rtol=BF16_RTOL)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
+def test_bgmv_expand_overwrite_aclgraph_clears_stale_rows(output_dtype: torch.dtype):
     batch_size = 4
     slice_offset = 128
     slice_size = 4096
@@ -98,7 +135,7 @@ def test_bgmv_expand_overwrite_aclgraph_clears_stale_rows():
     x = torch.randn([batch_size, 16], dtype=torch.float32).npu()
     w = torch.randn([2, slice_size, 16], dtype=torch.bfloat16).npu()
     indices = torch.zeros([batch_size], dtype=torch.int64).npu()
-    y = torch.empty([batch_size, output_size], dtype=torch.bfloat16, device="npu")
+    y = torch.empty([batch_size, output_size], dtype=output_dtype, device="npu")
 
     def overwrite():
         return torch.ops._C_ascend.bgmv_expand(

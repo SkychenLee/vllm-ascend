@@ -14,9 +14,12 @@ from vllm_ascend.lora.quant_moe import (
     _add_single_lora_gmm,
     _build_composite_lora_gmm_routing,
     _build_single_lora_gmm_routing,
+    _can_prepare_prefill_bgmv_sideband,
     _can_use_composite_lora_gmm,
     _can_use_ep_moe_lora_aux_stream,
+    _can_use_prefill_clipped_swiglu,
     _can_use_single_lora_gmm,
+    _can_use_sparse_w8a8_group_list,
     _CompositeLoraGMMRouting,
     _execute_moe_lora_in_parallel,
     _new_lora_delta_workspace,
@@ -46,6 +49,83 @@ def test_ep_moe_lora_aux_stream_eligibility(comm_type) -> None:
     context.use_ep = True
     context.fully_sharded = True
     assert not _can_use_ep_moe_lora_aux_stream(context, comm_type, is_decode_only=True)
+
+
+def test_prefill_clipped_swiglu_eligibility_is_prefill_only() -> None:
+    with patch.object(torch_npu, "npu_clipped_swiglu", create=True):
+        assert _can_use_prefill_clipped_swiglu("silu", 10.0, is_decode_only=False)
+        assert not _can_use_prefill_clipped_swiglu("silu", 10.0, is_decode_only=True)
+        assert not _can_use_prefill_clipped_swiglu("silu", 0.0, is_decode_only=False)
+        assert not _can_use_prefill_clipped_swiglu("gelu", 10.0, is_decode_only=False)
+
+
+def test_sparse_w8a8_group_list_eligibility_is_decode_ep_only() -> None:
+    context = SimpleNamespace(use_ep=True)
+    group_list = torch.tensor([1, 0, 1, 0], dtype=torch.int64)
+    w1 = torch.ones(4, 4, 6, dtype=torch.int8)
+    w2 = torch.ones(4, 3, 4, dtype=torch.int8)
+
+    with patch.object(
+        torch.ops._C_ascend,
+        "moe_lora_prepare_sparse_group_list",
+        create=True,
+    ):
+        assert not _can_use_sparse_w8a8_group_list(
+            context,
+            MoECommType.ALLGATHER,
+            is_decode_only=True,
+            group_list=group_list,
+            group_list_type=1,
+            w1=w1,
+            w2=w2,
+        )
+
+        with patch(f"{QUANT_MOE}.MOE_LORA_SPARSE_W8A8_GMM_ENABLED", True):
+            assert _can_use_sparse_w8a8_group_list(
+                context,
+                MoECommType.ALLGATHER,
+                is_decode_only=True,
+                group_list=group_list,
+                group_list_type=1,
+                w1=w1,
+                w2=w2,
+            )
+
+    with (
+        patch(f"{QUANT_MOE}.MOE_LORA_SPARSE_W8A8_GMM_ENABLED", True),
+        patch.object(
+            torch.ops._C_ascend,
+            "moe_lora_prepare_sparse_group_list",
+            create=True,
+        ),
+    ):
+        assert not _can_use_sparse_w8a8_group_list(
+            context,
+            MoECommType.ALLGATHER,
+            is_decode_only=False,
+            group_list=group_list,
+            group_list_type=1,
+            w1=w1,
+            w2=w2,
+        )
+        assert not _can_use_sparse_w8a8_group_list(
+            context,
+            MoECommType.ALLTOALL,
+            is_decode_only=True,
+            group_list=group_list,
+            group_list_type=1,
+            w1=w1,
+            w2=w2,
+        )
+        assert not _can_use_sparse_w8a8_group_list(
+            context,
+            MoECommType.ALLGATHER,
+            is_decode_only=True,
+            group_list=group_list,
+            group_list_type=0,
+            w1=w1,
+            w2=w2,
+        )
 
 
 def test_execute_moe_lora_in_parallel_forks_and_joins_streams() -> None:
@@ -161,7 +241,7 @@ def test_lora_delta_workspace_is_reused_for_w13_and_w2() -> None:
     workspace, w13_output_size, w2_output_size = _new_lora_delta_workspace(inputs, w13_b, w2_b)
 
     assert workspace.shape == (5, 8)
-    assert workspace.dtype == inputs.dtype
+    assert workspace.dtype == torch.float32
     assert w13_output_size == 8
     assert w2_output_size == 4
 
@@ -271,6 +351,120 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         bgmv_lora_indices=None,
         add_inputs=True,
     )
+
+
+def test_dynamic_int8_ep_decode_uses_sparse_group_list_for_base_gmms() -> None:
+    lora_context = SimpleNamespace(use_ep=True, fully_sharded=False)
+    mlp_input = _make_input(lora_context=lora_context)
+    sparse_group_list = torch.tensor([[0, 1], [1, 1]], dtype=torch.int64)
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+    activated = torch.randn(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(
+            f"{QUANT_MOE}._can_use_sparse_w8a8_group_list",
+            return_value=True,
+        ) as can_use_sparse,
+        patch(
+            f"{QUANT_MOE}.moe_lora_prepare_sparse_group_list",
+            return_value=sparse_group_list,
+        ) as prepare_sparse,
+        patch(
+            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+            side_effect=[
+                (quantized_input, input_scale),
+                (quantized_activated, activated_scale),
+            ],
+        ),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_grouped_matmul",
+            return_value=[gate_up_out],
+            create=True,
+        ) as gmm1,
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch.object(
+            DeviceOperator,
+            "npu_grouped_matmul_gmm2",
+            return_value=down_out,
+        ) as gmm2,
+        patch(
+            f"{QUANT_MOE}._recover_moe_lora_routing_allgather",
+            return_value=routing,
+        ),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = True
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    can_use_sparse.assert_called_once()
+    prepare_sparse.assert_called_once_with(mlp_input.group_list)
+    assert gmm1.call_args.kwargs["group_list"] is sparse_group_list
+    assert gmm1.call_args.kwargs["group_list_type"] == 2
+    assert gmm2.call_args.kwargs["group_list"] is sparse_group_list
+    assert gmm2.call_args.kwargs["group_list_type"] == 2
+
+
+def test_dynamic_int8_prefill_uses_clipped_swiglu_for_dsv4() -> None:
+    lora_context = SimpleNamespace(use_ep=False, fully_sharded=False)
+    mlp_input = _make_input(lora_context=lora_context, swiglu_limit=10.0)
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+    activated = torch.randn(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(
+            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+            side_effect=[
+                (quantized_input, input_scale),
+                (quantized_activated, activated_scale),
+            ],
+        ),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_grouped_matmul",
+            return_value=[gate_up_out],
+            create=True,
+        ),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_clipped_swiglu",
+            return_value=activated,
+            create=True,
+        ) as clipped_swiglu,
+        patch(f"{QUANT_MOE}._apply_moe_activation") as fallback_activation,
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(
+            f"{QUANT_MOE}._recover_moe_lora_routing_allgather",
+            return_value=routing,
+        ),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = False
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    clipped_swiglu.assert_called_once_with(
+        gate_up_out,
+        interleaved=False,
+        alpha=1.0,
+        limit=10.0,
+        bias=0.0,
+    )
+    fallback_activation.assert_not_called()
 
 
 @pytest.mark.parametrize("comm_type", [MoECommType.ALLGATHER, MoECommType.ALLTOALL])
@@ -599,15 +793,14 @@ def test_dynamic_int8_uses_sideband_slots_routing_when_dispatched() -> None:
     assert apply_w2.call_args.kwargs["lora_routing"] is routing
 
 
-def test_dynamic_int8_ep_decode_uses_recover_even_with_sideband_slots() -> None:
+def test_dynamic_int8_ep_prefill_sideband_builds_bgmv_indices() -> None:
     lora_context = _make_gmm_lora_context(use_ep=True)
-    lora_context.aux_stream = object()
-    lora_context.events = tuple(object() for _ in range(4))
     lora_context.moe_lora_expert_ids_with_tail = torch.tensor([0, 1, -1])
-    routed_lora_slots = torch.tensor([0, -1], dtype=torch.long)
+    routed_lora_slots = torch.tensor([0.0, -1.0], dtype=torch.float32)
     mlp_input = _make_input(
         lora_context=lora_context,
         routed_lora_slots=routed_lora_slots,
+        expert_map=torch.tensor([0, 1], dtype=torch.int32),
     )
     quantized_input = torch.ones(2, 4, dtype=torch.int8)
     input_scale = torch.ones(2)
@@ -617,10 +810,76 @@ def test_dynamic_int8_ep_decode_uses_recover_even_with_sideband_slots() -> None:
     activated_scale = torch.ones(2)
     down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
     prepared_indices = torch.tensor([0, -1], dtype=torch.long)
-    recovered_routing = (torch.tensor([0, 1]), torch.tensor([0, -1]))
-    lora_context.punica_wrapper.prepare_fused_moe_lora_indices = MagicMock(
-        return_value=prepared_indices,
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(
+            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+            side_effect=[
+                (quantized_input, input_scale),
+                (quantized_activated, activated_scale),
+            ],
+        ),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_grouped_matmul",
+            return_value=[gate_up_out],
+            create=True,
+        ),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
+        patch(f"{QUANT_MOE}._can_use_single_lora_gmm", return_value=False),
+        patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=False),
+        patch(
+            f"{QUANT_MOE}._can_prepare_prefill_bgmv_sideband",
+            return_value=True,
+        ),
+        patch(
+            f"{QUANT_MOE}._prepare_moe_lora_bgmv_indices_from_slots",
+            return_value=prepared_indices,
+        ) as prepare_slots,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather") as recover_allgather,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        extra_ctx.is_decode_only = False
+        quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
+
+    prepare_slots.assert_called_once_with(
+        routed_lora_slots,
+        mlp_input.group_list,
+        lora_context.adapter_enabled,
+        lora_context.moe_lora_expert_ids_with_tail,
     )
+    recover_allgather.assert_not_called()
+    assert apply_w13.call_args.kwargs["lora_routing"] is None
+    assert apply_w13.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
+    assert apply_w2.call_args.kwargs["lora_routing"] is None
+    assert apply_w2.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
+
+
+@pytest.mark.parametrize("is_decode_only", [False, True])
+def test_dynamic_int8_ep_allgather_fuses_validated_recover_contract(
+    is_decode_only: bool,
+) -> None:
+    lora_context = _make_gmm_lora_context(use_ep=True)
+    lora_context.aux_stream = object()
+    lora_context.events = tuple(object() for _ in range(4))
+    lora_context.moe_lora_expert_ids_with_tail = torch.tensor([0, 1, -1])
+    routed_lora_slots = torch.tensor([0, -1], dtype=torch.long)
+    mlp_input = _make_input(
+        lora_context=lora_context,
+        routed_lora_slots=routed_lora_slots,
+        expert_map=torch.tensor([0, 1], dtype=torch.int32),
+    )
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.zeros(2, 6, dtype=torch.bfloat16)
+    activated = torch.ones(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.zeros(2, 4, dtype=torch.bfloat16)
+    prepared_indices = torch.tensor([0, -1], dtype=torch.long)
 
     quant_results = iter(
         [
@@ -642,38 +901,36 @@ def test_dynamic_int8_ep_decode_uses_recover_even_with_sideband_slots() -> None:
         patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
         patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
         patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
-        patch(f"{QUANT_MOE}._can_use_ep_moe_lora_aux_stream", return_value=True),
+        patch(
+            f"{QUANT_MOE}._can_use_ep_moe_lora_aux_stream",
+            side_effect=lambda *_args, **kwargs: kwargs["is_decode_only"],
+        ),
         patch(f"{QUANT_MOE}._execute_moe_lora_in_parallel", side_effect=execute_parallel),
         patch(
-            f"{QUANT_MOE}._prepare_moe_lora_bgmv_indices_from_slots",
+            f"{QUANT_MOE}._prepare_moe_lora_bgmv_indices_allgather",
             return_value=prepared_indices,
-        ) as prepare_slots,
+        ) as prepare_allgather,
+        patch(f"{QUANT_MOE}._prepare_moe_lora_bgmv_indices_from_slots") as prepare_slots,
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_from_slots") as recover_slots,
-        patch(
-            f"{QUANT_MOE}._recover_moe_lora_routing_allgather",
-            return_value=recovered_routing,
-        ) as recover_allgather,
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather") as recover_allgather,
         patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
         patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
-        extra_ctx.is_decode_only = True
+        extra_ctx.is_decode_only = is_decode_only
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
-    prepare_slots.assert_not_called()
-    recover_slots.assert_not_called()
-    recover_allgather.assert_called_once_with(
+    prepare_allgather.assert_called_once_with(
         lora_context,
         mlp_input.expanded_row_idx,
         mlp_input.topk_ids,
-        expert_map=mlp_input.expert_map,
+        mlp_input.expert_map,
+        lora_context.adapter_enabled,
+        lora_context.w13_lora_a_stacked[0].shape[1],
     )
-    lora_context.punica_wrapper.prepare_fused_moe_lora_indices.assert_called_once_with(
-        expert_ids=recovered_routing[0],
-        token_lora_mapping=recovered_routing[1],
-        adapter_enabled=lora_context.adapter_enabled,
-        num_experts=lora_context.w13_lora_a_stacked[0].shape[1],
-    )
+    prepare_slots.assert_not_called()
+    recover_slots.assert_not_called()
+    recover_allgather.assert_not_called()
     assert apply_w13.call_args.kwargs["lora_routing"] is None
     assert apply_w13.call_args.kwargs["bgmv_lora_indices"] is prepared_indices
     assert apply_w2.call_args.kwargs["lora_routing"] is None
@@ -790,6 +1047,7 @@ def test_dynamic_int8_uses_composite_gmm_without_recovering_routing() -> None:
         patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
         patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
         patch(f"{QUANT_MOE}._can_use_single_lora_gmm", return_value=False),
+        patch(f"{QUANT_MOE}.MOE_LORA_COMPOSITE_GMM_FAST_PATH_ENABLED", True),
         patch(f"{QUANT_MOE}._can_use_composite_lora_gmm", return_value=True),
         patch(
             f"{QUANT_MOE}._build_composite_lora_gmm_routing",
@@ -1061,6 +1319,53 @@ def test_composite_lora_gmm_checks_mixed_requests_and_minimum_rows() -> None:
         group_list_type=1,
         routed_lora_slots=routed_lora_slots,
     )
+
+
+def test_prefill_bgmv_sideband_eligibility_is_ep_only() -> None:
+    context = _make_gmm_lora_context(use_ep=True)
+    expert_map = torch.tensor([-1, 0, 1, -1], dtype=torch.int32)
+    with (
+        patch.object(
+            torch.ops._C_ascend,
+            "moe_lora_prepare_bgmv_indices",
+            create=True,
+        ),
+        patch(
+            f"{QUANT_MOE}.MOE_LORA_PREFILL_BGMV_SIDEBAND_ENABLED",
+            True,
+        ),
+    ):
+        assert _can_prepare_prefill_bgmv_sideband(
+            context,
+            hidden_dtype=torch.bfloat16,
+            num_routed_rows=4096,
+            group_list_type=1,
+            expert_map=expert_map,
+        )
+        assert not _can_prepare_prefill_bgmv_sideband(
+            context,
+            hidden_dtype=torch.bfloat16,
+            num_routed_rows=262145,
+            group_list_type=1,
+            expert_map=expert_map,
+        )
+        context.use_ep = False
+        assert not _can_prepare_prefill_bgmv_sideband(
+            context,
+            hidden_dtype=torch.bfloat16,
+            num_routed_rows=4096,
+            group_list_type=1,
+            expert_map=None,
+        )
+        context.use_ep = True
+        context.fully_sharded = True
+        assert not _can_prepare_prefill_bgmv_sideband(
+            context,
+            hidden_dtype=torch.bfloat16,
+            num_routed_rows=4096,
+            group_list_type=1,
+            expert_map=expert_map,
+        )
 
 
 @pytest.mark.parametrize(

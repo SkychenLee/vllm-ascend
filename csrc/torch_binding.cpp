@@ -67,7 +67,8 @@ namespace {
 
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
-constexpr int64_t MAX_MOE_LORA_DECODE_ROUTED_ROWS = 4096;
+constexpr int64_t MAX_MOE_LORA_ALLGATHER_ROUTED_ROWS = 4096;
+constexpr int64_t MAX_MOE_LORA_SLOT_ROUTED_ROWS = 262144;
 constexpr int64_t MAX_MOE_LORA_COMPOSITE_ROUTED_ROWS = 262144;
 constexpr int64_t MAX_MOE_LORA_LOCAL_EXPERTS = 256;
 constexpr int64_t MAX_MOE_LORA_SLOTS = 256;
@@ -317,6 +318,86 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     }
 }
 
+void moe_lora_prepare_allgather_bgmv_indices(
+    at::Tensor &expanded_row_idx, at::Tensor &topk_ids,
+    at::Tensor &token_lora_indices, at::Tensor &expert_map,
+    at::Tensor &adapter_enabled, at::Tensor &output,
+    int64_t num_local_experts)
+{
+    TORCH_CHECK(expanded_row_idx.scalar_type() == torch::kInt,
+                "expanded_row_idx must be int32");
+    TORCH_CHECK(topk_ids.scalar_type() == torch::kInt,
+                "topk_ids must be int32");
+    TORCH_CHECK(token_lora_indices.scalar_type() == torch::kLong,
+                "token_lora_indices must be int64");
+    TORCH_CHECK(expert_map.scalar_type() == torch::kInt,
+                "expert_map must be int32");
+    TORCH_CHECK(adapter_enabled.scalar_type() == torch::kInt,
+                "adapter_enabled must be int32");
+    TORCH_CHECK(output.scalar_type() == torch::kLong, "output must be int64");
+    TORCH_CHECK(expanded_row_idx.dim() == 1 && topk_ids.dim() == 2 &&
+                    token_lora_indices.dim() == 1 && expert_map.dim() == 1 &&
+                    adapter_enabled.dim() == 1 && output.dim() == 1,
+                "AllGather routing inputs and output have invalid dimensions");
+    TORCH_CHECK(expanded_row_idx.numel() == topk_ids.numel() &&
+                    output.numel() == expanded_row_idx.numel(),
+                "expanded_row_idx, topk_ids, and output must contain the same "
+                "number of routed pairs");
+    TORCH_CHECK(token_lora_indices.numel() >= topk_ids.size(0),
+                "token_lora_indices must cover every routed token");
+    TORCH_CHECK(expanded_row_idx.is_contiguous() && topk_ids.is_contiguous() &&
+                    token_lora_indices.is_contiguous() && expert_map.is_contiguous() &&
+                    adapter_enabled.is_contiguous() && output.is_contiguous(),
+                "all inputs and output must be contiguous");
+    TORCH_CHECK(topk_ids.size(1) > 0, "top_k must be positive");
+    TORCH_CHECK(expert_map.numel() > 0, "expert_map must not be empty");
+    TORCH_CHECK(adapter_enabled.numel() > 0,
+                "adapter_enabled must not be empty");
+    TORCH_CHECK(num_local_experts > 0 &&
+                    num_local_experts <= MAX_MOE_LORA_LOCAL_EXPERTS,
+                "num_local_experts must be in [1, ",
+                MAX_MOE_LORA_LOCAL_EXPERTS, "]");
+    TORCH_CHECK(output.numel() <= MAX_MOE_LORA_ALLGATHER_ROUTED_ROWS,
+                "moe_lora_prepare_allgather_bgmv_indices supports at most ",
+                MAX_MOE_LORA_ALLGATHER_ROUTED_ROWS, " routed pairs");
+    TORCH_CHECK(expert_map.numel() <= MAX_MOE_LORA_LOCAL_EXPERTS,
+                "moe_lora_prepare_allgather_bgmv_indices supports at most ",
+                MAX_MOE_LORA_LOCAL_EXPERTS, " global experts");
+    TORCH_CHECK(adapter_enabled.numel() <= MAX_MOE_LORA_SLOTS,
+                "moe_lora_prepare_allgather_bgmv_indices supports at most ",
+                MAX_MOE_LORA_SLOTS, " LoRA slots");
+    if (output.numel() == 0) {
+        return;
+    }
+
+    void* expanded_row_idx_ptr = expanded_row_idx.data_ptr();
+    void* topk_ids_ptr = topk_ids.data_ptr();
+    void* token_lora_indices_ptr = token_lora_indices.data_ptr();
+    void* expert_map_ptr = expert_map.data_ptr();
+    void* adapter_enabled_ptr = adapter_enabled.data_ptr();
+    void* output_ptr = output.data_ptr();
+    uint32_t num_pairs = output.numel();
+    uint32_t num_tokens = topk_ids.size(0);
+    uint32_t top_k = topk_ids.size(1);
+    uint32_t num_global_experts = expert_map.numel();
+    uint32_t num_loras = adapter_enabled.numel();
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("moe_lora_prepare_allgather_bgmv_indices");
+    cmd.SetCustomHandler(
+        [stream, expanded_row_idx_ptr, topk_ids_ptr, token_lora_indices_ptr,
+         expert_map_ptr, adapter_enabled_ptr, output_ptr, num_pairs, num_tokens,
+         top_k, num_global_experts, num_local_experts, num_loras]() -> int {
+            moe_lora_prepare_allgather_bgmv_indices_impl(
+                stream, expanded_row_idx_ptr, topk_ids_ptr,
+                token_lora_indices_ptr, expert_map_ptr, adapter_enabled_ptr,
+                output_ptr, num_pairs, num_tokens, top_k, num_global_experts,
+                static_cast<uint32_t>(num_local_experts), num_loras);
+            return 0;
+        });
+    cmd.Run();
+}
+
 void moe_lora_prepare_bgmv_indices(at::Tensor &routed_lora_slots, at::Tensor &group_list,
                                    at::Tensor &adapter_enabled, at::Tensor &output)
 {
@@ -335,10 +416,10 @@ void moe_lora_prepare_bgmv_indices(at::Tensor &routed_lora_slots, at::Tensor &gr
                     adapter_enabled.is_contiguous() && output.is_contiguous(),
                 "all inputs and output must be contiguous");
     TORCH_CHECK(adapter_enabled.numel() > 0, "adapter_enabled must not be empty");
-    TORCH_CHECK(output.numel() <= MAX_MOE_LORA_DECODE_ROUTED_ROWS,
+    TORCH_CHECK(output.numel() <= MAX_MOE_LORA_SLOT_ROUTED_ROWS,
                 "moe_lora_prepare_bgmv_indices supports at most ",
-                MAX_MOE_LORA_DECODE_ROUTED_ROWS,
-                " decode routed rows");
+                MAX_MOE_LORA_SLOT_ROUTED_ROWS,
+                " routed rows");
     TORCH_CHECK(group_list.numel() <= MAX_MOE_LORA_LOCAL_EXPERTS,
                 "moe_lora_prepare_bgmv_indices supports at most ",
                 MAX_MOE_LORA_LOCAL_EXPERTS,
@@ -441,6 +522,44 @@ void moe_lora_prepare_composite_gmm_routing(
     cmd.Run();
 }
 
+void moe_lora_prepare_sparse_group_list(
+    at::Tensor &group_list, at::Tensor &sparse_group_list)
+{
+    TORCH_CHECK(group_list.scalar_type() == torch::kLong,
+                "group_list must be int64");
+    TORCH_CHECK(sparse_group_list.scalar_type() == torch::kLong,
+                "sparse_group_list must be int64");
+    TORCH_CHECK(group_list.dim() == 1,
+                "group_list must be one-dimensional");
+    TORCH_CHECK(sparse_group_list.dim() == 2 &&
+                    sparse_group_list.size(0) == group_list.size(0) &&
+                    sparse_group_list.size(1) == 2,
+                "sparse_group_list must have shape [num_experts, 2]");
+    TORCH_CHECK(group_list.is_contiguous() &&
+                    sparse_group_list.is_contiguous(),
+                "group_list and sparse_group_list must be contiguous");
+    TORCH_CHECK(group_list.numel() > 0,
+                "group_list must not be empty");
+    TORCH_CHECK(group_list.numel() <= MAX_MOE_LORA_LOCAL_EXPERTS,
+                "moe_lora_prepare_sparse_group_list supports at most ",
+                MAX_MOE_LORA_LOCAL_EXPERTS, " local experts");
+
+    void* group_list_ptr = group_list.data_ptr();
+    void* sparse_group_list_ptr = sparse_group_list.data_ptr();
+    uint32_t num_experts = group_list.size(0);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("moe_lora_prepare_sparse_group_list");
+    cmd.SetCustomHandler([
+        stream, group_list_ptr, sparse_group_list_ptr,
+        num_experts]() -> int {
+        moe_lora_prepare_sparse_group_list_impl(
+            stream, group_list_ptr, sparse_group_list_ptr, num_experts);
+        return 0;
+    });
+    cmd.Run();
+}
+
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
@@ -484,8 +603,13 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
 at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                        int64_t slice_offset, int64_t slice_size, bool add_inputs)
 {
-    at::ScalarType scalar_type = y.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
+    at::ScalarType weight_type = weight.scalar_type();
+    at::ScalarType output_type = y.scalar_type();
+    TORCH_CHECK(weight_type == torch::kHalf || weight_type == torch::kBFloat16,
+                "weight only supports half and bf16");
+    TORCH_CHECK(x.scalar_type() == torch::kFloat, "x only supports float32");
+    TORCH_CHECK(output_type == weight_type || (!add_inputs && output_type == torch::kFloat),
+                "y must match the weight dtype, except overwrite mode also supports float32 output");
     TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
     TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
                 "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
@@ -508,19 +632,21 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     int batch_size = x.size(0);
     int lora_rank = x.size(1);
     int output_full_dim = y.size(1);
+    bool output_fp32 = output_type == torch::kFloat;
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
-                          lora_rank, slice_offset, slice_size, output_full_dim, add_inputs]() -> int {
-        auto dtype = get_dtype_from_torch(scalar_type);
+    cmd.SetCustomHandler([weight_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
+                          lora_rank, slice_offset, slice_size, output_full_dim, add_inputs, output_fp32]() -> int {
+        auto dtype = get_dtype_from_torch(weight_type);
         int device_id = 0;
         int64_t aiv_num = 0;
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
         bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
-                         num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim, add_inputs);
+                         num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim, add_inputs,
+                         output_fp32);
         return 0;
     });
     cmd.Run();
@@ -2255,6 +2381,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
     ops.def(
+        "moe_lora_prepare_allgather_bgmv_indices("
+        "Tensor expanded_row_idx, Tensor topk_ids, Tensor token_lora_indices, "
+        "Tensor expert_map, Tensor adapter_enabled, Tensor! output, "
+        "int num_local_experts) -> ()");
+    ops.impl("moe_lora_prepare_allgather_bgmv_indices", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prepare_allgather_bgmv_indices);
+    ops.def(
         "moe_lora_prepare_bgmv_indices(Tensor routed_lora_slots, Tensor group_list, "
         "Tensor adapter_enabled, Tensor! output) -> ()");
     ops.impl("moe_lora_prepare_bgmv_indices", torch::kPrivateUse1,
@@ -2265,10 +2398,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor! group_ids, Tensor! composite_group_list, Tensor! enabled) -> ()");
     ops.impl("moe_lora_prepare_composite_gmm_routing", torch::kPrivateUse1,
              &vllm_ascend::moe_lora_prepare_composite_gmm_routing);
+    ops.def(
+        "moe_lora_prepare_sparse_group_list("
+        "Tensor group_list, Tensor! sparse_group_list) -> ()");
+    ops.impl("moe_lora_prepare_sparse_group_list", torch::kPrivateUse1,
+             &vllm_ascend::moe_lora_prepare_sparse_group_list);
 
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
-
     ops.def(
         "bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
         "            int slice_offset, int slice_size, bool add_inputs=True) -> Tensor");

@@ -38,6 +38,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 sgmv_expand_slice,
                 sgmv_shrink,
             )
+
         else:
             from vllm_ascend.lora.lora_ops import (
                 bgmv_expand,
@@ -475,8 +476,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 dtype=torch.float32,
                 device=x2d.device,
             )
-
-            self.bgmv_shrink(x2d, a_flat, shrink_out, bgmv_lora_indices, 1.0)
+            self.bgmv_shrink(
+                x2d,
+                a_flat,
+                shrink_out,
+                bgmv_lora_indices,
+                1.0,
+            )
 
             if fully_sharded:
                 if local_rank == full_rank:

@@ -42,7 +42,10 @@ from vllm.lora.layers.utils import _get_lora_device
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.lora.lora_ops import moe_lora_prepare_bgmv_indices
+from vllm_ascend.lora.lora_ops import (
+    moe_lora_prepare_allgather_bgmv_indices,
+    moe_lora_prepare_bgmv_indices,
+)
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -54,9 +57,19 @@ _MOE_LORA_INDEX_FIELDS = (
     "allgather_lora_slots",
 )
 
-_MAX_FUSED_DECODE_ROUTED_ROWS = 4096
+# The direct kernel wins for decode and short prefill. Beyond 4K routed pairs,
+# one encoded framework scatter is faster in ACLGraph and has no UB-size limit.
+_MAX_FUSED_ALLGATHER_ROUTED_ROWS = 4096
+_MAX_FUSED_SLOT_ROUTED_ROWS = 262144
 _MAX_FUSED_LOCAL_EXPERTS = 256
 _MAX_FUSED_LORA_SLOTS = 256
+
+
+def _has_direct_allgather_bgmv_indices_kernel() -> bool:
+    return hasattr(
+        torch.ops._C_ascend,
+        "moe_lora_prepare_allgather_bgmv_indices",
+    )
 
 
 @cache
@@ -306,6 +319,76 @@ def _recover_moe_lora_routing_allgather(
     return expert_per_row, lora_per_row
 
 
+def _prepare_moe_lora_bgmv_indices_allgather(
+    lora_context,
+    expanded_row_idx: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+    num_local_experts: int,
+) -> torch.Tensor:
+    """Build EP AllGather's final BGMV index from the recover contract.
+
+    Unlike init-routing's optional scale sideband, these inputs preserve the
+    same original-pair-to-expert-major mapping used by the validated no-EP
+    recover path. The direct kernel performs the local-expert mask, scatter,
+    adapter mask, and ``(slot, expert)`` encoding in one launch for decode and
+    short prefill. Larger or unsupported layouts use an exact single encoded
+    framework scatter instead of materializing separate expert/LoRA routing.
+    """
+    token_lora_indices = get_allgather_lora_indices(lora_context)
+    can_use_fused_kernel = (
+        expanded_row_idx.dtype == torch.int32
+        and topk_ids.dtype == torch.int32
+        and token_lora_indices.dtype == torch.int64
+        and expert_map.dtype == torch.int32
+        and adapter_enabled.dtype == torch.int32
+        and expanded_row_idx.is_contiguous()
+        and topk_ids.is_contiguous()
+        and token_lora_indices.is_contiguous()
+        and expert_map.is_contiguous()
+        and adapter_enabled.is_contiguous()
+        and expanded_row_idx.numel() == topk_ids.numel()
+        and token_lora_indices.numel() >= topk_ids.shape[0]
+        and expanded_row_idx.numel() <= _MAX_FUSED_ALLGATHER_ROUTED_ROWS
+        and expert_map.numel() <= _MAX_FUSED_LOCAL_EXPERTS
+        and 0 < num_local_experts <= _MAX_FUSED_LOCAL_EXPERTS
+        and adapter_enabled.numel() <= _MAX_FUSED_LORA_SLOTS
+        and _has_direct_allgather_bgmv_indices_kernel()
+    )
+    if can_use_fused_kernel:
+        return moe_lora_prepare_allgather_bgmv_indices(
+            expanded_row_idx,
+            topk_ids,
+            token_lora_indices,
+            expert_map,
+            adapter_enabled,
+            num_local_experts,
+        )
+
+    # Encode the final BGMV index before scattering. Local destinations are
+    # unique and non-local pairs contribute zero, so one scatter_add recovers
+    # the exact same rows as the generic two-tensor expert/LoRA recovery. The
+    # +1 encoding reserves zero for masked pairs; subtracting one restores the
+    # BGMV base-model sentinel without another where/index pass.
+    flat_expert_ids = topk_ids.reshape(-1).to(torch.long)
+    local_expert_ids = expert_map[flat_expert_ids].to(torch.long)
+    is_local = local_expert_ids >= 0
+    destination = expanded_row_idx.to(torch.float32).abs().to(torch.long)
+    destination.clamp_(max=max(flat_expert_ids.numel() - 1, 0))
+    lora_per_pair = token_lora_indices[: topk_ids.shape[0]].unsqueeze(-1).expand_as(topk_ids).reshape(-1)
+    safe_lora_slots = lora_per_pair.clamp(min=0)
+    enabled = is_local & (lora_per_pair >= 0) & adapter_enabled[safe_lora_slots].bool()
+    encoded_indices = torch.where(
+        enabled,
+        safe_lora_slots * num_local_experts + local_expert_ids + 1,
+        torch.zeros_like(local_expert_ids),
+    )
+    bgmv_lora_indices = torch.zeros_like(encoded_indices)
+    bgmv_lora_indices.scatter_add_(0, destination, encoded_indices)
+    return bgmv_lora_indices.sub_(1).contiguous()
+
+
 def _expand_moe_lora_expert_ids_from_counts(
     group_list: torch.Tensor,
     num_rows: int,
@@ -389,7 +472,7 @@ def _prepare_moe_lora_bgmv_indices_from_slots(
         and routed_lora_slots.is_contiguous()
         and group_list.is_contiguous()
         and adapter_enabled.is_contiguous()
-        and routed_lora_slots.numel() <= _MAX_FUSED_DECODE_ROUTED_ROWS
+        and routed_lora_slots.numel() <= _MAX_FUSED_SLOT_ROUTED_ROWS
         and group_list.numel() <= _MAX_FUSED_LOCAL_EXPERTS
         and adapter_enabled.numel() <= _MAX_FUSED_LORA_SLOTS
         and hasattr(torch.ops._C_ascend, "moe_lora_prepare_bgmv_indices")

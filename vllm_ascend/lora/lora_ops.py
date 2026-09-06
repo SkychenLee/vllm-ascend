@@ -16,6 +16,27 @@
 import torch
 
 
+def moe_lora_prepare_allgather_bgmv_indices(
+    expanded_row_idx: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_lora_indices: torch.Tensor,
+    expert_map: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+    num_local_experts: int,
+) -> torch.Tensor:
+    output = torch.empty_like(expanded_row_idx, dtype=torch.int64)
+    torch.ops._C_ascend.moe_lora_prepare_allgather_bgmv_indices(
+        expanded_row_idx,
+        topk_ids,
+        token_lora_indices,
+        expert_map,
+        adapter_enabled,
+        output,
+        num_local_experts,
+    )
+    return output
+
+
 def moe_lora_prepare_bgmv_indices(
     routed_lora_slots: torch.Tensor,
     group_list: torch.Tensor,
@@ -53,6 +74,20 @@ def moe_lora_prepare_composite_gmm_routing(
         enabled,
     )
     return group_ids, composite_group_list, enabled
+
+
+def moe_lora_prepare_sparse_group_list(group_list: torch.Tensor) -> torch.Tensor:
+    """Convert count-mode expert groups to GroupedMatmulV5 sparse pairs."""
+    sparse_group_list = torch.empty(
+        (group_list.numel(), 2),
+        dtype=torch.int64,
+        device=group_list.device,
+    )
+    torch.ops._C_ascend.moe_lora_prepare_sparse_group_list(
+        group_list,
+        sparse_group_list,
+    )
+    return sparse_group_list
 
 
 def bgmv_shrink(

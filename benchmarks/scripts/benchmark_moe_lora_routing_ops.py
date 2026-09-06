@@ -638,6 +638,11 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--graph", action="store_true")
     parser.add_argument("--graph-iterations", type=int, default=1000)
+    parser.add_argument(
+        "--candidates",
+        nargs="+",
+        help="Only benchmark the named implementations (for example: current custom_fused_aiv).",
+    )
     args = parser.parse_args()
 
     torch.npu.set_device(0)
@@ -653,6 +658,11 @@ def main() -> None:
             device=device,
         )
         candidates = _make_candidates(case)
+        if args.candidates:
+            unknown = set(args.candidates) - candidates.keys()
+            if unknown:
+                raise ValueError(f"unknown candidates: {sorted(unknown)}")
+            candidates = {name: candidates[name] for name in args.candidates}
 
         reference = candidates["current"]()
         torch.npu.synchronize()

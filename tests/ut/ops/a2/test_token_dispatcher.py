@@ -889,6 +889,53 @@ def test_allgather_w8a8_regular_sideband_fallbacks(
     assert output.routed_lora_slots is None
 
 
+def test_allgather_w8a8_ep_prefill_routes_bgmv_slots() -> None:
+    dispatcher, token_dispatch_input, init_routing_output, token_lora_slots = _build_regular_sideband_fixture()
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_forward_context",
+            return_value=SimpleNamespace(batch_descriptor=SimpleNamespace(has_lora=True)),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._EXTRA_CTX",
+            SimpleNamespace(is_decode_only=False),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_single_lora_gmm",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_composite_lora_gmm",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher._can_prepare_prefill_bgmv_sideband",
+            return_value=True,
+        ) as can_prepare_bgmv,
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    can_prepare_bgmv.assert_called_once()
+    routing_scale = mock_init_routing.call_args.kwargs["scale"]
+    assert routing_scale.dtype == torch.float32
+    assert torch.equal(routing_scale, token_lora_slots.to(torch.float32))
+    assert output.routed_lora_slots.dtype == torch.float32
+    assert torch.equal(output.routed_lora_slots, init_routing_output[3])
+
+
 def test_allgather_w8a8_base_batch_skips_composite_sideband() -> None:
     dispatcher, token_dispatch_input, init_routing_output, _ = _build_regular_sideband_fixture()
 
@@ -998,6 +1045,10 @@ def test_allgather_w8a8_composite_lora_routes_slots_for_ep() -> None:
         patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher._EXTRA_CTX",
             SimpleNamespace(is_decode_only=False),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.MOE_LORA_COMPOSITE_GMM_FAST_PATH_ENABLED",
+            True,
         ),
         patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",

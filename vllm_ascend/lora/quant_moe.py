@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.fused_moe import (
+    _prepare_moe_lora_bgmv_indices_allgather,
     _prepare_moe_lora_bgmv_indices_from_slots,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
@@ -43,7 +44,10 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w13,
     reset_lora_indices,
 )
-from vllm_ascend.lora.lora_ops import moe_lora_prepare_composite_gmm_routing
+from vllm_ascend.lora.lora_ops import (
+    moe_lora_prepare_composite_gmm_routing,
+    moe_lora_prepare_sparse_group_list,
+)
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -81,11 +85,37 @@ MOE_LORA_COMPACT_PERMUTE_MIN_BYTES = 192 * 1024 * 1024
 MAX_FUSED_COMPOSITE_ROUTED_ROWS = 262144
 MAX_FUSED_COMPOSITE_LOCAL_EXPERTS = 256
 MAX_FUSED_COMPOSITE_LORA_SLOTS = 256
+# DSV4 prefill can replace clamp + cat + SwiGLU with one exact CANN op while
+# preserving the BF16 activation consumed by the W2 LoRA branch. Decode stays
+# on the already-validated path.
+MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED = True
 
-# Use expert-grouped LoRA only for large V1 prefill batches. Decode is kept on
-# the regular BGMV path so it can overlap with the base MoE on the auxiliary
-# stream without changing the validated decode performance.
-MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED = True
+# Type-2 GMM itself is neutral for decode, while preparing its sparse group
+# list adds another vector-core launch (~22 us in the targeted microbenchmark).
+# Keep the experiment available for profiling, but do not regress production
+# decode until the dispatcher can emit this layout directly.
+MOE_LORA_SPARSE_W8A8_GMM_ENABLED = False
+
+# Temporarily keep the single-LoRA prefill GMM path disabled while validating
+# the regular decode-only auxiliary-stream path. Decode remains on BGMV and can
+# overlap with the base MoE without this prefill optimization affecting data.
+MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED = False
+
+# Mixed-LoRA GMM changes the numerical contract of the ordinary BGMV path:
+# its BF16 A projection rounds before the B projection, while BGMV keeps the
+# shrink result in FP32.  Keep the optimized implementation available for
+# profiling, but use recover + BGMV by default until a GMM variant matches the
+# established non-EP baseline accuracy.
+MOE_LORA_COMPOSITE_GMM_FAST_PATH_ENABLED = False
+
+# EP prefill can carry the FP32 LoRA slot through init-routing and turn the
+# resulting expert-major sideband directly into BGMV indices. This preserves
+# the ordinary BGMV arithmetic while replacing the generic recover/scatter
+# chain with one static-shape AscendC launch.
+MOE_LORA_PREFILL_BGMV_SIDEBAND_ENABLED = False
+# The expert-parallel tiled kernel remains faster than generic recovery
+# through its validated 256K-row host limit on 910C.
+MAX_FUSED_PREFILL_BGMV_ROUTED_ROWS = 262144
 
 
 def register_quant_moe_lora_impl(
@@ -179,6 +209,23 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
+def _can_use_prefill_clipped_swiglu(
+    activation: str | None,
+    swiglu_limit: float,
+    *,
+    is_decode_only: bool | None,
+) -> bool:
+    """Return whether DSV4 prefill can use the fused clipped SwiGLU op."""
+    act_name = getattr(activation, "value", activation)
+    return (
+        MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED
+        and is_decode_only is False
+        and act_name == "silu"
+        and swiglu_limit > 0
+        and hasattr(torch_npu, "npu_clipped_swiglu")
+    )
+
+
 def _can_use_ep_moe_lora_aux_stream(
     lora_context,
     comm_type: MoECommType,
@@ -195,6 +242,33 @@ def _can_use_ep_moe_lora_aux_stream(
     aux_stream = getattr(lora_context, "aux_stream", None)
     events = getattr(lora_context, "events", None)
     return aux_stream is not None and events is not None and len(events) >= 4
+
+
+def _can_use_sparse_w8a8_group_list(
+    lora_context,
+    comm_type: MoECommType,
+    *,
+    is_decode_only: bool,
+    group_list: torch.Tensor,
+    group_list_type: int,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+) -> bool:
+    """Return whether base W8A8 GMM can skip empty decode experts."""
+    return (
+        MOE_LORA_SPARSE_W8A8_GMM_ENABLED
+        and is_decode_only
+        and comm_type == MoECommType.ALLGATHER
+        and getattr(lora_context, "use_ep", False)
+        and group_list_type == 1
+        and group_list.dtype == torch.int64
+        and group_list.dim() == 1
+        and 0 < group_list.numel() <= MAX_FUSED_COMPOSITE_LOCAL_EXPERTS
+        and group_list.is_contiguous()
+        and w1.dtype == torch.int8
+        and w2.dtype == torch.int8
+        and hasattr(torch.ops._C_ascend, "moe_lora_prepare_sparse_group_list")
+    )
 
 
 def _execute_moe_lora_in_parallel(
@@ -239,10 +313,19 @@ def _new_lora_delta_workspace(
     w13_lora_b_stacked: tuple[torch.Tensor, ...],
     w2_lora_b_stacked: tuple[torch.Tensor, ...],
 ) -> tuple[torch.Tensor, int, int]:
-    """Allocate one delta buffer reused after the W13 stream join for W2."""
+    """Allocate one FP32 delta buffer reused after the W13 join for W2.
+
+    Keeping the auxiliary-stream result in FP32 lets the main stream add the
+    BF16 base output and LoRA delta before the single final BF16 rounding,
+    matching regular BGMV's ``add_inputs=True`` accumulation semantics.
+    """
     w13_output_size = _lora_output_size(w13_lora_b_stacked)
     w2_output_size = _lora_output_size(w2_lora_b_stacked)
-    workspace = inputs.new_empty((*inputs.shape[:-1], max(w13_output_size, w2_output_size)))
+    workspace = torch.empty(
+        (*inputs.shape[:-1], max(w13_output_size, w2_output_size)),
+        dtype=torch.float32,
+        device=inputs.device,
+    )
     return workspace, w13_output_size, w2_output_size
 
 
@@ -369,6 +452,35 @@ def _can_use_composite_lora_gmm(
         num_experts=group_list.numel(),
         group_list_type=group_list_type,
         expert_map=expert_map,
+    )
+
+
+def _can_prepare_prefill_bgmv_sideband(
+    lora_context,
+    *,
+    hidden_dtype: torch.dtype,
+    num_routed_rows: int,
+    group_list_type: int,
+    expert_map: torch.Tensor | None = None,
+) -> bool:
+    """Return whether EP prefill can route directly to ordinary BGMV."""
+    if not MOE_LORA_PREFILL_BGMV_SIDEBAND_ENABLED or lora_context is None:
+        return False
+    punica_wrapper = getattr(lora_context, "punica_wrapper", None)
+    adapter_enabled = getattr(lora_context, "adapter_enabled", None)
+    return (
+        getattr(lora_context, "use_ep", False)
+        and not getattr(lora_context, "fully_sharded", False)
+        and expert_map is not None
+        and punica_wrapper is not None
+        and not getattr(punica_wrapper, "no_lora", True)
+        and hidden_dtype in {torch.bfloat16, torch.float16}
+        and group_list_type == 1
+        and 0 < num_routed_rows <= MAX_FUSED_PREFILL_BGMV_ROUTED_ROWS
+        and isinstance(adapter_enabled, torch.Tensor)
+        and adapter_enabled.dtype == torch.int32
+        and adapter_enabled.is_contiguous()
+        and hasattr(torch.ops._C_ascend, "moe_lora_prepare_bgmv_indices")
     )
 
 
@@ -645,8 +757,26 @@ def _apply_dynamic_int8_moe_lora(
     if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
         raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
 
+    # GroupedMatmulV5 type-2 is only supported when both operands are INT8 on
+    # the current A2/A3 CANN stack. Keep LoRA's BF16 GMM/BGMV routing in count
+    # mode, but let the W8A8 base GMM skip empty local experts during decode.
+    base_group_list = mlp_compute_input.group_list
+    base_group_list_type = mlp_compute_input.group_list_type
+    if _can_use_sparse_w8a8_group_list(
+        lora_context,
+        comm_type,
+        is_decode_only=_EXTRA_CTX.is_decode_only is True,
+        group_list=base_group_list,
+        group_list_type=base_group_list_type,
+        w1=w1[0],
+        w2=w2[0],
+    ):
+        base_group_list = moe_lora_prepare_sparse_group_list(base_group_list)
+        base_group_list_type = 2
+
     use_single_lora_gmm = False
     use_composite_lora_gmm = False
+    use_prefill_bgmv_sideband = False
     if comm_type == MoECommType.ALLGATHER:
         use_single_lora_gmm = (
             MOE_LORA_SINGLE_GMM_FAST_PATH_ENABLED
@@ -661,7 +791,7 @@ def _apply_dynamic_int8_moe_lora(
                 routed_lora_slots=mlp_compute_input.routed_lora_slots,
             )
         )
-        if not use_single_lora_gmm and _EXTRA_CTX.is_decode_only is False:
+        if not use_single_lora_gmm and MOE_LORA_COMPOSITE_GMM_FAST_PATH_ENABLED and _EXTRA_CTX.is_decode_only is False:
             use_composite_lora_gmm = _can_use_composite_lora_gmm(
                 lora_context,
                 hidden_states=hidden_states,
@@ -670,6 +800,14 @@ def _apply_dynamic_int8_moe_lora(
                 expert_map=mlp_compute_input.expert_map,
                 routed_lora_slots=mlp_compute_input.routed_lora_slots,
             )
+        if not use_single_lora_gmm and not use_composite_lora_gmm and _EXTRA_CTX.is_decode_only is False:
+            use_prefill_bgmv_sideband = _can_prepare_prefill_bgmv_sideband(
+                lora_context,
+                hidden_dtype=hidden_states.dtype,
+                num_routed_rows=hidden_states.shape[0],
+                group_list_type=mlp_compute_input.group_list_type,
+                expert_map=mlp_compute_input.expert_map,
+            )
 
     use_aux_stream = _can_use_ep_moe_lora_aux_stream(
         lora_context,
@@ -677,10 +815,10 @@ def _apply_dynamic_int8_moe_lora(
         is_decode_only=_EXTRA_CTX.is_decode_only is True,
     )
     defer_allgather_lora_routing = use_aux_stream and comm_type == MoECommType.ALLGATHER
-    force_ep_decode_recover = (
+    force_ep_allgather_recover = (
         comm_type == MoECommType.ALLGATHER
         and getattr(lora_context, "use_ep", False)
-        and _EXTRA_CTX.is_decode_only is True
+        and mlp_compute_input.expert_map is not None
     )
     lora_routing = None
     single_lora_routing = None
@@ -701,9 +839,27 @@ def _apply_dynamic_int8_moe_lora(
                 routed_lora_slots=mlp_compute_input.routed_lora_slots,
                 group_list=mlp_compute_input.group_list,
             )
+        elif use_prefill_bgmv_sideband:
+            assert mlp_compute_input.routed_lora_slots is not None
+            bgmv_lora_indices = _prepare_moe_lora_bgmv_indices_from_slots(
+                mlp_compute_input.routed_lora_slots,
+                mlp_compute_input.group_list,
+                lora_context.adapter_enabled,
+                getattr(lora_context, "moe_lora_expert_ids_with_tail", None),
+            )
+        elif force_ep_allgather_recover:
+            assert mlp_compute_input.expert_map is not None
+            bgmv_lora_indices = _prepare_moe_lora_bgmv_indices_allgather(
+                lora_context,
+                mlp_compute_input.expanded_row_idx,
+                mlp_compute_input.topk_ids,
+                mlp_compute_input.expert_map,
+                lora_context.adapter_enabled,
+                lora_context.w13_lora_a_stacked[0].shape[1],
+            )
         elif (
             comm_type == MoECommType.ALLGATHER
-            and not force_ep_decode_recover
+            and not force_ep_allgather_recover
             and mlp_compute_input.routed_lora_slots is not None
             and mlp_compute_input.routed_lora_slots.numel() == hidden_states.shape[0]
         ):
@@ -817,8 +973,8 @@ def _apply_dynamic_int8_moe_lora(
             per_token_scale=[input_scale],
             split_item=2,
             group_type=0,
-            group_list=mlp_compute_input.group_list,
-            group_list_type=mlp_compute_input.group_list_type,
+            group_list=base_group_list,
+            group_list_type=base_group_list_type,
             output_dtype=input_dtype,
         )[0]
 
@@ -863,13 +1019,26 @@ def _apply_dynamic_int8_moe_lora(
         gate_up_out = base_w13_fn()
         apply_w13_lora(gate_up_out)
 
-    activated = _apply_moe_activation(
-        gate_up_out,
+    if _can_use_prefill_clipped_swiglu(
         mlp_compute_input.activation,
         mlp_compute_input.swiglu_limit,
-        mlp_compute_input.swiglu_alpha,
-        mlp_compute_input.swiglu_beta,
-    )
+        is_decode_only=_EXTRA_CTX.is_decode_only,
+    ):
+        activated = torch_npu.npu_clipped_swiglu(
+            gate_up_out,
+            interleaved=False,
+            alpha=1.0,
+            limit=mlp_compute_input.swiglu_limit,
+            bias=0.0,
+        )
+    else:
+        activated = _apply_moe_activation(
+            gate_up_out,
+            mlp_compute_input.activation,
+            mlp_compute_input.swiglu_limit,
+            mlp_compute_input.swiglu_alpha,
+            mlp_compute_input.swiglu_beta,
+        )
     if mlp_compute_input.topk_scales is not None:
         activated *= mlp_compute_input.topk_scales
 
@@ -927,8 +1096,8 @@ def _apply_dynamic_int8_moe_lora(
             weight=w2,
             weight_scale=w2_scale,
             per_token_scale=activated_scale,
-            group_list=mlp_compute_input.group_list,
-            group_list_type=mlp_compute_input.group_list_type,
+            group_list=base_group_list,
+            group_list_type=base_group_list_type,
             input_dtype=input_dtype,
             act_quant_type=torch.int8,
             weight_quant_type=None,

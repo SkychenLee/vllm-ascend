@@ -10,6 +10,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
     _expand_moe_lora_expert_ids_from_counts,
+    _prepare_moe_lora_bgmv_indices_allgather,
     _prepare_moe_lora_bgmv_indices_from_slots,
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
@@ -376,6 +377,180 @@ def test_allgather_ep_recover_matches_no_ep_reference() -> None:
     assert torch.all(ep_lora_slots[num_local_rows:] == -1)
 
 
+def test_allgather_ep_bgmv_indices_preserve_recover_order() -> None:
+    context = SimpleNamespace(
+        top_k=2,
+        allgather_lora_indices=torch.tensor([0, 1, -1, 2]),
+    )
+    expanded_row_idx = torch.tensor(
+        [0, -1, -1, 2, -1, -1, 1, -1],
+        dtype=torch.int64,
+    )
+    topk_ids = torch.tensor(
+        [[5, 1], [0, 7], [2, 1], [6, 3]],
+        dtype=torch.int32,
+    )
+    expert_map = torch.tensor(
+        [-1, -1, -1, -1, 0, 1, 2, 3],
+        dtype=torch.int32,
+    )
+    adapter_enabled = torch.tensor([1, 1, 0], dtype=torch.int32)
+
+    actual = _prepare_moe_lora_bgmv_indices_allgather(
+        context,
+        expanded_row_idx,
+        topk_ids,
+        expert_map,
+        adapter_enabled,
+        num_local_experts=4,
+    )
+
+    # Rows follow init-routing's expert-major destination order. Adapter 2 is
+    # deliberately disabled to verify that the final BGMV mask is fused too.
+    assert torch.equal(actual, torch.tensor([1, -1, 7, -1, -1, -1, -1, -1]))
+
+
+def test_allgather_ep_bgmv_indices_uses_direct_kernel() -> None:
+    context = SimpleNamespace(
+        top_k=2,
+        allgather_lora_indices=torch.tensor([0, 1], dtype=torch.int64),
+    )
+    expanded_row_idx = torch.tensor([0, 1, -1, -1], dtype=torch.int32)
+    topk_ids = torch.tensor([[4, 5], [0, 1]], dtype=torch.int32)
+    expert_map = torch.tensor([-1, -1, -1, -1, 0, 1], dtype=torch.int32)
+    adapter_enabled = torch.tensor([1, 1], dtype=torch.int32)
+    expected = torch.tensor([0, 1, -1, -1], dtype=torch.int64)
+
+    with (
+        patch(
+            "vllm_ascend.lora.fused_moe._has_direct_allgather_bgmv_indices_kernel",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.lora.fused_moe.moe_lora_prepare_allgather_bgmv_indices",
+            return_value=expected,
+        ) as prepare,
+    ):
+        actual = _prepare_moe_lora_bgmv_indices_allgather(
+            context,
+            expanded_row_idx,
+            topk_ids,
+            expert_map,
+            adapter_enabled,
+            num_local_experts=2,
+        )
+
+    assert actual is expected
+    prepare.assert_called_once_with(
+        expanded_row_idx,
+        topk_ids,
+        context.allgather_lora_indices,
+        expert_map,
+        adapter_enabled,
+        2,
+    )
+
+
+@pytest.mark.skipif(torch.npu.is_available() is not True, reason="requires an Ascend NPU")
+def test_allgather_ep_bgmv_indices_direct_kernel_integration() -> None:
+    context = SimpleNamespace(
+        top_k=2,
+        allgather_lora_indices=torch.tensor(
+            [0, 1, -1, 2],
+            dtype=torch.int64,
+            device="npu",
+        ),
+    )
+    actual = _prepare_moe_lora_bgmv_indices_allgather(
+        context,
+        torch.tensor(
+            [0, -1, -1, 2, -1, -1, 1, -1],
+            dtype=torch.int32,
+            device="npu",
+        ),
+        torch.tensor(
+            [[5, 1], [0, 7], [2, 1], [6, 3]],
+            dtype=torch.int32,
+            device="npu",
+        ),
+        torch.tensor(
+            [-1, -1, -1, -1, 0, 1, 2, 3],
+            dtype=torch.int32,
+            device="npu",
+        ),
+        torch.tensor([1, 1, 0], dtype=torch.int32, device="npu"),
+        num_local_experts=4,
+    )
+    torch.npu.synchronize()
+
+    expected = torch.tensor([1, -1, 7, -1, -1, -1, -1, -1], dtype=torch.int64)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(torch.npu.is_available() is not True, reason="requires an Ascend NPU")
+def test_allgather_ep_bgmv_indices_combined_scatter_large_prefill() -> None:
+    device = torch.device("npu:0")
+    num_tokens = 4097
+    top_k = 8
+    num_global_experts = 256
+    num_local_experts = 32
+    topk_ids = (
+        torch.arange(num_tokens * top_k, dtype=torch.int32, device=device).view(num_tokens, top_k) * 29 + 7
+    ) % num_global_experts
+    topk_ids[:, 0] = torch.arange(num_tokens, dtype=torch.int32, device=device) % num_local_experts
+    hidden_states = torch.zeros(num_tokens, 16, dtype=torch.bfloat16, device=device)
+    _, expanded_row_idx, _, _ = torch_npu.npu_moe_init_routing_v2(
+        hidden_states,
+        topk_ids,
+        active_num=topk_ids.numel(),
+        expert_num=num_global_experts,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=[0, num_local_experts],
+        quant_mode=-1,
+        row_idx_type=0,
+    )
+    token_lora_indices = torch.arange(num_tokens, dtype=torch.int64, device=device) % 3
+    token_lora_indices[2::5] = -1
+    context = SimpleNamespace(top_k=top_k, allgather_lora_indices=token_lora_indices)
+    expert_map = torch.full(
+        (num_global_experts,),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    expert_map[:num_local_experts] = torch.arange(
+        num_local_experts,
+        dtype=torch.int32,
+        device=device,
+    )
+    adapter_enabled = torch.tensor([1, 1, 0], dtype=torch.int32, device=device)
+
+    actual = _prepare_moe_lora_bgmv_indices_allgather(
+        context,
+        expanded_row_idx,
+        topk_ids,
+        expert_map,
+        adapter_enabled,
+        num_local_experts,
+    )
+    expert_per_row, lora_per_row = _recover_moe_lora_routing_allgather(
+        context,
+        expanded_row_idx,
+        topk_ids,
+        expert_map=expert_map,
+    )
+    safe_slots = lora_per_row.clamp(min=0)
+    expected = torch.where(
+        (lora_per_row >= 0) & adapter_enabled[safe_slots].bool(),
+        safe_slots * num_local_experts + expert_per_row,
+        torch.full_like(lora_per_row, -1),
+    ).contiguous()
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
 def test_all2all_routing_uses_local_experts_and_exchanged_adapters() -> None:
     context = SimpleNamespace(
         local_num_experts=3,
@@ -550,6 +725,34 @@ def test_prepare_bgmv_indices_from_slots_supports_dynamic_aclgraph_replay() -> N
             expert_ids_with_tail,
         ).cpu()
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(torch.npu.is_available() is not True, reason="requires an Ascend NPU")
+def test_prepare_bgmv_indices_from_slots_tiles_large_prefill() -> None:
+    device = torch.device("npu:0")
+    num_rows = 8193
+    routed_lora_slots = (torch.arange(num_rows, device=device) % 3).to(torch.float32)
+    routed_lora_slots[5::11] = -1
+    group_list = torch.tensor([4097, 0, 4096], dtype=torch.int64, device=device)
+    adapter_enabled = torch.tensor([1, 0, 1], dtype=torch.int32, device=device)
+    expert_ids_with_tail = torch.tensor([0, 1, 2, -1], dtype=torch.long, device=device)
+
+    actual = _prepare_moe_lora_bgmv_indices_from_slots(
+        routed_lora_slots,
+        group_list,
+        adapter_enabled,
+        expert_ids_with_tail,
+    )
+    # Bool adapter metadata deliberately selects the tensor fallback as the
+    # independent reference for the tiled AscendC implementation.
+    expected = _prepare_moe_lora_bgmv_indices_from_slots(
+        routed_lora_slots,
+        group_list,
+        adapter_enabled.bool(),
+        expert_ids_with_tail,
+    )
+    torch.npu.synchronize()
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
