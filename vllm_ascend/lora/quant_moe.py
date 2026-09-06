@@ -85,10 +85,10 @@ MOE_LORA_COMPACT_PERMUTE_MIN_BYTES = 192 * 1024 * 1024
 MAX_FUSED_COMPOSITE_ROUTED_ROWS = 262144
 MAX_FUSED_COMPOSITE_LOCAL_EXPERTS = 256
 MAX_FUSED_COMPOSITE_LORA_SLOTS = 256
-# DSV4 prefill can replace clamp + cat + SwiGLU with one exact CANN op while
-# preserving the BF16 activation consumed by the W2 LoRA branch. Decode stays
-# on the already-validated path.
-MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED = True
+# Keep DSV4 prefill on explicit clamp + cat + SwiGLU while isolating MoE LoRA
+# accuracy differences. This disables the prefill optimization for both TP
+# and EP; the existing decode activation path is unchanged.
+MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED = False
 
 # Type-2 GMM itself is neutral for decode, while preparing its sparse group
 # list adds another vector-core launch (~22 us in the targeted microbenchmark).

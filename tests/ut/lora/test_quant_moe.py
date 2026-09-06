@@ -51,8 +51,17 @@ def test_ep_moe_lora_aux_stream_eligibility(comm_type) -> None:
     assert not _can_use_ep_moe_lora_aux_stream(context, comm_type, is_decode_only=True)
 
 
-def test_prefill_clipped_swiglu_eligibility_is_prefill_only() -> None:
+def test_prefill_clipped_swiglu_is_disabled_by_default() -> None:
     with patch.object(torch_npu, "npu_clipped_swiglu", create=True):
+        for is_decode_only in (False, True, None):
+            assert not _can_use_prefill_clipped_swiglu("silu", 10.0, is_decode_only=is_decode_only)
+
+
+def test_prefill_clipped_swiglu_eligibility_is_prefill_only() -> None:
+    with (
+        patch(f"{QUANT_MOE}.MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED", True),
+        patch.object(torch_npu, "npu_clipped_swiglu", create=True),
+    ):
         assert _can_use_prefill_clipped_swiglu("silu", 10.0, is_decode_only=False)
         assert not _can_use_prefill_clipped_swiglu("silu", 10.0, is_decode_only=True)
         assert not _can_use_prefill_clipped_swiglu("silu", 0.0, is_decode_only=False)
@@ -413,7 +422,9 @@ def test_dynamic_int8_ep_decode_uses_sparse_group_list_for_base_gmms() -> None:
     assert gmm2.call_args.kwargs["group_list_type"] == 2
 
 
-def test_dynamic_int8_prefill_uses_clipped_swiglu_for_dsv4() -> None:
+@pytest.mark.parametrize("is_decode_only", [False, True])
+@pytest.mark.parametrize("enable_experiment", [False, True])
+def test_dynamic_int8_dsv4_activation_path(is_decode_only, enable_experiment) -> None:
     lora_context = SimpleNamespace(use_ep=False, fully_sharded=False)
     mlp_input = _make_input(lora_context=lora_context, swiglu_limit=10.0)
     quantized_input = torch.ones(2, 4, dtype=torch.int8)
@@ -426,6 +437,8 @@ def test_dynamic_int8_prefill_uses_clipped_swiglu_for_dsv4() -> None:
     routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
 
     with (
+        # Without an explicit override, exercise the production default.
+        patch(f"{QUANT_MOE}.MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED", True) if enable_experiment else nullcontext(),
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
         patch(
             f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
@@ -444,7 +457,7 @@ def test_dynamic_int8_prefill_uses_clipped_swiglu_for_dsv4() -> None:
             return_value=activated,
             create=True,
         ) as clipped_swiglu,
-        patch(f"{QUANT_MOE}._apply_moe_activation") as fallback_activation,
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated) as fallback_activation,
         patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
         patch(
             f"{QUANT_MOE}._recover_moe_lora_routing_allgather",
@@ -454,17 +467,21 @@ def test_dynamic_int8_prefill_uses_clipped_swiglu_for_dsv4() -> None:
         patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
-        extra_ctx.is_decode_only = False
+        extra_ctx.is_decode_only = is_decode_only
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
 
-    clipped_swiglu.assert_called_once_with(
-        gate_up_out,
-        interleaved=False,
-        alpha=1.0,
-        limit=10.0,
-        bias=0.0,
-    )
-    fallback_activation.assert_not_called()
+    if enable_experiment and not is_decode_only:
+        clipped_swiglu.assert_called_once_with(
+            gate_up_out,
+            interleaved=False,
+            alpha=1.0,
+            limit=10.0,
+            bias=0.0,
+        )
+        fallback_activation.assert_not_called()
+    else:
+        clipped_swiglu.assert_not_called()
+        fallback_activation.assert_called_once_with(gate_up_out, mlp_input.activation, 10.0, 1.0, 0.0)
 
 
 @pytest.mark.parametrize("comm_type", [MoECommType.ALLGATHER, MoECommType.ALLTOALL])

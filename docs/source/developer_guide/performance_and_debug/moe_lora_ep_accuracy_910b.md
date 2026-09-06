@@ -2,6 +2,14 @@
 
 ## 目的与范围
 
+后续隔离变更：`MOE_LORA_PREFILL_CLIPPED_SWIGLU_ENABLED` 已默认关闭，
+DSV4 MoE LoRA 的 EP/非 EP prefill 均回退到显式 clamp + cat + `npu_swiglu`，decode 不变。
+下文真实权重分数来自 `cd9a79b2c` 的旧开关状态（当时 prefill clipped-SwiGLU 开启），
+不是关闭该算子后的精度结果；该开关变更尚未重新进行整模型精度评测，运行中服务也未自动重启。
+开关变更的 52 项量化 MoE LoRA UT 已通过，覆盖默认关闭与 decode 路径不变；
+在远端独立进程测试源码快照，未覆盖安装目录，日志为
+`ltc-v25:/tmp/lora-disable-clipped-XZ4slE/pytest.log`。
+
 先比较非 EP recover AllGather + BGMV 与 EP AllGather + BGMV，精度问题明确后再优化性能。
 本记录使用 DeepSeek-V4-Flash-0731 W8A8、8 张 910B3、v1 runner；不启用 MoE LoRA 双流、
 DSV4 DSA overlap、shared-expert overlap、DSpark、单 LoRA GMM 或 composite GMM 快速路径。
