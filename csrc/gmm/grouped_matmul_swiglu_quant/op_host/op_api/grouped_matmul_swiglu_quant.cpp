@@ -37,9 +37,12 @@ GroupedMatmulSwigluQuant(const aclTensor *x, const aclTensor *weight, const aclT
     gert::Shape scaleOutShape({m});
     auto out = executor->AllocTensor(outShape, DataType::DT_INT8, ge::FORMAT_ND);
     auto scaleOut = executor->AllocTensor(scaleOutShape, DataType::DT_FLOAT, ge::FORMAT_ND);
+    // ACLNN exposes double, but the operator schema and RuntimeAttrs use Float.
+    // Keep launcher attributes and tiling reads consistent with the schema.
+    const float limitedAttr = static_cast<float>(limited);
     auto ret = INFER_SHAPE(GroupedMatmulSwigluQuant,
                            OP_INPUT(x, weight, perChannelScale, perTokenScale, weightAssistanceMatrix, groupList),
-                           OP_OUTPUT(out, scaleOut), OP_ATTR(isEnableWeightAssistanceMatrix, dequantMode, limited));
+                           OP_OUTPUT(out, scaleOut), OP_ATTR(isEnableWeightAssistanceMatrix, dequantMode, limitedAttr));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
         return std::tuple(nullptr, nullptr);
@@ -47,7 +50,7 @@ GroupedMatmulSwigluQuant(const aclTensor *x, const aclTensor *weight, const aclT
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
         GroupedMatmulSwigluQuant,
         OP_INPUT(x, weight, perChannelScale, perTokenScale, weightAssistanceMatrix, groupList),
-        OP_OUTPUT(out, scaleOut), OP_ATTR(isEnableWeightAssistanceMatrix, dequantMode, limited));
+        OP_OUTPUT(out, scaleOut), OP_ATTR(isEnableWeightAssistanceMatrix, dequantMode, limitedAttr));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return std::tuple(nullptr, nullptr);

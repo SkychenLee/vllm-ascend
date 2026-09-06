@@ -140,8 +140,10 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext *context)
     auto attrs = context->GetAttrs();
     float limited = 0.0f;
     if (attrs != nullptr) {
-        if (const double *limitedPtr = attrs->GetAttrPointer<double>(ATTR_INDEX_LIMITED)) {
-            limited = static_cast<float>(*limitedPtr);
+        // The operator schema declares Float, even though the ACLNN API
+        // accepts double. RuntimeAttrs stores this attribute as float.
+        if (const float *limitedPtr = attrs->GetFloat(ATTR_INDEX_LIMITED)) {
+            limited = *limitedPtr;
         }
     }
     OP_CHECK_IF(!(limited >= 0.0f),

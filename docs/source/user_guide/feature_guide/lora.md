@@ -51,6 +51,15 @@ For W8A8 MoE, use the same flags together with `--quantization ascend` and a
 compatible quantized checkpoint. LoRA activations remain BF16/FP16 across the
 AllGather and are dynamically quantized only for the base expert GMMs.
 
+With expert parallelism, `--fully-sharded-loras` remains applicable to dense
+and shared-expert layers. Routed experts own complete local LoRA A/B matrices
+because the MoE tensor-parallel size is one; Ascend uses a layer-local copy of
+the allocation configuration to disable rank sharding only for those experts.
+The original configuration and non-EP LoRA behavior are unchanged. Hybrid EP
+with a MoE tensor-parallel size greater than one is not supported by this path.
+For controlled accuracy comparisons, see the
+[single-stream EP accuracy checks](../../developer_guide/performance_and_debug/moe_lora_ep_accuracy_910b.md).
+
 For W8A8 MoE with expert parallelism, set
 `--additional-config '{"enable_moe_lora_dual_stream": true}'` to run each base
 W13/W2 expert GMM on the main NPU stream while the corresponding LoRA delta is
@@ -63,11 +72,14 @@ is submitted on the auxiliary stream before the base W13 GMM, after the main
 stream has submitted dynamic quantization. The routing and LoRA delta can then
 overlap the base GMM without making the base wait for routing completion.
 AlltoAll routing and communication retain their existing ordering. Base/LoRA
-overlap applies to both AllGather and AlltoAll EP; it is disabled for fully
-sharded LoRA. The feature allocates one temporary delta workspace per forward
+overlap applies to both AllGather and AlltoAll EP; it is disabled for MoE
+layers whose LoRA weights are tensor-parallel sharded. The feature allocates
+one temporary delta workspace per forward
 and remains opt-in.
 
-AllGather EP can use the expert-grouped GMM LoRA fast path when exactly one
+The expert-grouped GMM LoRA fast paths are currently disabled pending accuracy
+validation; normal inference uses BGMV. The single-adapter implementation
+targets AllGather EP when exactly one
 routed-expert adapter is active. The current fast path requires BF16
 activations, `top_k=6`, `max_loras=3`, `max_lora_rank=16`, and enough routed
 rows to amortize GMM launch overhead. It operates on each rank's local expert
@@ -77,10 +89,10 @@ smaller batches, and unsupported shapes automatically fall back to BGMV.
 ### Fully sharded LoRA with W8A8 MoE
 
 Dynamic W8A8 MoE can use `--fully-sharded-loras` together with tensor
-parallelism. Fully sharded MoE LoRA and expert parallelism partition the same
-TP group in incompatible ways, so do not combine `--fully-sharded-loras` with
-`--enable-expert-parallel`. AllGather EP currently supports non-fully-sharded
-LoRA only.
+parallelism. Without EP, this shards the routed-expert LoRA rank across TP.
+With EP, the setting continues to shard dense/shared-expert LoRA, while routed
+experts retain complete local A/B matrices as described above. The following
+memory estimates apply to non-EP tensor parallelism, not to EP expert placement.
 
 ```shell
 VLLM_ASCEND_ENABLE_FUSED_MC2=0 vllm serve vllm-ascend/Qwen3-30B-A3B-W8A8 \

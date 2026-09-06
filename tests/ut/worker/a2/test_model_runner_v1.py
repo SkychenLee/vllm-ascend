@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
@@ -17,6 +19,56 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestBatchLoRAMetadata(unittest.TestCase):
+    def _run(self, active_loras, mode=CUDAGraphMode.NONE, force_eager=False):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._pad_for_sequence_parallelism = lambda tokens: tokens
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.zeros(1, dtype=np.int64),
+            lora_id_to_lora_request=dict.fromkeys(range(active_loras)),
+        )
+        runner.speculative_config = None
+        runner.uniform_decode_query_len = 1
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.parallel_config = SimpleNamespace(data_parallel_size=1)
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=runner.parallel_config,
+            observability_config=SimpleNamespace(cudagraph_metrics=False),
+        )
+        # Eager dispatcher defaults to has_lora=False, even for an active batch.
+        # Captured descriptors instead keep their graph-specialized LoRA count.
+        descriptor = (
+            BatchDescriptor(32)
+            if mode == CUDAGraphMode.NONE
+            else BatchDescriptor(32, has_lora=True, num_active_loras=4)
+        )
+        runner.cudagraph_dispatcher = SimpleNamespace(dispatch=MagicMock(return_value=(mode, descriptor)))
+        with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+            result = runner._determine_batch_execution_and_padding(
+                num_tokens=32,
+                num_reqs=1,
+                num_scheduled_tokens_np=np.array([32]),
+                max_num_scheduled_tokens=32,
+                use_cascade_attn=False,
+                force_eager=force_eager,
+            )
+        return result[1], descriptor
+
+    def test_eager_preserves_zero_single_and_multi_adapter_state(self):
+        for active_loras in (0, 1, 2):
+            for force_eager in (False, True):
+                with self.subTest(active_loras=active_loras, force_eager=force_eager):
+                    actual, _ = self._run(active_loras, force_eager=force_eager)
+                    self.assertEqual(actual.has_lora, active_loras > 0)
+                    self.assertEqual(actual.num_active_loras, active_loras)
+                    self.assertEqual(actual.num_tokens, 32)
+
+    def test_decode_graph_key_is_unchanged(self):
+        actual, captured = self._run(1, mode=CUDAGraphMode.FULL)
+        self.assertIs(actual, captured)
+        self.assertEqual(actual.num_active_loras, 4)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

@@ -491,7 +491,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZGetWorkspaceSize(const aclTenso
 {
     OP_CHECK_COMM_INPUT(workspaceSize, executor);
     L2_DFX_PHASE_1(aclnnGroupedMatmulSwigluQuantWeightNZ,
-                   DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList),
+                   DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList, limited),
                    DFX_OUT(output, outputScale, outputOffset));
     // weight在该场景下强制绑定StorageFormat 和 ViewFormat 为NZ
     CHECK_RET(weight != nullptr, ACLNN_ERR_PARAM_NULLPTR);

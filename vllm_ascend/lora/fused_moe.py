@@ -29,6 +29,7 @@ the MoE wrapper is mapped.
 
 from __future__ import annotations
 
+from copy import copy
 from functools import cache
 
 import torch
@@ -760,6 +761,18 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
 
     def create_lora_weights(self, max_loras, lora_config, model_config=None) -> None:
         """Allocate upstream weights and an optional fixed-address GMM cache."""
+        if self.use_ep and lora_config.fully_sharded_loras:
+            if self.tp_size != 1:
+                raise ValueError("Ascend EP MoE LoRA requires MoE tensor parallel size 1.")
+            # EP owns complete local experts: their A/B matrices must not be
+            # rank-sharded or reduced across the global TP group. Keep the
+            # user's fully-sharded setting for dense/shared-expert wrappers
+            # by changing only this layer's copy of the allocation config.
+            lora_config = copy(lora_config)
+            lora_config.fully_sharded_loras = False
+            logger.info_once(
+                "Ascend EP MoE LoRA uses complete local experts; fully-sharded LoRA remains enabled for dense layers."
+            )
         super().create_lora_weights(max_loras, lora_config, model_config)
         self._single_lora_packed_weights = None
         self._single_lora_slot_views = None

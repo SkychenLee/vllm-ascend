@@ -979,3 +979,58 @@ def test_create_lora_weights_allocates_dynamic_fixed_address_cache_for_w8a8() ->
         for packed_stack in layer._single_lora_packed_weights
         for packed in packed_stack
     )
+
+
+@pytest.mark.parametrize("use_ep", [False, True])
+def test_fully_sharded_config_is_scoped_to_ep_expert_layer(use_ep: bool) -> None:
+    parallel_config = SimpleNamespace(tp_size=1 if use_ep else 2, tp_rank=0, ep_rank=1, use_ep=use_ep)
+    base_layer = SimpleNamespace(
+        quant_type=QuantType.W8A8,
+        moe_config=SimpleNamespace(
+            hidden_dim=8,
+            num_local_experts=2,
+            num_experts=4 if use_ep else 2,
+            intermediate_size_per_partition=4,
+            experts_per_token=2,
+            moe_parallel_config=parallel_config,
+            is_act_and_mul=True,
+        ),
+    )
+    lora_config = SimpleNamespace(
+        max_loras=2,
+        max_lora_rank=8,
+        lora_dtype=torch.bfloat16,
+        fully_sharded_loras=True,
+        enable_moe_shared_loras=False,
+    )
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+        patch(
+            "vllm_ascend.lora.fused_moe.get_ascend_config",
+            return_value=SimpleNamespace(enable_moe_lora_dual_stream=False),
+        ),
+    ):
+        layer = AscendFusedMoEWithLoRA(base_layer)
+        layer.create_lora_weights(2, lora_config)
+
+    # The shared config still drives fully-sharded dense/shared-expert LoRA.
+    assert lora_config.fully_sharded_loras is True
+    assert layer.fully_sharded is (not use_ep)
+    assert layer.w13_lora_a_stacked[0].shape == (2, 2, 8 if use_ep else 4, 8)
+    assert layer.w2_lora_b_stacked[0].shape == (2, 2, 8 if use_ep else 4, 8)
+    layer.punica_wrapper = Mock()
+    context = layer._build_lora_context()
+    assert context.fully_sharded is (not use_ep)
+    assert context.aux_stream is None
+
+
+def test_ep_fully_sharded_rejects_unexpected_moe_tensor_parallelism() -> None:
+    layer = object.__new__(AscendFusedMoEWithLoRA)
+    torch.nn.Module.__init__(layer)
+    layer.moe_config = SimpleNamespace(moe_parallel_config=SimpleNamespace(use_ep=True))
+    layer.tp_size = 2
+    config = SimpleNamespace(fully_sharded_loras=True)
+    with pytest.raises(ValueError, match="MoE tensor parallel size 1"):
+        layer.create_lora_weights(2, config)
+    assert config.fully_sharded_loras is True

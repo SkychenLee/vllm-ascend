@@ -1,12 +1,56 @@
 import gc
 
 import numpy as np
+import pytest
 import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
+
+
+@pytest.mark.parametrize("initial_limit", [0.0, 5.0, 10.0, 30.0])
+@torch.inference_mode()
+def test_int8_swiglu_limit_is_applied(initial_limit):
+    """Float tiling attributes must preserve the requested gate/up clamp.
+
+    All projections dequantize to +/-20 exactly, so the expected activation
+    does not depend on GEMM error. Reading Float as double used to silently
+    disable clipping, returning ~400 instead of ~100 for limit=10. Change
+    limits within each case so executor-cache coverage also works with xdist.
+    """
+    hidden_size, intermediate_size = 4096, 2048
+    gate = torch.tensor([20.0, -20.0, 20.0, -20.0]).repeat(intermediate_size // 4)
+    up = torch.tensor([20.0, 20.0, -20.0, -20.0]).repeat(intermediate_size // 4)
+    weights = torch.cat((gate.sign(), up.sign())).to(torch.int8)
+    weights = weights.reshape(1, 1, -1).expand(1, hidden_size, -1).contiguous()
+    previous_format = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    try:
+        torch.npu.config.allow_internal_format = True
+        weights = torch_npu.npu_format_cast(weights.npu(), 29)
+        x = torch.ones(1, hidden_size, dtype=torch.int8, device="npu")
+        weight_scale = torch.full((1, 2 * intermediate_size), 20.0 / hidden_size, device="npu")
+        x_scale = torch.ones(1, device="npu")
+        group_list = torch.ones(1, dtype=torch.int64, device="npu")
+        for limit in (initial_limit, 0.0, 5.0, 10.0, 30.0, initial_limit):
+            output, scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
+                x=x,
+                weight=weights,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                group_list=group_list,
+                swiglu_limit=limit,
+            )
+            clipped_gate = gate.clamp(max=limit) if limit > 0 else gate
+            clipped_up = up.clamp(min=-limit, max=limit) if limit > 0 else up
+            expected = torch.nn.functional.silu(clipped_gate) * clipped_up
+            expected_scale = expected.abs().max().reshape(1) / 127
+            expected_quant = torch.round(expected / expected_scale).to(torch.int8).reshape(1, -1)
+            torch.testing.assert_close(scale.cpu(), expected_scale, rtol=1e-5, atol=1e-6)
+            torch.testing.assert_close(output.cpu(), expected_quant, rtol=0, atol=1)
+    finally:
+        torch.npu.config.allow_internal_format = previous_format == b"enable"
 
 
 def x_int8_to_x_int4(x: torch.Tensor):

@@ -2764,6 +2764,12 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+        if cudagraph_mode == CUDAGraphMode.NONE:
+            # The upstream dispatcher drops LoRA fields on eager fallback.
+            # Ascend MoE also consumes this descriptor to select dispatch and
+            # BGMV, so prefill must retain the scheduled batch's adapter state.
+            # Do not alter captured graph keys (their LoRA count may be padded).
+            batch_descriptor = replace(batch_descriptor, has_lora=has_lora, num_active_loras=num_active_loras)
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
