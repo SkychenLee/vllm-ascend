@@ -6,6 +6,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from vllm.v1.outputs import KVConnectorOutput
 
 # Clean up stale mock modules installed by other kv offload tests that replace
@@ -40,6 +41,47 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.work
 
 for _module_name, _module in _saved_modules.items():
     sys.modules[_module_name] = _module
+
+
+@pytest.mark.parametrize("upstream_keyword", ["max_num_batched_tokens", "max_in_flight_tokens"])
+def test_preempt_offload_scheduler_accepts_both_coordinator_apis(monkeypatch, upstream_keyword):
+    config = SimpleNamespace(
+        speculative_config=None,
+        kv_events_config=None,
+        model_config=SimpleNamespace(max_model_len=1024),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+            world_size=1,
+        ),
+    )
+    cache_config = SimpleNamespace(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=[])
+    coordinator = SimpleNamespace(block_pool=object())
+
+    def _fake_old(*, max_num_batched_tokens, **kwargs):
+        assert max_num_batched_tokens == 64
+        assert "max_in_flight_tokens" not in kwargs
+        return coordinator
+
+    def _fake_new(*, max_in_flight_tokens, **kwargs):
+        assert max_in_flight_tokens == 64
+        assert "max_num_batched_tokens" not in kwargs
+        return coordinator
+
+    monkeypatch.setattr(PreemptOffloadScheduler, "_derive_cpu_config", lambda *args: cache_config)
+    # This module restores package imports above; patch the constructor's
+    # own globals so the assertion follows the object under test.
+    manager_globals = PreemptOffloadScheduler.__init__.__globals__
+    monkeypatch.setitem(manager_globals, "resolve_kv_cache_block_sizes", lambda *args: (16, 16))
+    monkeypatch.setitem(
+        manager_globals,
+        "get_kv_cache_coordinator",
+        _fake_old if upstream_keyword == "max_num_batched_tokens" else _fake_new,
+    )
+    scheduler = PreemptOffloadScheduler(config, cache_config, cpu_capacity_bytes=1024)
+    assert scheduler.cpu_coordinator is coordinator
+    assert scheduler.cpu_block_pool is coordinator.block_pool
 
 
 def test_preempt_offload_connector_worker_metadata_aggregate():

@@ -26,14 +26,17 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+import vllm_ascend.patch.platform.patch_kv_cache_coordinator as kv_cache_coordinator_patch
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
+    get_kv_cache_token_budget_kwargs,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -765,6 +768,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
         cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
         model_config=SimpleNamespace(max_model_len=4096),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=1),
         max_in_flight_tokens=1,
     )
 
@@ -965,7 +969,9 @@ def test_get_effective_block_size(
     assert coordinator._get_effective_block_size(spec_factory()) == expected
 
 
-def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
+@pytest.mark.parametrize("budget_keyword", ["max_num_batched_tokens", "max_in_flight_tokens"])
+@pytest.mark.parametrize("upstream_keyword", ["max_num_batched_tokens", "max_in_flight_tokens"])
+def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch, budget_keyword, upstream_keyword) -> None:
     sentinel = object()
     kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=16)
     single_group_config = KVCacheConfig(
@@ -974,18 +980,25 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
         kv_cache_groups=kv_cache_config.kv_cache_groups[:1],
     )
 
-    def _fake_orig(*args, **kwargs):
+    def _fake_old(*, max_num_batched_tokens, **kwargs):
+        assert max_num_batched_tokens == 64
+        assert "max_in_flight_tokens" not in kwargs
+        return sentinel
+
+    def _fake_new(*, max_in_flight_tokens, **kwargs):
+        assert max_in_flight_tokens == 64
+        assert "max_num_batched_tokens" not in kwargs
         return sentinel
 
     monkeypatch.setattr(
         "vllm_ascend.patch.platform.patch_kv_cache_coordinator._orig_get_kv_cache_coordinator",
-        _fake_orig,
+        _fake_old if upstream_keyword == "max_num_batched_tokens" else _fake_new,
     )
 
     coordinator = get_kv_cache_coordinator(
         single_group_config,
         max_model_len=1024,
-        max_num_batched_tokens=1024,
+        **{budget_keyword: 64},
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
@@ -995,6 +1008,65 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
     )
 
     assert coordinator is sentinel
+
+
+@pytest.mark.parametrize("budget_keyword", ["max_num_batched_tokens", "max_in_flight_tokens"])
+@pytest.mark.parametrize("upstream_keyword", ["max_num_batched_tokens", "max_in_flight_tokens"])
+def test_hybrid_coordinator_preserves_swa_budget_across_factory_apis(
+    monkeypatch, budget_keyword, upstream_keyword
+) -> None:
+    register_all_kvcache_specs(None)
+    original_factory = kv_cache_coordinator_patch.get_manager_for_kv_cache_spec
+    received_budgets = []
+
+    def _create_manager(token_budget, kwargs):
+        received_budgets.append(token_budget)
+        return original_factory(**kwargs, **get_kv_cache_token_budget_kwargs(original_factory, token_budget))
+
+    def _fake_old(*, max_num_batched_tokens, **kwargs):
+        assert "max_in_flight_tokens" not in kwargs
+        return _create_manager(max_num_batched_tokens, kwargs)
+
+    def _fake_new(*, max_in_flight_tokens, **kwargs):
+        assert "max_num_batched_tokens" not in kwargs
+        return _create_manager(max_in_flight_tokens, kwargs)
+
+    monkeypatch.setattr(
+        kv_cache_coordinator_patch,
+        "get_manager_for_kv_cache_spec",
+        _fake_old if upstream_keyword == "max_num_batched_tokens" else _fake_new,
+    )
+    specs = [
+        FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16),
+        SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=32),
+    ]
+    config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec([str(index)], spec) for index, spec in enumerate(specs)],
+    )
+    coordinator = get_kv_cache_coordinator(
+        config,
+        max_model_len=1024,
+        enable_caching=True,
+        scheduler_block_size=16,
+        hash_block_size=16,
+        **{budget_keyword: 64},
+    )
+    assert received_budgets == [64, 64]
+    swa_manager = coordinator.single_type_managers[1]
+    assert (
+        swa_manager.get_num_blocks_to_allocate(
+            request_id="long",
+            num_tokens=1024,
+            new_computed_blocks=[],
+            total_computed_tokens=0,
+            num_local_computed_tokens=0,
+            num_tokens_main_model=1024,
+            apply_admission_cap=True,
+        )
+        == 7  # ceil((32 - 1 + 64) / 16) + 1
+    )
 
 
 def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) -> None:

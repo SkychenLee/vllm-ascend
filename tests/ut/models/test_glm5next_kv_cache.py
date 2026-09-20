@@ -65,6 +65,8 @@ def test_tail_uses_one_full_precision_page(capacity):
     assert KVCacheSpecRegistry.get_manager_class(spec) is KpoolTailManager
     assert spec.max_admission_blocks_per_request(16, 1024) == 1
     assert spec.max_admission_blocks_per_request(8192, 131072) == 1
+    assert spec.max_admission_blocks_per_request(max_num_batched_tokens=16, max_model_len=1024) == 1
+    assert spec.max_admission_blocks_per_request(max_in_flight_tokens=16, max_model_len=1024) == 1
     assert not spec.prefix_cacheable
     assert not is_prefix_cacheable(spec)
     assert spec.is_circular

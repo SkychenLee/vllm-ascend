@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+import inspect
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 
 import torch
@@ -22,6 +23,13 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.utils import vllm_version_is
+
+
+def get_kv_cache_token_budget_kwargs(factory: Callable, token_budget: int) -> dict[str, int]:
+    """Match the KV token-budget keyword supported by the installed vLLM."""
+    parameters = inspect.signature(factory).parameters
+    keyword = "max_num_batched_tokens" if "max_num_batched_tokens" in parameters else "max_in_flight_tokens"
+    return {keyword: token_budget}
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -345,7 +353,13 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
         del vllm_config
         return self.page_size_bytes
 
-    def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
+    def max_admission_blocks_per_request(
+        self,
+        max_num_batched_tokens: int | None = None,
+        max_model_len: int | None = None,
+        *,
+        max_in_flight_tokens: int | None = None,
+    ) -> int:
         return 1
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:

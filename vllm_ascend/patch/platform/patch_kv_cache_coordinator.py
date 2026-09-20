@@ -33,7 +33,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_token_budget_kwargs, is_prefix_cacheable
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -46,7 +46,7 @@ def _select_kv_token_budget(
     max_in_flight_tokens: int | None,
     max_num_batched_tokens: int | None,
 ) -> int:
-    token_budget = max_in_flight_tokens
+    token_budget = max_in_flight_tokens if max_in_flight_tokens is not None else max_num_batched_tokens
     return token_budget if token_budget is not None else max_model_len
 
 
@@ -150,6 +150,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
+        extra_mgr_kwargs.update(get_kv_cache_token_budget_kwargs(get_manager_for_kv_cache_spec, token_budget))
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
@@ -158,7 +159,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=1,
-                max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
                 **extra_mgr_kwargs,
             )
@@ -477,7 +477,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
-        orig_kwargs["max_in_flight_tokens"] = token_budget
+        orig_kwargs.update(get_kv_cache_token_budget_kwargs(_orig_get_kv_cache_coordinator, token_budget))
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
