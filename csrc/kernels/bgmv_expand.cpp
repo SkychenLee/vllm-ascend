@@ -179,10 +179,22 @@ private:
         // As we are generating multiple output elements with one API invocation,
         // we need to duplicate the X vector multiple times to fill one NUM_BYTES_PER_REPEAT
         if constexpr (std::is_same_v<X_T, float>) {
-            for (int32_t i = 0; i < NUM_ELEMENTS_PER_REPEAT; i += maxLoRARank_) {
-                for (int32_t j = 0; j < maxLoRARank_; j++) {
-                    float entry = xLocal.GetValue(j);
-                    xDup.SetValue(i + j, entry);
+            constexpr uint32_t elementsPerBlock = NUM_ELEMENTS_PER_REPEAT / NUM_BLOCKS_PER_REPEAT;
+            if (maxLoRARank_ > 0 && maxLoRARank_ <= NUM_ELEMENTS_PER_REPEAT &&
+                NUM_ELEMENTS_PER_REPEAT % maxLoRARank_ == 0 && maxLoRARank_ % elementsPerBlock == 0) {
+                // Repeat the same source into consecutive, block-aligned destinations.
+                // Copy preserves the FP32 bits without adding floating-point arithmetic.
+                const uint8_t repeatCount = static_cast<uint8_t>(NUM_ELEMENTS_PER_REPEAT / maxLoRARank_);
+                const uint16_t dstRepeatStride = static_cast<uint16_t>(maxLoRARank_ / elementsPerBlock);
+                AscendC::Copy(xDup, xLocal, maxLoRARank_, repeatCount,
+                              AscendC::CopyRepeatParams{1, 1, dstRepeatStride, 0});
+                AscendC::PipeBarrier<PIPE_V>();
+            } else {
+                for (int32_t i = 0; i < NUM_ELEMENTS_PER_REPEAT; i += maxLoRARank_) {
+                    for (int32_t j = 0; j < maxLoRARank_; j++) {
+                        float entry = xLocal.GetValue(j);
+                        xDup.SetValue(i + j, entry);
+                    }
                 }
             }
         } else {

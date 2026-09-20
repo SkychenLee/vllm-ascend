@@ -199,6 +199,35 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     ``.item()``/data-dependent host sync.
     """
     top_k = lora_context.top_k
+    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    max_exact_sort_rows = 1 << 24
+    # In the current AllGather producer, use_ep=False implies ep_size=1,
+    # expert_map=None, the complete expert range and active_num=N*top_k.
+    # EP/subset/unknown callers keep the original sort, including -1 sentinels.
+    if (
+        getattr(lora_context, "use_ep", None) is False
+        and isinstance(top_k, int)
+        and top_k > 0
+        and expanded_row_idx.dim() == 1
+        and topk_ids.dim() == 2
+        and topk_ids.shape[1] == top_k
+        and expanded_row_idx.numel() == topk_ids.numel()
+        and expanded_row_idx.numel() <= max_exact_sort_rows
+        and token_lora_indices.dim() == 1
+        and (expanded_row_idx.numel() == 0 or token_lora_indices.numel() > 0)
+        and expanded_row_idx.dtype in (torch.int32, torch.int64)
+        and topk_ids.dtype in (torch.int32, torch.int64)
+        and token_lora_indices.dtype == torch.int64
+        and expanded_row_idx.device.type == "npu"
+        and topk_ids.device == expanded_row_idx.device
+        and token_lora_indices.device == expanded_row_idx.device
+        and hasattr(torch.ops._C_ascend, "moe_lora_recover")
+    ):
+        # The low-level kernel requires contiguous buffers. Tensor.contiguous
+        # is a no-op for the ordinary path and materializes only strided input.
+        return torch.ops._C_ascend.moe_lora_recover(
+            expanded_row_idx.contiguous(), topk_ids.contiguous(), token_lora_indices.contiguous(), top_k
+        )
     expanded = torch.abs(expanded_row_idx).to(torch.float32)
     inv_perm = torch.argsort(expanded)
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
@@ -273,6 +302,7 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         lora_b_stacked=lora_context.w13_lora_b_stacked,
         expert_ids=expert_per_row,
         adapter_enabled=lora_context.adapter_enabled,
+        fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
     )
 
@@ -288,6 +318,10 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     # kernel crashes with empty tensors.
     if expert_per_row.numel() == 0:
         return
+    offset = 0
+    if lora_context.fully_sharded:
+        shard_size = lora_context.w2_lora_b_stacked[0].shape[-2]
+        offset = shard_size * lora_context.tp_rank
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=down_out,
         x=silu_out,
@@ -295,6 +329,8 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         lora_b_stacked=lora_context.w2_lora_b_stacked,
         expert_ids=expert_per_row,
         adapter_enabled=lora_context.adapter_enabled,
+        fully_sharded=lora_context.fully_sharded,
+        offset=offset,
         token_lora_mapping=lora_per_row,
     )
     # Clear per-forward intermediate indices now that the LoRA delta

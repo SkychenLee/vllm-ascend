@@ -113,6 +113,8 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
         split_lora_indices=torch.tensor([0]),
         permuted_lora_indices=torch.tensor([0]),
         exchanged_lora_indices=torch.tensor([0]),
+        fully_sharded=False,
+        tp_rank=0,
     )
     routing = (torch.tensor([0]), torch.tensor([0]))
 
@@ -135,6 +137,9 @@ def test_moe_lora_apply_uses_adapter_enabled() -> None:
     assert not hasattr(context, "split_lora_indices")
     assert not hasattr(context, "permuted_lora_indices")
     assert not hasattr(context, "exchanged_lora_indices")
+    assert calls[0].kwargs["fully_sharded"] is False
+    assert calls[1].kwargs["fully_sharded"] is False
+    assert calls[1].kwargs["offset"] == 0
 
 
 def test_moe_lora_apply_skips_empty_ep_rank() -> None:
@@ -146,6 +151,39 @@ def test_moe_lora_apply_skips_empty_ep_rank() -> None:
     moe_lora_apply_w2(context, down_out="d", silu_out="s", lora_routing=empty)
 
     punica_wrapper.add_lora_fused_moe.assert_not_called()
+
+
+def test_moe_lora_apply_propagates_fully_sharded_metadata() -> None:
+    punica_wrapper = Mock()
+    context = SimpleNamespace(
+        punica_wrapper=punica_wrapper,
+        w13_lora_a_stacked="w13_a",
+        w13_lora_b_stacked="w13_b",
+        w2_lora_a_stacked="w2_a",
+        w2_lora_b_stacked=(torch.empty(1, 1, 16, 8),),
+        adapter_enabled="all_enabled",
+        fully_sharded=True,
+        tp_rank=3,
+    )
+    routing = (torch.tensor([0]), torch.tensor([0]))
+
+    moe_lora_apply_w13(
+        context,
+        gate_up_out="gate_up_out",
+        hidden_states="hidden_states",
+        lora_routing=routing,
+    )
+    moe_lora_apply_w2(
+        context,
+        down_out="down_out",
+        silu_out="silu_out",
+        lora_routing=routing,
+    )
+
+    calls = punica_wrapper.add_lora_fused_moe.call_args_list
+    assert calls[0].kwargs["fully_sharded"] is True
+    assert calls[1].kwargs["fully_sharded"] is True
+    assert calls[1].kwargs["offset"] == 48
 
 
 def test_allgather_routing_preserves_multi_adapter_and_base_mapping() -> None:

@@ -43,6 +43,53 @@ def bgmv_shrink(
     )
 
 
+def bgmv_shrink_pair(
+    inputs: torch.Tensor,
+    lora_a_weight0: torch.Tensor,
+    lora_a_weight1: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    scaling: float = 1.0,
+) -> None:
+    torch.ops._C_ascend.bgmv_shrink_pair(
+        inputs, lora_a_weight0, lora_a_weight1, lora_indices_tensor, output_tensor, scaling
+    )
+
+
+def can_use_bgmv_shrink_pair(
+    inputs: torch.Tensor,
+    weight0: torch.Tensor,
+    weight1: torch.Tensor,
+    indices: torch.Tensor,
+    output: torch.Tensor,
+) -> bool:
+    """Metadata-only gate; actual pointer alignment stays in the native host."""
+    if inputs.ndim != 2 or weight0.ndim != 3 or weight1.ndim != 3 or indices.ndim != 1 or output.ndim != 3:
+        return False
+    rows, hidden = inputs.shape
+    rank = weight0.shape[1]
+    return (
+        inputs.device.type in ("npu", "privateuseone")
+        and inputs.dtype in (torch.float16, torch.bfloat16)
+        and weight0.dtype == weight1.dtype == inputs.dtype
+        and output.dtype == torch.float32
+        and indices.dtype == torch.int64
+        and all(tensor.device == inputs.device for tensor in (weight0, weight1, indices, output))
+        and all(tensor.is_contiguous() for tensor in (inputs, weight0, weight1, indices, output))
+        and weight0.shape == weight1.shape
+        and weight0.shape[0] > 0
+        and hidden > rank > 0
+        and weight0.shape[2] == hidden
+        and indices.shape == (rows,)
+        and output.shape == (2, rows, rank)
+        and rows <= (1 << 31) - 1
+        and hidden <= (1 << 31) - 1
+        and rank <= ((1 << 32) - 1) // output.element_size()
+        # Keep independent projections out of a shared 32-byte output block.
+        and rows * rank * output.element_size() % 32 == 0
+    )
+
+
 def bgmv_expand(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,

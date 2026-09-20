@@ -27,6 +27,8 @@
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "ops.h"
+#include "bgmv_shrink_pair_validation.h"
+#include <ATen/MemoryOverlap.h>
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
@@ -335,6 +337,51 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     } else {
         return AscendType::FP16;
     }
+}
+
+void bgmv_shrink_pair(const at::Tensor& x, const at::Tensor& weight0, const at::Tensor& weight1,
+                      const at::Tensor& indices, at::Tensor& y_pair, double scale)
+{
+    check_bgmv_shrink_pair_metadata(x, weight0, weight1, indices, y_pair);
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1,
+                "bgmv_shrink_pair: expected NPU tensors");
+    at::assert_no_overlap(y_pair, x);
+    at::assert_no_overlap(y_pair, weight0);
+    at::assert_no_overlap(y_pair, weight1);
+    at::assert_no_overlap(y_pair, indices);
+    if (x.size(0) == 0) {
+        return;
+    }
+    const c10_npu::NPUGuard device_guard(x.device());
+    int32_t device_id = -1;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS,
+                "bgmv_shrink_pair: cannot query the current NPU device");
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS &&
+                aiv_num > 0 && static_cast<uint64_t>(aiv_num) <= std::numeric_limits<uint32_t>::max(),
+                "bgmv_shrink_pair: invalid vector core count");
+    const auto dtype = get_dtype_from_torch(x.scalar_type());
+    const auto stream = c10_npu::getCurrentNPUStream().stream();
+    void* x_ptr = x.data_ptr();
+    void* weight0_ptr = weight0.data_ptr();
+    void* weight1_ptr = weight1.data_ptr();
+    void* indices_ptr = indices.data_ptr();
+    void* y_ptr = y_pair.data_ptr();
+    const auto rows = static_cast<uint32_t>(x.size(0));
+    const auto hidden = static_cast<uint32_t>(x.size(1));
+    const auto rank = static_cast<uint32_t>(y_pair.size(2));
+    const auto cores = static_cast<uint32_t>(aiv_num);
+    const auto scale_f = static_cast<float>(scale);
+    at_npu::native::OpCommand cmd;
+    cmd.Name("bgmv_shrink_pair");
+    cmd.SetCustomHandler([=]() -> int {
+        // The native host owns plane/base alignment and core-count fallback.
+        // It preserves two single launches when parallel planes are unsuitable.
+        bgmv_shrink_pair_impl(dtype, stream, x_ptr, weight0_ptr, weight1_ptr, indices_ptr,
+                              rows, y_ptr, rows, cores, hidden, rank, scale_f);
+        return 0;
+    });
+    cmd.Run();
 }
 
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
@@ -2928,6 +2975,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
+    ops.def("bgmv_shrink_pair(Tensor x, Tensor weight0, Tensor weight1, Tensor indices, Tensor(a!) y_pair, float scale) -> ()");
+    ops.impl("bgmv_shrink_pair", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink_pair);
+
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 

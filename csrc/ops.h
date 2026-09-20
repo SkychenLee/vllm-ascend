@@ -24,6 +24,21 @@
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {
+    extern void bgmv_shrink_pair_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight0,
+        void *weight1,
+        void *indices,
+        uint32_t indices_size,
+        void *y_pair,
+        uint32_t batch_size,
+        uint32_t aiv_num,
+        uint32_t input_hidden_dim,
+        uint32_t lora_rank,
+        float scale);
+
   extern void bgmv_shrink_impl(
         AscendType type,
         void *stream,

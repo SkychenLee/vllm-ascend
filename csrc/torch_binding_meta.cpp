@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+#include "bgmv_shrink_pair_validation.h"
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -45,6 +46,14 @@ c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 }
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+void bgmv_shrink_pair_meta(const at::Tensor& x, const at::Tensor& weight0, const at::Tensor& weight1,
+                           const at::Tensor& indices, at::Tensor& y_pair, double scale)
+{
+    check_bgmv_shrink_pair_metadata(x, weight0, weight1, indices, y_pair);
+    (void)scale;
+    // In-place/void contract: no output allocation, device pointer or value read.
+}
+
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                         int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -2165,6 +2174,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel meta implementations
+    ops.impl("bgmv_shrink_pair", &vllm_ascend::meta::bgmv_shrink_pair_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand

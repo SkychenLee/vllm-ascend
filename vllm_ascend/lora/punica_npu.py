@@ -3,12 +3,17 @@
 from collections.abc import Callable
 
 import torch
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, lora_linear
+from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, can_use_bgmv_shrink_pair, lora_linear
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -27,6 +32,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_shrink_buffers: dict[tuple[int, int], torch.Tensor] = {}
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
+        self.bgmv_shrink_pair = None
         ascend_device_type = get_ascend_device_type()
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
@@ -48,6 +54,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 sgmv_expand_slice,
                 sgmv_shrink,
             )
+
+            # Resolve the lazily registered schema before choosing this backend.
+            if enable_custom_op() and hasattr(torch.ops._C_ascend, "bgmv_shrink_pair"):
+                from vllm_ascend.lora.lora_ops import bgmv_shrink_pair
+
+                self.bgmv_shrink_pair = bgmv_shrink_pair
         self.bgmv_expand = bgmv_expand
         self.bgmv_expand_slice = bgmv_expand_slice
         self.bgmv_shrink = bgmv_shrink
@@ -507,7 +519,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         needed.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
-        del shrink_config, expand_config, fully_sharded
+        del shrink_config, expand_config
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
         if token_lora_mapping is None:
             token_lora_mapping = self.token_lora_indices
@@ -525,10 +537,30 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             torch.full_like(token_lora_mapping, -1),
         ).contiguous()
 
-        # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its X_T),
-        # so the shrink buffer is fp32.
-        rank = lora_a_stacked[0].shape[-2]
-        shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
+        paired_shrink = None
+        if (
+            fully_sharded
+            and len(lora_a_stacked) == len(lora_b_stacked) == 2
+            and lora_a_stacked[0].shape == lora_a_stacked[1].shape
+            and lora_b_stacked[0].shape[-1] == lora_b_stacked[1].shape[-1]
+            and lora_a_stacked[0].shape[-2] < lora_b_stacked[0].shape[-1]
+        ):
+            # Keep the projection axis separate from the rank axis: gathering
+            # [2, rows, local_rank] along the last axis preserves gate/up rank
+            # order, while gathering [rows, 2 * local_rank] would interleave it.
+            local_rank = lora_a_stacked[0].shape[-2]
+            paired_shrink = torch.zeros((2, x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
+            a0, a1 = (a.view(-1, local_rank, a.shape[-1]) for a in lora_a_stacked)
+            if (
+                self.bgmv_shrink_pair is not None
+                and lora_b_stacked[0].shape[-1] == local_rank * get_tensor_model_parallel_world_size()
+                and can_use_bgmv_shrink_pair(x2d, a0, a1, combined_idx, paired_shrink)
+            ):
+                self.bgmv_shrink_pair(x2d, a0, a1, paired_shrink, combined_idx, 1.0)
+            else:
+                for slice_idx, a_flat in enumerate((a0, a1)):
+                    self.bgmv_shrink(x2d, a_flat, paired_shrink[slice_idx], combined_idx, 1.0)
+            paired_shrink = tensor_model_parallel_all_gather(paired_shrink)
 
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):
@@ -537,11 +569,37 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             # into "the plain per-row gather" to reuse bgmv_shrink/bgmv_expand.
             a = lora_a_stacked[slice_idx]
             b = lora_b_stacked[slice_idx]
+            local_rank = a.shape[-2]
+            full_rank = b.shape[-1]
             out_size = b.shape[-2]
-            a_flat = a.view(-1, rank, a.shape[-1])
-            b_flat = b.view(-1, out_size, rank)
+            a_flat = a.view(-1, local_rank, a.shape[-1])
 
-            self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+            # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
+            # (its X_T), so the shrink buffer is fp32.
+            if paired_shrink is not None:
+                shrink_out = paired_shrink[slice_idx]
+            else:
+                shrink_out = torch.zeros(
+                    (x2d.shape[0], local_rank),
+                    dtype=torch.float32,
+                    device=x2d.device,
+                )
+
+                self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+
+                if fully_sharded:
+                    if local_rank == full_rank:
+                        shrink_out = tensor_model_parallel_all_reduce(shrink_out)
+                    else:
+                        shrink_out = tensor_model_parallel_all_gather(shrink_out)
+
+            if shrink_out.shape[-1] != full_rank:
+                raise ValueError(
+                    "MoE LoRA rank mismatch after TP communication: "
+                    f"A projection has rank {shrink_out.shape[-1]}, "
+                    f"but LoRA B expects rank {full_rank}."
+                )
+            b_flat = b.view(-1, out_size, full_rank)
 
             delta = shrink_out
             if mul_routed_weight and topk_weights is not None:

@@ -1,3 +1,4 @@
+import pytest
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -55,18 +56,31 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
+@pytest.mark.parametrize("fully_sharded_loras", [False, True])
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @wait_until_npu_memory_free(target_free_percentage=0.7)
-def test_qwen3moe_lora_tp(qwen3moe_lora_files):
+def test_qwen3moe_lora_tp(qwen3moe_lora_files, fully_sharded_loras, enforce_eager):
     with VllmRunner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
+        fully_sharded_loras=fully_sharded_loras,
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
     ) as vllm_model:
+        # Exercise equal-size Base -> LoRA -> Base graph replay. Sharing
+        # attention events/handles between these graphs can hang the request.
+        base_prompts = ["The capital of France is"] * 4
+        base_params = vllm.SamplingParams(temperature=0, max_tokens=16)
+        base_before = vllm_model.model.generate(base_prompts, base_params)
         generate_and_test(vllm_model.model, qwen3moe_lora_files, lora_id=1)
+        base_after = vllm_model.model.generate(base_prompts, base_params)
+        for before, after in zip(base_before, base_after):
+            assert before.outputs[0].token_ids
+            assert before.outputs[0].token_ids == after.outputs[0].token_ids
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)
