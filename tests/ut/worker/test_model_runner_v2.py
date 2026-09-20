@@ -511,7 +511,8 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
         runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
 
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
+@pytest.mark.parametrize("is_vllm_028", [True, False])
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(is_vllm_028):
     runner = _make_runner()
     runner.vllm_config = SimpleNamespace()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -527,25 +528,35 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         kv_cache_tensors=[],
         kv_cache_groups=[],
     )
+    allocation_context = nullcontext()
 
-    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
+    # Keep the release signature strict so an unsupported keyword fails here
+    # just as it does in vLLM 0.28's GPUModelRunner.
+    def _super_028(self, kv_cache_config):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
+    def _super_main(self, kv_cache_config, kv_cache_allocation_context=None):
+        seen["allocation_context"] = kv_cache_allocation_context
+        _super_028(self, kv_cache_config)
+
     with (
-        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super_028 if is_vllm_028 else _super_main),
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=is_vllm_028),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
         patch(
             "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
             return_value="kvpp",
         ) as create_kvpp,
     ):
-        runner.initialize_kv_cache(kv_cache_config)
+        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     assert seen["cfg"] == kv_cache_config
+    if not is_vllm_028:
+        assert seen["allocation_context"] is allocation_context
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
     create_kvpp.assert_called_once()

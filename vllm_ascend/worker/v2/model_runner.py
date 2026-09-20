@@ -259,7 +259,8 @@ class NPUModelRunner(GPUModelRunner):
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(
                 kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
+                # vLLM 0.28 predates the allocation-context parameter.
+                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
