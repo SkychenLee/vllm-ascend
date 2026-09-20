@@ -267,6 +267,16 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     def real_page_size_bytes(self) -> int:
         return self.storage_block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        assert vllm_config.parallel_config.decode_context_parallel_size == 1, "DCP not support sliding window."
+        # Retain the v0.25 single-batch capacity estimate. Runtime admission
+        # and block retention still account for all in-flight tokens.
+        num_tokens = min(
+            self.sliding_window - 1 + vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (
