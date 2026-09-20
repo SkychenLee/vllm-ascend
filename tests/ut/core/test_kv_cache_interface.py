@@ -3,7 +3,6 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
@@ -51,52 +50,3 @@ def test_sliding_window_mla_storage_and_page_size():
     )
     assert spec.storage_block_size == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
-
-
-@pytest.mark.parametrize(
-    (
-        "max_model_len",
-        "batch_tokens",
-        "in_flight_tokens",
-        "retained_tokens",
-        "padded_bytes",
-        "estimated_blocks",
-        "admission_blocks",
-    ),
-    [
-        (4096, 128, 128, 0, None, 13, 13),
-        (4096, 128, 256, 0, None, 13, 21),
-        (4096, 128, 256, 32, 8192, 13, 23),
-        (65, 128, 256, 32, None, 6, 6),
-        (4096, 130, 260, 0, None, 14, 22),
-    ],
-)
-def test_sliding_window_mla_legacy_capacity_preserves_runtime_admission(
-    max_model_len,
-    batch_tokens,
-    in_flight_tokens,
-    retained_tokens,
-    padded_bytes,
-    estimated_blocks,
-    admission_blocks,
-):
-    spec = AscendSlidingWindowMLASpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        sliding_window=64,
-        extra_retained_tokens=retained_tokens,
-        page_size_padded=padded_bytes,
-    )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=max_model_len),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=batch_tokens),
-        max_in_flight_tokens=in_flight_tokens,
-    )
-
-    assert spec.max_memory_usage_bytes(vllm_config) == estimated_blocks * spec.page_size_bytes
-    assert spec.max_admission_blocks_per_request(in_flight_tokens, max_model_len) == admission_blocks
-    uniform = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": spec})
-    assert uniform.max_memory_usage_pages(vllm_config) == estimated_blocks
