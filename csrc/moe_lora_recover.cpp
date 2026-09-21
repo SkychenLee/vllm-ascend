@@ -13,6 +13,7 @@
 #include <tuple>
 
 #include "moe_lora_recover_validation.h"
+#include "kernels/moe_lora_recover_sort.h"
 
 // POD-only boundary to the SDK ABI bridge, queried under NPUGuard.
 extern "C" uint64_t vllm_ascend_recover_ub_bytes();
@@ -57,20 +58,23 @@ std::tuple<at::Tensor, at::Tensor> moe_lora_recover(const at::Tensor& expanded,
     const auto index_bytes = static_cast<uint32_t>(expanded.element_size());
     const auto expert_bytes = static_cast<uint32_t>(topk.element_size());
     constexpr uint64_t max_exact_sort_rows = uint64_t{1} << 24;
-    // Keep the same model-independent scalar work budget as the earlier
-    // Python selection, but execute its fallback here to avoid repeatedly
-    // entering Python for the original ATen chain. Query UB only for a
-    // possible native launch; this branch needs no device-value readback.
+    // Small inputs avoid sorting entirely. Larger complete permutations use
+    // vector Sort/Gather when both the API and actual UB capacity allow it.
+    // Inputs beyond those limits retain the original framework implementation.
     constexpr uint64_t scalar_work_budget = 1024;
-    if (rows > max_exact_sort_rows ||
-        rows + static_cast<uint64_t>(topk.size(0)) > scalar_work_budget) {
+    const bool scalar_work = rows + static_cast<uint64_t>(topk.size(0)) <= scalar_work_budget;
+    if (rows > max_exact_sort_rows || (!scalar_work && rows > MOE_LORA_RECOVER_SORT_MAX_ROWS)) {
         return recover_original(expanded, topk, slots, top_k);
     }
     const auto ub_bytes = vllm_ascend_recover_ub_bytes();
-    if (
-        !moe_lora_recover_small_supported(rows, k, slot_count, index_bytes, expert_bytes, ub_bytes)) {
+    const bool use_small = scalar_work &&
+        moe_lora_recover_small_supported(rows, k, slot_count, index_bytes, expert_bytes, ub_bytes);
+    const bool use_sort = !use_small &&
+        moe_lora_recover_sort_supported(rows, k, slot_count, index_bytes, expert_bytes, ub_bytes);
+    if (!use_small && !use_sort) {
         return recover_original(expanded, topk, slots, top_k);
     }
+    const auto launch = use_small ? moe_lora_recover_small_impl : moe_lora_recover_sort_impl;
     auto expert_out = at::empty({count}, options);
     auto slot_out = at::empty({count}, options);
     void* stream = c10_npu::getCurrentNPUStream().stream();
@@ -82,9 +86,8 @@ std::tuple<at::Tensor, at::Tensor> moe_lora_recover(const at::Tensor& expanded,
     at_npu::native::OpCommand command;
     command.Name("moe_lora_recover");
     command.SetCustomHandler([=]() -> int {
-        moe_lora_recover_small_impl(stream, expanded_ptr, topk_ptr, slots_ptr,
-                                     expert_out_ptr, slot_out_ptr, rows, k, slot_count,
-                                     index_bytes, expert_bytes, ub_bytes);
+        launch(stream, expanded_ptr, topk_ptr, slots_ptr, expert_out_ptr, slot_out_ptr,
+               rows, k, slot_count, index_bytes, expert_bytes, ub_bytes);
         return 0;
     });
     command.Run();

@@ -67,7 +67,20 @@ def assert_outputs(outputs, inputs, cpu_inputs, top_k):
         pytest.param(7, 3, 2, id="odd-topk-clamped-slots"),
         pytest.param(16, 5, 131, id="unused-slot-tail"),
         pytest.param(64, 8, 64, id="medium"),
+        pytest.param(513, 1, 7, id="sort-cost-boundary"),
+        pytest.param(205, 5, 17, id="sort-odd-tail"),
+        pytest.param(256, 8, 256, id="sort-2048"),
+        pytest.param(1024, 3, 1024, id="sort-non-power-of-two-topk"),
         pytest.param(580, 8, 580, id="prefill"),
+        pytest.param(768, 8, 11, id="sort-clamped-slots"),
+        pytest.param(250, 32, 3, id="sort-topk-32"),
+        pytest.param(127, 63, 17, id="sort-odd-topk-63"),
+        pytest.param(15, 511, 17, id="sort-large-topk"),
+        pytest.param(1, 7999, 1, id="sort-single-token-large-topk"),
+        pytest.param(7999, 1, 8192, id="sort-ub-tail"),
+        pytest.param(8000, 1, 8000, id="sort-ub-boundary"),
+        pytest.param(8001, 1, 7, id="sort-resource-fallback"),
+        pytest.param(1024, 16, 1024, id="larger-prefill-fallback"),
         pytest.param(8192, 8, 8192, id="large-resource-fallback"),
     ],
 )
@@ -81,10 +94,13 @@ def test_moe_lora_recover(index_dtype, expert_dtype, tokens, top_k, slot_count):
 
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("expert_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "tokens,top_k,slot_count",
+    [(13, 5, 7), (205, 5, 7), (580, 8, 580), (7999, 1, 3), (8001, 1, 5), (1024, 16, 1024)],
+)
 @torch.inference_mode()
-def test_moe_lora_recover_changed_graph_inputs(index_dtype, expert_dtype):
-    top_k = 5
-    cpu_inputs = make_inputs(13, top_k, 7, index_dtype, expert_dtype)
+def test_moe_lora_recover_changed_graph_inputs(index_dtype, expert_dtype, tokens, top_k, slot_count):
+    cpu_inputs = make_inputs(tokens, top_k, slot_count, index_dtype, expert_dtype)
     inputs = tuple(value.npu() for value in cpu_inputs)
     for _ in range(3):
         torch.ops._C_ascend.moe_lora_recover(*inputs, top_k)
@@ -93,7 +109,7 @@ def test_moe_lora_recover_changed_graph_inputs(index_dtype, expert_dtype):
     with torch.npu.graph(graph):
         outputs = torch.ops._C_ascend.moe_lora_recover(*inputs, top_k)
     for seed in (1, 2, 0):
-        current = make_inputs(13, top_k, 7, index_dtype, expert_dtype, seed)
+        current = make_inputs(tokens, top_k, slot_count, index_dtype, expert_dtype, seed)
         for destination, source in zip(inputs, current):
             destination.copy_(source)
         graph.replay()
