@@ -30,7 +30,6 @@ def _make_wrapper(*, is_prefill=False, no_lora=False) -> PunicaWrapperNPU:
     wrapper.is_prefill = is_prefill
     wrapper.no_lora = no_lora
     wrapper.bgmv_shrink = Mock()
-    wrapper.bgmv_shrink_pair = None
     wrapper.bgmv_expand = Mock()
     wrapper.bgmv_expand_slice = Mock()
     wrapper.sgmv_shrink = Mock()
@@ -68,7 +67,6 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             return_value=device_type,
         ),
         patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes") as refresh,
-        patch("vllm_ascend.lora.punica_npu.enable_custom_op", return_value=False) as bootstrap,
     ):
         wrapper = PunicaWrapperNPU(
             8,
@@ -81,8 +79,7 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             ),
         )
     refresh.assert_called_once()
-    assert wrapper.bgmv_shrink_pair is None
-    assert bootstrap.call_count == (0 if expect_torch_ops else 1)
+    assert not hasattr(wrapper, "bgmv_shrink_pair")
     if expect_torch_ops:
         from vllm.lora.ops.torch_ops import bgmv_shrink
 
@@ -340,8 +337,6 @@ def test_moe_lora_tp_matches_unsharded_projection(tp_size, projection, fully_sha
                 token_lora_mapping=mapping,
             )
         expected_collectives = slices if fully_sharded else 0
-        if fully_sharded and projection == "gate_up" and tp_size > 1:
-            expected_collectives = 1
         assert gather.call_count + reduce.call_count == expected_collectives
         torch.testing.assert_close(output[~active], original[~active])
         parts.append(output - original)
@@ -379,13 +374,13 @@ def test_moe_lora_keeps_separate_gathers_for_incompatible_slices(local_ranks, fu
     assert wrapper.bgmv_shrink.call_count == wrapper.bgmv_expand_slice.call_count == 2
 
 
-def test_moe_lora_paired_gather_preserves_slice_offsets_and_routed_weights() -> None:
+def test_moe_lora_separate_gathers_preserve_slice_offsets_and_routed_weights() -> None:
     wrapper = _make_wrapper()
     a = (torch.ones(1, 1, 2, 32), torch.full((1, 1, 2, 32), 2.0))
     b = (torch.ones(1, 1, 8, 16), torch.ones(1, 1, 12, 16))
-    gathered = torch.stack((torch.ones(3, 16), torch.full((3, 16), 2.0)))
+    gathered = (torch.ones(3, 16), torch.full((3, 16), 2.0))
     routed_weights = torch.tensor([0.5, 0.0, 1.5])
-    with patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", return_value=gathered) as gather:
+    with patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", side_effect=gathered) as gather:
         wrapper.add_lora_fused_moe(
             torch.zeros(3, 32),
             torch.ones(3, 32),
@@ -399,9 +394,9 @@ def test_moe_lora_paired_gather_preserves_slice_offsets_and_routed_weights() -> 
             mul_routed_weight=True,
             topk_weights=routed_weights,
         )
-    gather.assert_called_once()
-    assert gather.call_args.args[0].shape == (2, 3, 2)
-    assert gather.call_args.args[0].dtype == torch.float32
+    assert gather.call_count == 2
+    assert all(call.args[0].shape == (3, 2) for call in gather.call_args_list)
+    assert all(call.args[0].dtype == torch.float32 for call in gather.call_args_list)
     for slice_idx, (offset, size) in enumerate(((5, 8), (13, 12))):
         call = wrapper.bgmv_expand_slice.call_args_list[slice_idx]
         torch.testing.assert_close(call.args[0], gathered[slice_idx] * routed_weights[:, None])
@@ -441,46 +436,6 @@ def test_add_lora_logits_uses_sampler_indices() -> None:
     wrapper.bgmv_expand.assert_called_once()
 
 
-@pytest.mark.parametrize("custom_enabled,schema_available", [(True, True), (True, False), (False, True)])
-def test_punica_pair_schema_is_checked_after_lazy_bootstrap(custom_enabled, schema_available) -> None:
-    events = []
-
-    class Operators:
-        def __getattr__(self, name):
-            if name != "bgmv_shrink_pair":
-                raise AttributeError(name)
-            events.append("schema")
-            assert events[0] == "bootstrap"
-            if not schema_available:
-                raise AttributeError(name)
-            return object()
-
-    def bootstrap():
-        events.append("bootstrap")
-        return custom_enabled
-
-    with (
-        patch(
-            "vllm_ascend.lora.punica_npu.get_current_hardware_profile",
-            return_value=get_hardware_profile(AscendDeviceType.A2),
-        ),
-        patch("vllm_ascend.lora.punica_npu.get_ascend_device_type", return_value=AscendDeviceType.A2),
-        patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes"),
-        patch("vllm_ascend.lora.punica_npu.enable_custom_op", side_effect=bootstrap),
-        patch.object(torch.ops, "_C_ascend", Operators()),
-    ):
-        wrapper = PunicaWrapperNPU(
-            8,
-            2,
-            torch.device("cpu"),
-            lora_config=SimpleNamespace(max_lora_rank=16, max_loras=2, fully_sharded_loras=True),
-        )
-    assert events == (["bootstrap", "schema"] if custom_enabled else ["bootstrap"])
-    expected = lora_ops.bgmv_shrink_pair if custom_enabled and schema_available else None
-    assert wrapper.bgmv_shrink_pair is expected
-    assert wrapper.bgmv_shrink is lora_ops.bgmv_shrink
-
-
 def test_bgmv_shrink_pair_wrapper_forwards_output_mutation_contract() -> None:
     x = torch.ones(4, 11, dtype=torch.bfloat16)
     weights = [torch.ones(6, 2, 11, dtype=torch.bfloat16) for _ in range(2)]
@@ -492,47 +447,32 @@ def test_bgmv_shrink_pair_wrapper_forwards_output_mutation_contract() -> None:
     operation.assert_called_once_with(x, weights[0], weights[1], indices, output, 0.5)
 
 
-def test_moe_lora_pair_feeds_one_gather_without_packing_weights() -> None:
-    """CPU stubs check caller data flow; native eligibility/numerics have separate STs."""
+def test_moe_lora_uses_independent_shrink_and_gather_without_packing_weights() -> None:
     wrapper = _make_wrapper()
     x = torch.ones(4, 11, dtype=torch.bfloat16)
     a = (torch.ones(2, 3, 2, 11, dtype=torch.bfloat16), torch.full((2, 3, 2, 11), 3, dtype=torch.bfloat16))
     b = (torch.ones(2, 3, 5, 8, dtype=torch.bfloat16), torch.ones(2, 3, 7, 8, dtype=torch.bfloat16))
     indices = torch.tensor([1, -1, 4, 5])
     routed = torch.tensor([0.5, 1.0, 0.0, 2.0])
+    gathered_inputs = []
 
-    def pair(value, weight0, weight1, output, actual_indices, scale):
+    def shrink(value, weight, output, actual_indices, scale):
+        projection = len(gathered_inputs)
         assert value.data_ptr() == x.data_ptr()
-        torch.testing.assert_close(value, x)
-        assert weight0.shape == weight1.shape == (6, 2, 11)
-        assert weight0.data_ptr() == a[0].data_ptr() and weight1.data_ptr() == a[1].data_ptr()
-        assert output.shape == (2, 4, 2) and output.dtype == torch.float32
-        assert output.is_contiguous() and all(plane.is_contiguous() for plane in output)
+        assert weight.data_ptr() == a[projection].data_ptr()
+        assert weight.shape == (6, 2, 11)
+        assert output.shape == (4, 2) and output.dtype == torch.float32
         assert scale == 1.0
         torch.testing.assert_close(actual_indices, indices)
-        output[0].fill_(1.0)
-        output[1].fill_(3.0)
-        output[:, actual_indices < 0] = 0
-
-    expected_local = torch.tensor(
-        [
-            [[1.0, 1.0], [0.0, 0.0], [1.0, 1.0], [1.0, 1.0]],
-            [[3.0, 3.0], [0.0, 0.0], [3.0, 3.0], [3.0, 3.0]],
-        ]
-    )
+        output.fill_(1.0 if projection == 0 else 3.0)
+        output[actual_indices < 0] = 0
 
     def gather(value):
-        torch.testing.assert_close(value, expected_local)
-        return value.repeat(1, 1, 4)
+        gathered_inputs.append(value.clone())
+        return value.repeat(1, 4)
 
-    wrapper.bgmv_shrink_pair = Mock(side_effect=pair)
-    with (
-        patch("vllm_ascend.lora.punica_npu.get_tensor_model_parallel_world_size", return_value=4),
-        # Real native metadata gate rejects CPU tensors. This test isolates the
-        # wrapper's selected-pair data flow without submitting a device op.
-        patch("vllm_ascend.lora.punica_npu.can_use_bgmv_shrink_pair", return_value=True) as guard,
-        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", side_effect=gather) as collective,
-    ):
+    wrapper.bgmv_shrink = Mock(side_effect=shrink)
+    with patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", side_effect=gather) as collective:
         wrapper.add_lora_fused_moe(
             torch.zeros(4, 20),
             x,
@@ -546,48 +486,44 @@ def test_moe_lora_pair_feeds_one_gather_without_packing_weights() -> None:
             mul_routed_weight=True,
             topk_weights=routed,
         )
-    guard.assert_called_once()
-    wrapper.bgmv_shrink_pair.assert_called_once()
-    wrapper.bgmv_shrink.assert_not_called()
-    collective.assert_called_once()
+    assert wrapper.bgmv_shrink.call_count == collective.call_count == 2
     assert wrapper.bgmv_expand_slice.call_count == 2
-    for projection, (offset, size) in enumerate(((3, 5), (8, 7))):
+    for projection, (offset, size, fill) in enumerate(((3, 5, 1.0), (8, 7, 3.0))):
+        expected = torch.full((4, 2), fill)
+        expected[1] = 0
+        torch.testing.assert_close(gathered_inputs[projection], expected)
         call = wrapper.bgmv_expand_slice.call_args_list[projection]
-        torch.testing.assert_close(call.args[0], expected_local[projection].repeat(1, 4) * routed[:, None])
+        torch.testing.assert_close(call.args[0], expected.repeat(1, 4) * routed[:, None])
         torch.testing.assert_close(call.args[3], indices)
         assert call.args[4:6] == (offset, size)
 
 
-@pytest.mark.parametrize("reason", ["missing_pair", "tp_rank_mismatch", "metadata_rejected"])
-def test_moe_lora_pair_fallback_retains_two_single_and_one_gather(reason) -> None:
+def test_moe_lora_reuses_cube_routing_for_two_projections() -> None:
     wrapper = _make_wrapper()
-    pair = Mock()
-    wrapper.bgmv_shrink_pair = None if reason == "missing_pair" else pair
-    a = (torch.ones(1, 3, 2, 11), torch.ones(1, 3, 2, 11))
-    b = (torch.ones(1, 3, 5, 8), torch.ones(1, 3, 7, 8))
+    wrapper.bgmv_shrink = lora_ops.bgmv_shrink
+    wrapper.bgmv_expand_slice = lora_ops.bgmv_expand_slice
+    rows, hidden, rank, width, groups = 2049, 80, 8, 64, 2
+    x = torch.ones(rows, hidden, dtype=torch.bfloat16)
+    y = torch.zeros(rows, 2 * width, dtype=torch.bfloat16)
+    a = tuple(torch.ones(1, groups, rank, hidden, dtype=torch.bfloat16) for _ in range(2))
+    b = tuple(torch.ones(1, groups, width, rank, dtype=torch.bfloat16) for _ in range(2))
+    routing = SimpleNamespace(groups=groups)
     with (
-        patch(
-            "vllm_ascend.lora.punica_npu.get_tensor_model_parallel_world_size",
-            return_value=3 if reason == "tp_rank_mismatch" else 4,
-        ),
-        patch("vllm_ascend.lora.punica_npu.can_use_bgmv_shrink_pair", return_value=False) as guard,
-        patch(
-            "vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", return_value=torch.zeros(2, 4, 8)
-        ) as gather,
+        patch("vllm_ascend.lora.punica_npu.can_use_cube_bgmv", return_value=True),
+        patch("vllm_ascend.lora.punica_npu.prepare_cube_bgmv_routing", return_value=routing) as prepare,
+        patch("vllm_ascend.lora.punica_npu.cube_bgmv_shrink") as shrink,
+        patch("vllm_ascend.lora.punica_npu.cube_bgmv_expand") as expand,
     ):
         wrapper.add_lora_fused_moe(
-            torch.zeros(4, 12),
-            torch.ones(4, 11),
+            y,
+            x,
             a,
             b,
-            expert_ids=torch.tensor([0, 1, 2, 0]),
+            expert_ids=torch.arange(rows) % groups,
             adapter_enabled=torch.ones(1),
-            token_lora_mapping=torch.tensor([0, -1, 0, 0]),
-            fully_sharded=True,
+            token_lora_mapping=torch.zeros(rows, dtype=torch.long),
         )
-    pair.assert_not_called()
-    assert guard.call_count == (1 if reason == "metadata_rejected" else 0)
-    assert wrapper.bgmv_shrink.call_count == 2
-    gather.assert_called_once()
-    assert gather.call_args.args[0].shape == (2, 4, 2)
-    assert wrapper.bgmv_expand_slice.call_count == 2
+    prepare.assert_called_once()
+    assert shrink.call_count == expand.call_count == 2
+    assert all(call.kwargs["routing"] is routing for call in shrink.call_args_list + expand.call_args_list)
+    assert [call.args[4:6] for call in expand.call_args_list] == [(0, width), (width, width)]

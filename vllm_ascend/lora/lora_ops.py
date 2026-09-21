@@ -18,6 +18,8 @@ import itertools
 import torch
 from vllm.forward_context import get_forward_context, is_forward_context_available
 
+from vllm_ascend.lora.cube_bgmv import CUBE_BGMV_MIN_ROWS, can_use_cube_bgmv, cube_bgmv_expand, cube_bgmv_shrink
+
 try:
     import triton  # type: ignore[import-untyped]
     import triton.language as tl  # type: ignore[import-untyped]
@@ -34,6 +36,13 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
+    if inputs.shape[0] >= CUBE_BGMV_MIN_ROWS:
+        flat_weights = lora_a_weights.reshape(-1, output_tensor.shape[1], inputs.shape[1])
+        if output_tensor.dtype == torch.float32 and can_use_cube_bgmv(
+            inputs, flat_weights, lora_indices_tensor, output_tensor
+        ):
+            cube_bgmv_shrink(inputs, flat_weights, output_tensor, lora_indices_tensor, scaling)
+            return
     return torch.ops._C_ascend.bgmv_shrink(
         inputs,
         lora_a_weights,
@@ -97,14 +106,7 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ):
-    return torch.ops._C_ascend.bgmv_expand(
-        inputs,
-        lora_b_weights,
-        lora_indices_tensor,
-        output_tensor,
-        0,
-        output_tensor.size(1),
-    )
+    return bgmv_expand_slice(inputs, lora_b_weights, output_tensor, lora_indices_tensor, 0, output_tensor.size(1))
 
 
 def bgmv_expand_slice(
@@ -116,6 +118,33 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ):
+    if inputs.shape[0] >= CUBE_BGMV_MIN_ROWS:
+        flat_weights = lora_b_weights.reshape(-1, slice_size, inputs.shape[1])
+        if output_tensor.dtype in (torch.float16, torch.bfloat16) and can_use_cube_bgmv(
+            inputs, flat_weights, lora_indices_tensor, output_tensor
+        ):
+            cube_bgmv_expand(inputs, flat_weights, output_tensor, lora_indices_tensor, slice_offset, slice_size)
+            return output_tensor
+    if (
+        inputs.device.type == "npu"
+        and slice_size > 0
+        and inputs.shape[1] > 0
+        and inputs.shape[1] not in (8, 16, 32, 64)
+    ):
+        # The original AscendC expand reduction implements only these ranks.
+        # Keep the other small-batch ranks on a vector reduction path.
+        flat_weights = lora_b_weights.reshape(-1, slice_size, inputs.shape[1])
+        max_temp_elements = 1 << 21
+        rows_per_tile = max(1, max_temp_elements // (slice_size * inputs.shape[1]))
+        for start in range(0, inputs.shape[0], rows_per_tile):
+            end = min(start + rows_per_tile, inputs.shape[0])
+            ids = lora_indices_tensor[start:end]
+            selected_weights = flat_weights.index_select(0, ids.clamp_min(0)).float()
+            delta = (selected_weights * inputs[start:end, None, :].float()).sum(dim=-1)
+            target = output_tensor[start:end, slice_offset : slice_offset + slice_size]
+            updated = (target.float() + delta).to(target.dtype)
+            target.copy_(torch.where(ids[:, None] >= 0, updated, target))
+        return output_tensor
     return torch.ops._C_ascend.bgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, output_tensor, slice_offset, slice_size
     )

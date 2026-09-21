@@ -4,16 +4,28 @@ from collections.abc import Callable
 
 import torch
 from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, can_use_bgmv_shrink_pair, lora_linear
+from vllm_ascend.lora.cube_bgmv import (
+    CUBE_BGMV_MIN_ROWS,
+    can_use_cube_bgmv,
+    cube_bgmv_expand,
+    cube_bgmv_shrink,
+    prepare_cube_bgmv_routing,
+)
+from vllm_ascend.lora.lora_ops import (
+    _LORA_WRAPPER_IDS,
+    _LORA_WRAPPERS,
+    bgmv_expand_slice as npu_bgmv_expand_slice,
+    bgmv_shrink as npu_bgmv_shrink,
+    lora_linear,
+)
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -32,7 +44,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_shrink_buffers: dict[tuple[int, int], torch.Tensor] = {}
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
-        self.bgmv_shrink_pair = None
         ascend_device_type = get_ascend_device_type()
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
@@ -55,11 +66,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 sgmv_shrink,
             )
 
-            # Resolve the lazily registered schema before choosing this backend.
-            if enable_custom_op() and hasattr(torch.ops._C_ascend, "bgmv_shrink_pair"):
-                from vllm_ascend.lora.lora_ops import bgmv_shrink_pair
-
-                self.bgmv_shrink_pair = bgmv_shrink_pair
         self.bgmv_expand = bgmv_expand
         self.bgmv_expand_slice = bgmv_expand_slice
         self.bgmv_shrink = bgmv_shrink
@@ -537,31 +543,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             torch.full_like(token_lora_mapping, -1),
         ).contiguous()
 
-        paired_shrink = None
-        if (
-            fully_sharded
-            and len(lora_a_stacked) == len(lora_b_stacked) == 2
-            and lora_a_stacked[0].shape == lora_a_stacked[1].shape
-            and lora_b_stacked[0].shape[-1] == lora_b_stacked[1].shape[-1]
-            and lora_a_stacked[0].shape[-2] < lora_b_stacked[0].shape[-1]
-        ):
-            # Keep the projection axis separate from the rank axis: gathering
-            # [2, rows, local_rank] along the last axis preserves gate/up rank
-            # order, while gathering [rows, 2 * local_rank] would interleave it.
-            local_rank = lora_a_stacked[0].shape[-2]
-            paired_shrink = torch.zeros((2, x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
-            a0, a1 = (a.view(-1, local_rank, a.shape[-1]) for a in lora_a_stacked)
-            if (
-                self.bgmv_shrink_pair is not None
-                and lora_b_stacked[0].shape[-1] == local_rank * get_tensor_model_parallel_world_size()
-                and can_use_bgmv_shrink_pair(x2d, a0, a1, combined_idx, paired_shrink)
-            ):
-                self.bgmv_shrink_pair(x2d, a0, a1, paired_shrink, combined_idx, 1.0)
-            else:
-                for slice_idx, a_flat in enumerate((a0, a1)):
-                    self.bgmv_shrink(x2d, a_flat, paired_shrink[slice_idx], combined_idx, 1.0)
-            paired_shrink = tensor_model_parallel_all_gather(paired_shrink)
-
+        share_cube_routing = (
+            len(lora_a_stacked) > 1
+            and x2d.shape[0] >= CUBE_BGMV_MIN_ROWS
+            and self.bgmv_shrink is npu_bgmv_shrink
+            and self.bgmv_expand_slice is npu_bgmv_expand_slice
+        )
+        cube_routing = None
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):
             # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
@@ -576,22 +564,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
             # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
             # (its X_T), so the shrink buffer is fp32.
-            if paired_shrink is not None:
-                shrink_out = paired_shrink[slice_idx]
+            shrink_out = torch.zeros(
+                (x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device
+            )
+            if (
+                share_cube_routing
+                and a_flat.shape[0] > 1
+                and (cube_routing is None or a_flat.shape[0] == cube_routing.groups)
+                and can_use_cube_bgmv(x2d, a_flat, combined_idx, shrink_out)
+            ):
+                if cube_routing is None:
+                    cube_routing = prepare_cube_bgmv_routing(combined_idx, a_flat.shape[0])
+                cube_bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0, routing=cube_routing)
             else:
-                shrink_out = torch.zeros(
-                    (x2d.shape[0], local_rank),
-                    dtype=torch.float32,
-                    device=x2d.device,
-                )
-
                 self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
-
-                if fully_sharded:
-                    if local_rank == full_rank:
-                        shrink_out = tensor_model_parallel_all_reduce(shrink_out)
-                    else:
-                        shrink_out = tensor_model_parallel_all_gather(shrink_out)
+            if fully_sharded:
+                if local_rank == full_rank:
+                    shrink_out = tensor_model_parallel_all_reduce(shrink_out)
+                else:
+                    shrink_out = tensor_model_parallel_all_gather(shrink_out)
+                shrink_out = shrink_out.contiguous()
 
             if shrink_out.shape[-1] != full_rank:
                 raise ValueError(
@@ -605,7 +597,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             if mul_routed_weight and topk_weights is not None:
                 delta = shrink_out * topk_weights.view(-1, 1)
 
-            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            if (
+                cube_routing is not None
+                and b_flat.shape[0] == cube_routing.groups
+                and can_use_cube_bgmv(delta, b_flat, combined_idx, y2d)
+            ):
+                cube_bgmv_expand(delta, b_flat, y2d, combined_idx, cur_offset, out_size, routing=cube_routing)
+            else:
+                self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
             cur_offset += out_size
 
     def add_lora_logits(
