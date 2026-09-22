@@ -609,7 +609,7 @@ def test_allgather_token_dispatch_mxfp4_keeps_prequantized_scale():
 
 @pytest.mark.parametrize(
     ("no_lora", "expected_quant_mode", "expect_dynamic_scale"),
-    [(False, -1, False), (True, 1, True)],
+    [(False, 1, True), (True, 1, True)],
 )
 def test_allgather_w8a8_lora_controls_dispatch_quantization(
     no_lora,
@@ -641,6 +641,32 @@ def test_allgather_w8a8_lora_controls_dispatch_quantization(
 
     assert mock_init_routing.call_args.kwargs["quant_mode"] == expected_quant_mode
     assert (output.dynamic_scale is not None) == expect_dynamic_scale
+
+
+@pytest.mark.parametrize("apply_weight", [False, True])
+def test_allgather_lora_preserves_prequantized_input_and_scale(apply_weight):
+    dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
+    dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=False)))
+    hidden = torch.ones(2, 4, dtype=torch.int8)
+    scale = torch.tensor([[0.1], [0.2]])
+    weights = torch.tensor([[0.5], [0.25]])
+    payload = build_token_dispatch_input_fixture(
+        hidden_states=hidden,
+        topk_weights=weights,
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.W8A8,
+        pertoken_scale=scale,
+        apply_router_weight_on_input=apply_weight,
+    )
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=(hidden, torch.arange(2, dtype=torch.int32), torch.ones(2, dtype=torch.int32), scale.reshape(-1)),
+    ) as routing:
+        dispatcher.token_dispatch(payload)
+    assert routing.call_args.args[0] is hidden
+    assert routing.call_args.kwargs["quant_mode"] == -1
+    expected = scale.reshape(-1) * weights.reshape(-1) if apply_weight else scale.reshape(-1)
+    torch.testing.assert_close(routing.call_args.kwargs["scale"], expected)
 
 
 def test_allgather_bf16_lora_skips_quant_backend_validation():

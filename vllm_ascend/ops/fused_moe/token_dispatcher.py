@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import MoECommType, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -358,8 +358,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 quant_type=quant_type,
                 hidden_states=token_dispatch_input.hidden_states,
                 dynamic_scale=dynamic_scale,
+                comm_type=MoECommType.ALLGATHER,
             )
-            with_quant = False
+            if quant_type == QuantType.W8A8:
+                with_quant = True
+                if dynamic_scale is not None:
+                    dynamic_scale = dynamic_scale.reshape(-1).contiguous()
+            else:
+                with_quant = False
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -388,7 +394,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
-            hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+            if hidden_states.dtype == torch.int8 and with_quant:
+                dynamic_scale = dynamic_scale.reshape(-1) * topk_weights.reshape(-1).float()
+            else:
+                hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = expert_map[topk_ids] != -1

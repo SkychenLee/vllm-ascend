@@ -66,6 +66,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
             ),
         )
         moe_config = SimpleNamespace(
+            in_dtype=torch.bfloat16,
             activation=MoEActivation.SITU,
             activation_situ_beta=4.0,
             activation_situ_linear_beta=25.0,
@@ -84,6 +85,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
         self.assertEqual(mlp_compute_input.activation, MoEActivation.SITU)
         self.assertEqual(mlp_compute_input.activation_situ_beta, 4.0)
         self.assertEqual(mlp_compute_input.activation_situ_linear_beta, 25.0)
+        self.assertEqual(mlp_compute_input.output_dtype, torch.bfloat16)
 
     def test_build_fused_experts_input_preserves_runtime_semantics(self):
         for quant_type in (

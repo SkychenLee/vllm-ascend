@@ -48,6 +48,77 @@ def _make_wrapper(*, is_prefill=False, no_lora=False) -> PunicaWrapperNPU:
     return wrapper
 
 
+@pytest.mark.parametrize("local_rank,full_rank", [(2, 16), (16, 16)])
+def test_int8_moe_shrink_communicates_before_fused_expand(local_rank, full_rank):
+    wrapper = _make_wrapper()
+    x = torch.ones(3, 32, dtype=torch.int8)
+    scale = torch.ones(3)
+    a = tuple(torch.ones(2, 2, local_rank, 32, dtype=torch.bfloat16) for _ in range(2))
+    b = tuple(torch.ones(2, 2, 8, full_rank, dtype=torch.bfloat16) for _ in range(2))
+    calls = []
+
+    def shrink(x, w, ids, s, out):
+        calls.append("shrink")
+        assert x.dtype == torch.int8 and s is not None
+        out.fill_(2)
+
+    def communicate(t):
+        calls.append("communicate")
+        return torch.full((3, full_rank), 7.0)
+
+    def expand(base, g, u, bg, bu, ids, topk, limit):
+        calls.append("expand")
+        assert torch.all(g == 7) and torch.all(u == 7)
+        assert g.shape == (3, full_rank)
+        torch.testing.assert_close(ids, torch.tensor([0, 3, -1]))
+        return torch.zeros(3, 8, dtype=torch.int8), torch.ones(3)
+
+    with (
+        patch("torch.ops._C_ascend.bgmv_shrink_int8", side_effect=shrink, create=True),
+        patch("torch.ops._C_ascend.moe_lora_expand_swiglu_quant", side_effect=expand, create=True),
+        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", side_effect=communicate) as gather,
+        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_reduce", side_effect=communicate) as reduce,
+    ):
+        result = wrapper.add_lora_fused_moe(
+            y=torch.zeros(3, 16, dtype=torch.bfloat16),
+            x=x,
+            lora_a_stacked=a,
+            lora_b_stacked=b,
+            expert_ids=torch.tensor([0, 1, 0]),
+            adapter_enabled=torch.tensor([True, True]),
+            token_lora_mapping=torch.tensor([0, 1, -1]),
+            input_scale=scale,
+            swiglu_quant_limit=10.0,
+            fully_sharded=True,
+        )
+    assert calls == ["shrink", "communicate", "shrink", "communicate", "expand"]
+    assert result[0].dtype == torch.int8
+    torch.testing.assert_close(result[2], torch.tensor([0, 3, -1]))
+    assert gather.call_count == (2 if local_rank != full_rank else 0)
+    assert reduce.call_count == (2 if local_rank == full_rank else 0)
+    wrapper.bgmv_shrink.assert_not_called()
+    wrapper.bgmv_expand_slice.assert_not_called()
+
+
+def test_int8_moe_reuses_w13_indices_for_w2():
+    wrapper = _make_wrapper()
+    combined = torch.tensor([0, 3, -1])
+    with patch("torch.ops._C_ascend.bgmv_shrink_int8", create=True) as shrink:
+        wrapper.add_lora_fused_moe(
+            y=torch.zeros(3, 16, dtype=torch.bfloat16),
+            x=torch.ones(3, 8, dtype=torch.int8),
+            lora_a_stacked=[torch.ones(2, 2, 16, 8, dtype=torch.bfloat16)],
+            lora_b_stacked=[torch.ones(2, 2, 16, 16, dtype=torch.bfloat16)],
+            expert_ids=torch.tensor([0, 1, 0]),
+            adapter_enabled=torch.ones(2, dtype=torch.bool),
+            token_lora_mapping=torch.tensor([0, 1, -1]),
+            input_scale=torch.ones(3),
+            combined_indices=combined,
+        )
+    assert shrink.call_args.args[2] is combined
+    assert wrapper.bgmv_expand_slice.call_args.args[3] is combined
+
+
 @pytest.mark.parametrize(
     ("device_type", "max_lora_rank", "expect_torch_ops"),
     [
@@ -527,3 +598,58 @@ def test_moe_lora_reuses_cube_routing_for_two_projections() -> None:
     assert shrink.call_count == expand.call_count == 2
     assert all(call.kwargs["routing"] is routing for call in shrink.call_args_list + expand.call_args_list)
     assert [call.args[4:6] for call in expand.call_args_list] == [(0, width), (width, width)]
+
+
+@pytest.mark.parametrize("local_rank,full_rank,rows", [(2, 16, 3), (16, 16, 3), (2, 16, 0)])
+def test_paired_moe_single_collective_and_rank_major_layout(local_rank, full_rank, rows):
+    wrapper = _make_wrapper()
+    packed = torch.ones(2, 2, 2, local_rank, 32, dtype=torch.bfloat16)
+    b = tuple(torch.ones(2, 2, 8, full_rank, dtype=torch.bfloat16) for _ in range(2))
+    calls = []
+    shards = full_rank // local_rank
+
+    def shrink(x, w, ids, scale, out):
+        calls.append("shrink")
+        out.fill_(2)
+
+    def gather(t, dim):
+        calls.append("gather")
+        assert dim == 0
+        return torch.cat([t + i for i in range(shards)], dim=0)
+
+    def reduce(t):
+        calls.append("reduce")
+        return t + 3
+
+    def expand(base, a, bg, bu, ids, topk, limit):
+        calls.append("expand")
+        assert a.shape == (shards, rows, 2 * local_rank)
+        if rows:
+            assert torch.all(a[0] == (2 if shards > 1 else 5))
+            if shards > 1:
+                assert torch.all(a[-1] == 2 + shards - 1)
+        return torch.zeros(rows, 8, dtype=torch.int8), torch.ones(rows)
+
+    with (
+        patch("torch.ops._C_ascend.bgmv_shrink_int8_pair", side_effect=shrink, create=True),
+        patch("torch.ops._C_ascend.moe_lora_expand_swiglu_quant_pair", side_effect=expand, create=True),
+        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_gather", side_effect=gather),
+        patch("vllm_ascend.lora.punica_npu.tensor_model_parallel_all_reduce", side_effect=reduce),
+    ):
+        wrapper.add_lora_fused_moe(
+            y=torch.zeros(rows, 16, dtype=torch.bfloat16),
+            x=torch.ones(rows, 32, dtype=torch.int8),
+            lora_a_stacked=packed.unbind(0),
+            lora_b_stacked=b,
+            paired_a_stacked=packed,
+            expert_ids=torch.zeros(rows, dtype=torch.int64),
+            adapter_enabled=torch.ones(2, dtype=torch.bool),
+            token_lora_mapping=torch.zeros(rows, dtype=torch.int64),
+            input_scale=torch.ones(rows),
+            swiglu_quant_limit=10.0,
+            fully_sharded=True,
+        )
+    expected = ["shrink"]
+    if rows:
+        expected.append("gather" if shards > 1 else "reduce")
+    assert calls == expected + ["expand"]

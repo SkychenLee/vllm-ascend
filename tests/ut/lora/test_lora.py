@@ -56,6 +56,11 @@ def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
     assert wrapper._shared_experts is shared_experts
     assert wrapper.n_slices == 256 * 3
 
+    # DeepSeek V4 queries this after the runner has been wrapped with LoRA.
+    for internal_router in (False, True):
+        base_layer.is_internal_router = internal_router
+        assert wrapper.is_internal_router is internal_router
+
 
 def test_ascend_fused_moe_lora_omits_shared_experts_attr_when_absent() -> None:
     with (
@@ -418,3 +423,51 @@ def test_packed_single_lora_matmul(add_inputs: bool) -> None:
     if add_inputs:
         expected.add_(original)
     torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_packed_w13_storage_survives_adapter_load_reset(sharded):
+    base = _make_base_layer(num_local_experts=2)
+    base.moe_config.hidden_dim = 32
+    base.moe_config.intermediate_size_per_partition = 4
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(base)
+    cfg = SimpleNamespace(
+        max_loras=2,
+        max_lora_rank=16,
+        lora_dtype=torch.bfloat16,
+        fully_sharded_loras=sharded,
+        enable_moe_shared_loras=False,
+    )
+    wrapper.create_lora_weights(2, cfg)
+    packed = wrapper.w13_lora_a_packed
+    pointer = packed.data_ptr()
+    assert packed.shape == (2, 2, 2, 2 if sharded else 16, 32)
+    assert all(t.is_contiguous() for t in wrapper.w13_lora_a_stacked)
+    a = [torch.full((2, 16, 32), value, dtype=torch.bfloat16) for value in (1.0, 2.0, 3.0)]
+    b = [torch.ones(2, 32, 16, dtype=torch.bfloat16) for _ in range(3)]
+    wrapper.set_lora(1, a, b)
+    assert torch.all(packed[0, 1] == 1) and torch.all(packed[1, 1] == 3)
+    assert torch.count_nonzero(packed[:, 0]) == 0
+    wrapper.reset_lora(1)
+    assert torch.count_nonzero(packed) == 0
+    assert pointer == wrapper.w13_lora_a_packed.data_ptr()
+    a[0].fill_(7)
+    wrapper.set_lora(0, a, b)
+    assert torch.all(packed[0, 0] == 7) and torch.count_nonzero(packed[:, 1]) == 0
+
+
+@pytest.mark.parametrize("ep,slices", [(True, 2), (False, 1)])
+def test_packed_w13_preserves_ep_and_single_slice_allocation(ep, slices):
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(_make_base_layer(use_ep=ep, is_act_and_mul=slices == 2))
+    with patch.object(FusedMoEWithLoRA, "_create_lora_a_weights") as original:
+        wrapper._create_lora_a_weights(2, SimpleNamespace())
+    original.assert_called_once()
+    assert wrapper.w13_lora_a_packed is None

@@ -13,10 +13,9 @@
 # limitations under the License.
 """Extensible quantized MoE LoRA execution for Ascend.
 
-Each quantization scheme registers the dispatch policy and MLP implementation
-needed to preserve floating-point LoRA boundaries around quantized base expert
-matmuls. The token dispatcher and the common MoE MLP entry therefore do not
-need scheme-specific dtype checks.
+Each quantization scheme owns its activation contract and MLP implementation.
+W8A8 AllGather shares quantized activations between the base experts and LoRA;
+AlltoAll retains floating-point LoRA boundaries.
 """
 
 from __future__ import annotations
@@ -36,10 +35,32 @@ from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_allgather,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
+    moe_lora_apply_w13_swiglu_quant,
+    reset_lora_indices,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
+
+# The native operator supports width <= 8192 and rank <= 512. Dispatch only
+# the measured beneficial region: wide projections or scalar-rank fallback
+# can cost more than separate B/activation/quant kernels, especially Decode.
+MAX_FUSED_LORA_INTERMEDIATE_SIZE = 256
+MAX_FUSED_LORA_PROJECTION_ELEMENTS = 8192
+
+
+def _can_fuse_int8_lora_swiglu(lora_context, intermediate_size: int) -> bool:
+    if len(lora_context.w13_lora_a_stacked) != 2:
+        return False
+    rank = lora_context.w13_lora_b_stacked[0].shape[-1]
+    return (
+        rank >= 8
+        and rank & (rank - 1) == 0
+        and intermediate_size % 32 == 0
+        and intermediate_size <= MAX_FUSED_LORA_INTERMEDIATE_SIZE
+        and intermediate_size * rank <= MAX_FUSED_LORA_PROJECTION_ELEMENTS
+    )
+
 
 QuantMoELoRAApply = Callable[[MoEMlpComputeInput, Any], tuple[torch.Tensor, torch.npu.Event | None]]
 QuantMoELoRAActivationValidator = Callable[[torch.Tensor, torch.Tensor | None], None]
@@ -98,9 +119,13 @@ def validate_quant_moe_lora_activation_input(
     quant_type: QuantType,
     hidden_states: torch.Tensor,
     dynamic_scale: torch.Tensor | None,
+    comm_type: MoECommType | None = None,
 ) -> None:
     """Validate activations before quantized MoE LoRA prepare/dispatch."""
     impl = _get_quant_moe_lora_impl(quant_type)
+    if quant_type == QuantType.W8A8 and comm_type == MoECommType.ALLGATHER:
+        _validate_int8_scale(hidden_states, dynamic_scale)
+        return
     if impl.validate_activation_input is not None:
         impl.validate_activation_input(hidden_states, dynamic_scale)
 
@@ -146,6 +171,18 @@ def _validate_dynamic_int8_activations(
         raise NotImplementedError("Dynamic INT8 MoE LoRA requires unquantized activations before expert routing.")
 
 
+def _validate_int8_scale(hidden_states: torch.Tensor, scale: torch.Tensor | None) -> None:
+    if hidden_states.dtype == torch.int8:
+        if scale is None:
+            raise ValueError("INT8 MoE LoRA activations require a per-token dynamic_scale.")
+        if scale.dtype != torch.float32 or scale.device != hidden_states.device:
+            raise ValueError("INT8 MoE LoRA dynamic_scale must be FP32 on the activation device.")
+        if scale.shape not in (hidden_states.shape[:-1], (*hidden_states.shape[:-1], 1)):
+            raise ValueError("INT8 MoE LoRA dynamic_scale must contain one scale per activation row.")
+    elif hidden_states.dtype not in (torch.bfloat16, torch.float16) or scale is not None:
+        raise ValueError("MoE LoRA expects BF16/FP16 without scales or INT8 with per-token scales.")
+
+
 @register_quant_moe_lora_impl(
     QuantType.W8A8,
     validate_activation_input=_validate_dynamic_int8_activations,
@@ -154,7 +191,7 @@ def _apply_dynamic_int8_moe_lora(
     mlp_compute_input: MoEMlpComputeInput,
     quant_method=None,
 ) -> tuple[torch.Tensor, torch.npu.Event | None]:
-    """Run INT8 base experts and inject LoRA at BF16/FP16 boundaries."""
+    """Run INT8 experts, with kernel-side LoRA dequantization on AllGather."""
     comm_type = _EXTRA_CTX.moe_comm_type
     if comm_type not in {MoECommType.ALLGATHER, MoECommType.ALLTOALL}:
         raise NotImplementedError(
@@ -166,7 +203,10 @@ def _apply_dynamic_int8_moe_lora(
         raise NotImplementedError("Ascend quantized MoE LoRA does not support dynamic EPLB.")
 
     hidden_states = mlp_compute_input.hidden_states
-    if mlp_compute_input.dynamic_scale is not None or hidden_states.dtype == torch.int8:
+    allgather_int8 = comm_type == MoECommType.ALLGATHER
+    if allgather_int8:
+        _validate_int8_scale(hidden_states, mlp_compute_input.dynamic_scale)
+    elif mlp_compute_input.dynamic_scale is not None or hidden_states.dtype == torch.int8:
         raise AssertionError(
             "Quantized MoE LoRA requires BF16/FP16 routed activations. "
             "Dispatch-side quantization must be disabled for LoRA batches."
@@ -175,10 +215,15 @@ def _apply_dynamic_int8_moe_lora(
         mlp_compute_input.expanded_row_idx is None or mlp_compute_input.topk_ids is None
     ):
         raise AssertionError("Quantized MoE LoRA requires AllGather routing metadata (expanded_row_idx and topk_ids).")
+    input_dtype = (mlp_compute_input.output_dtype or hidden_states.dtype) if allgather_int8 else hidden_states.dtype
+    if allgather_int8 and input_dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError("INT8 MoE LoRA requires an explicit BF16/FP16 output_dtype.")
     if hidden_states.shape[0] == 0:
         # An EP rank may receive no routed tokens. Keep participating in the
         # surrounding AlltoAll collectives, but avoid empty-tensor NPU kernels.
-        return hidden_states, None
+        if allgather_int8:
+            reset_lora_indices(lora_context)
+        return hidden_states.to(input_dtype), None
 
     # Weights are carried by the routed-expert layer since the MoE MLP refactor;
     # fall back to the payload for direct callers/tests that still build it.
@@ -200,13 +245,16 @@ def _apply_dynamic_int8_moe_lora(
     if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
         raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
 
-    input_dtype = hidden_states.dtype
-    quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=hidden_states,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
+    if hidden_states.dtype == torch.int8:
+        quantized_input = hidden_states
+        input_scale = mlp_compute_input.dynamic_scale.reshape(-1).contiguous()
+    else:
+        quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
+            hidden_states=hidden_states,
+            dynamic_scale=None,
+            act_quant_type=torch.int8,
+            use_mxfp_quant=False,
+        )
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[quantized_input],
         weight=w1,
@@ -230,29 +278,48 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             group_list=mlp_compute_input.group_list,
         )
-    moe_lora_apply_w13(
-        lora_context,
-        gate_up_out=gate_up_out,
-        hidden_states=hidden_states,
-        lora_routing=lora_routing,
-    )
+    act_name = getattr(mlp_compute_input.activation, "value", mlp_compute_input.activation)
+    combined_lora_indices = None
+    if (
+        allgather_int8
+        and mlp_compute_input.fusion
+        and act_name == "silu"
+        and _can_fuse_int8_lora_swiglu(lora_context, gate_up_out.shape[-1] // 2)
+    ):
+        quantized_activated, activated_scale, combined_lora_indices = moe_lora_apply_w13_swiglu_quant(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=quantized_input,
+            input_scale=input_scale,
+            lora_routing=lora_routing,
+            swiglu_limit=mlp_compute_input.swiglu_limit,
+            topk_scales=mlp_compute_input.topk_scales,
+        )
+    else:
+        moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=quantized_input if allgather_int8 else hidden_states,
+            lora_routing=lora_routing,
+            **({"input_scale": input_scale} if allgather_int8 else {}),
+        )
 
-    activated = _apply_moe_activation(
-        gate_up_out,
-        mlp_compute_input.activation,
-        mlp_compute_input.swiglu_limit,
-        mlp_compute_input.swiglu_alpha,
-        mlp_compute_input.swiglu_beta,
-    )
-    if mlp_compute_input.topk_scales is not None:
-        activated *= mlp_compute_input.topk_scales
+        activated = _apply_moe_activation(
+            gate_up_out,
+            mlp_compute_input.activation,
+            mlp_compute_input.swiglu_limit,
+            mlp_compute_input.swiglu_alpha,
+            mlp_compute_input.swiglu_beta,
+        )
+        if mlp_compute_input.topk_scales is not None:
+            activated *= mlp_compute_input.topk_scales
 
-    quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=activated,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
+        quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
+            hidden_states=activated,
+            dynamic_scale=None,
+            act_quant_type=torch.int8,
+            use_mxfp_quant=False,
+        )
     before_gmm2_evt = torch.npu.current_stream().record_event()
     down_out = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=quantized_activated,
@@ -269,14 +336,16 @@ def _apply_dynamic_int8_moe_lora(
         use_bf16=input_dtype == torch.bfloat16,
         use_mxfp_quant=False,
         bias=None,
-        fallback_output_dtype=w2_scale[0].dtype,
+        fallback_output_dtype=input_dtype if allgather_int8 else w2_scale[0].dtype,
         mxfp_quant_dtype=None,
     )
     moe_lora_apply_w2(
         lora_context,
         down_out=down_out,
-        silu_out=activated,
+        silu_out=quantized_activated if allgather_int8 else activated,
         lora_routing=lora_routing,
+        **({"input_scale": activated_scale} if allgather_int8 else {}),
+        **({"combined_indices": combined_lora_indices} if combined_lora_indices is not None else {}),
     )
     return down_out, before_gmm2_evt
 

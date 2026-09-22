@@ -279,7 +279,7 @@ def _recover_moe_lora_routing_all2all(
     return expert_per_row, lora_per_row
 
 
-def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing):
+def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing, input_scale=None):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
     Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
@@ -304,10 +304,32 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         adapter_enabled=lora_context.adapter_enabled,
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
+        **({"input_scale": input_scale} if input_scale is not None else {}),
     )
 
 
-def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
+def moe_lora_apply_w13_swiglu_quant(
+    lora_context, *, gate_up_out, hidden_states, input_scale, lora_routing, swiglu_limit, topk_scales=None
+):
+    """Project LoRA A, communicate its TP shards, then fuse B/add/SwiGLU/quant."""
+    expert_per_row, lora_per_row = lora_routing
+    return lora_context.punica_wrapper.add_lora_fused_moe(
+        y=gate_up_out,
+        x=hidden_states,
+        lora_a_stacked=lora_context.w13_lora_a_stacked,
+        lora_b_stacked=lora_context.w13_lora_b_stacked,
+        expert_ids=expert_per_row,
+        adapter_enabled=lora_context.adapter_enabled,
+        fully_sharded=lora_context.fully_sharded,
+        token_lora_mapping=lora_per_row,
+        input_scale=input_scale,
+        swiglu_quant_limit=swiglu_limit,
+        paired_a_stacked=getattr(lora_context, "w13_lora_a_packed", None),
+        topk_weights=topk_scales,
+    )
+
+
+def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing, input_scale=None, combined_indices=None):
     """Add the w2 LoRA delta into ``down_out`` (in place), after the down GMM.
 
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
@@ -332,6 +354,8 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         fully_sharded=lora_context.fully_sharded,
         offset=offset,
         token_lora_mapping=lora_per_row,
+        **({"input_scale": input_scale} if input_scale is not None else {}),
+        **({"combined_indices": combined_indices} if combined_indices is not None else {}),
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for
@@ -384,9 +408,40 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
+    @property
+    def is_internal_router(self) -> bool:
+        # Model forward still queries the runner after LoRA wraps it.
+        return self.base_layer.is_internal_router
+
+    def _create_lora_a_weights(self, max_loras, lora_config):
+        self.w13_lora_a_packed = None
+        if self.use_ep or self._w13_slices != 2 or self.enable_moe_shared_loras:
+            return super()._create_lora_a_weights(max_loras, lora_config)
+        rank = lora_config.max_lora_rank
+        if self.fully_sharded:
+            if rank % self.tp_size:
+                raise ValueError("Fully sharded LoRA rank must be divisible by TP size.")
+            rank //= self.tp_size
+        # The old loader/reset methods write contiguous views of this storage.
+        # No duplicate weights, per-forward packing, or graph pointer changes.
+        self.w13_lora_a_packed = torch.zeros(
+            (2, max_loras, self._w13_a_num_experts, rank, self.hidden_size),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.w13_lora_a_stacked = self.w13_lora_a_packed.unbind(0)
+        self.w2_lora_a_stacked = (
+            torch.zeros(
+                (max_loras, self.local_num_experts, lora_config.max_lora_rank, self.intermediate_size_per_partition),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            ),
+        )
+
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        lora_context.w13_lora_a_packed = getattr(self, "w13_lora_a_packed", None)
         return lora_context
 
     # ------------------------------------------------------------------

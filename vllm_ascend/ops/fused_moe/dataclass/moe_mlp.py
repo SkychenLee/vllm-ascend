@@ -59,6 +59,8 @@ class MoEMlpComputeInput:
     topk_ids: torch.Tensor | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
+    # Floating-point expert output type, independent of routed activation dtype.
+    output_dtype: torch.dtype | None = None
 
 
 def build_mlp_compute_input(
@@ -113,4 +115,5 @@ def build_mlp_compute_input(
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
         lora_context=fused_experts_input.lora_context,
+        output_dtype=None if moe_config is None else moe_config.in_dtype,
     )

@@ -31,6 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -124,7 +125,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        return True
+        return not envs_ascend.VLLM_ASCEND_DISABLE_PIN_MEMORY
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

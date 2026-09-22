@@ -83,6 +83,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Default: 0 (disabled); valid values: 0 or 1. Not sensitive. The opt-in
     # path changes some BF16 model outputs relative to the Vector baseline.
     "VLLM_ASCEND_ENABLE_CUBE_BGMV": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_CUBE_BGMV"),
+    # Disable pinned host allocations when the driver cannot satisfy them,
+    # for example while loading large MoE adapters. Default: 0 (pinning kept).
+    # Valid values: 0 or 1. Not sensitive. Set before starting the engine;
+    # disabling pinning may reduce CPU-to-NPU transfer performance.
+    "VLLM_ASCEND_DISABLE_PIN_MEMORY": lambda: _strict_binary_env("VLLM_ASCEND_DISABLE_PIN_MEMORY"),
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),

@@ -20,9 +20,13 @@ from vllm_ascend.lora.cube_bgmv import (
 from vllm_ascend.lora.lora_ops import (
     _LORA_WRAPPER_IDS,
     _LORA_WRAPPERS,
-    bgmv_expand_slice as npu_bgmv_expand_slice,
-    bgmv_shrink as npu_bgmv_shrink,
     lora_linear,
+)
+from vllm_ascend.lora.lora_ops import (
+    bgmv_expand_slice as npu_bgmv_expand_slice,
+)
+from vllm_ascend.lora.lora_ops import (
+    bgmv_shrink as npu_bgmv_shrink,
 )
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -500,7 +504,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
-    ) -> None:
+        input_scale: torch.Tensor | None = None,
+        swiglu_quant_limit: float | None = None,
+        combined_indices: torch.Tensor | None = None,
+        paired_a_stacked: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
         same bgmv_shrink/bgmv_expand AscendC kernels (csrc/kernels/bgmv_*.cpp)
@@ -523,6 +531,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         zero-initialized shrink buffer / unmodified ``y`` in place), so
         inactive rows get a zero delta for free -- no Python-level branching
         needed.
+
+        With ``swiglu_quant_limit``, return INT8 activations, FP32 scales and
+        the masked combined indices. The caller can pass those indices to
+        w2 within the same forward; they must not be reused across batches.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config
@@ -532,16 +544,23 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
-        expert_idx = expert_ids.view(-1).to(torch.long)
-        num_experts = lora_a_stacked[0].shape[1]
-
-        lora_idx_safe = token_lora_mapping.clamp(min=0)
-        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-        combined_idx = torch.where(
-            enabled,
-            lora_idx_safe * num_experts + expert_idx,
-            torch.full_like(token_lora_mapping, -1),
-        ).contiguous()
+        if input_scale is not None:
+            input_scale = input_scale.reshape(-1).contiguous()
+        elif x.dtype == torch.int8:
+            raise ValueError("INT8 LoRA requires input_scale.")
+        if combined_indices is None:
+            expert_idx = expert_ids.view(-1).to(torch.long)
+            num_experts = lora_a_stacked[0].shape[1]
+            lora_idx_safe = token_lora_mapping.clamp(min=0)
+            enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+            combined_idx = torch.where(
+                enabled,
+                lora_idx_safe * num_experts + expert_idx,
+                torch.full_like(token_lora_mapping, -1),
+            ).contiguous()
+        else:
+            # w13 and w2 share the same routed rows and adapter mask.
+            combined_idx = combined_indices
 
         share_cube_routing = (
             len(lora_a_stacked) > 1
@@ -551,6 +570,51 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         cube_routing = None
         cur_offset = offset
+        fuse_swiglu = swiglu_quant_limit is not None
+        if fuse_swiglu and (len(lora_a_stacked) != 2 or offset != 0):
+            raise ValueError("Fused MoE SwiGLU requires gate and up projections without an output offset.")
+        if fuse_swiglu and input_scale is not None and paired_a_stacked is not None:
+            local_rank = paired_a_stacked.shape[-2]
+            full_rank = lora_b_stacked[0].shape[-1]
+            if local_rank <= 0 or full_rank % local_rank or (not fully_sharded and local_rank != full_rank):
+                raise ValueError("Invalid paired MoE LoRA TP rank layout.")
+            shards = full_rank // local_rank
+            rows = x2d.shape[0]
+            paired = torch.empty((rows, 2 * local_rank), dtype=torch.float32, device=x2d.device)
+            torch.ops._C_ascend.bgmv_shrink_int8_pair(
+                x2d,
+                paired_a_stacked.view(2, -1, local_rank, x2d.shape[-1]),
+                combined_idx,
+                input_scale,
+                paired,
+            )
+            if rows == 0:
+                paired = torch.empty((shards, 0, 2 * local_rank), dtype=torch.float32, device=x2d.device)
+            else:
+                if fully_sharded:
+                    if local_rank == full_rank:
+                        paired = tensor_model_parallel_all_reduce(paired)
+                    else:
+                        # Keep rank-major HCCL output; gathering the last dim
+                        # would materialize a transpose before B projection.
+                        paired = tensor_model_parallel_all_gather(paired, dim=0)
+                paired = paired.view(shards, rows, 2 * local_rank)
+            if topk_weights is not None:
+                topk_weights = topk_weights.reshape(-1).float().contiguous()
+            bg, bu = lora_b_stacked
+            quantized, scale = torch.ops._C_ascend.moe_lora_expand_swiglu_quant_pair(
+                y2d,
+                paired,
+                bg.view(-1, bg.shape[-2], full_rank),
+                bu.view(-1, bu.shape[-2], full_rank),
+                combined_idx,
+                topk_weights,
+                swiglu_quant_limit,
+            )
+            return quantized, scale, combined_idx
+
+        projections = []
+        expand_weights = []
         for slice_idx in range(len(lora_a_stacked)):
             # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
             # Flattening the leading two dims turns "gather by (lora, expert)"
@@ -564,10 +628,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
             # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
             # (its X_T), so the shrink buffer is fp32.
-            shrink_out = torch.zeros(
-                (x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device
-            )
-            if (
+            # The INT8 kernel writes every row, including inactive adapters.
+            # The legacy float kernel skips inactive rows and still needs zeros.
+            allocate_shrink = torch.empty if input_scale is not None else torch.zeros
+            shrink_out = allocate_shrink((x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
+            if input_scale is not None:
+                torch.ops._C_ascend.bgmv_shrink_int8(x2d, a_flat, combined_idx, input_scale, shrink_out)
+            elif (
                 share_cube_routing
                 and a_flat.shape[0] > 1
                 and (cube_routing is None or a_flat.shape[0] == cube_routing.groups)
@@ -593,6 +660,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 )
             b_flat = b.view(-1, out_size, full_rank)
 
+            if fuse_swiglu:
+                projections.append(shrink_out)
+                expand_weights.append(b_flat)
+                continue
+
             delta = shrink_out
             if mul_routed_weight and topk_weights is not None:
                 delta = shrink_out * topk_weights.view(-1, 1)
@@ -606,6 +678,21 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             else:
                 self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
             cur_offset += out_size
+
+        if fuse_swiglu:
+            if topk_weights is not None:
+                topk_weights = topk_weights.reshape(-1).float().contiguous()
+            quantized, scale = torch.ops._C_ascend.moe_lora_expand_swiglu_quant(
+                y2d,
+                projections[0],
+                projections[1],
+                expand_weights[0],
+                expand_weights[1],
+                combined_idx,
+                topk_weights,
+                swiglu_quant_limit,
+            )
+            return quantized, scale, combined_idx
 
     def add_lora_logits(
         self,

@@ -2000,7 +2000,19 @@ class TestNPUPlatform(TestBase):
         )
 
     def test_is_pin_memory_available_returns_true(self):
-        self.assertTrue(self.platform.is_pin_memory_available())
+        with patch.dict("os.environ", {"VLLM_ASCEND_DISABLE_PIN_MEMORY": "0"}):
+            self.assertTrue(self.platform.is_pin_memory_available())
+
+    def test_is_pin_memory_available_can_be_disabled(self):
+        with patch.dict("os.environ", {"VLLM_ASCEND_DISABLE_PIN_MEMORY": "1"}):
+            self.assertFalse(self.platform.is_pin_memory_available())
+
+    def test_is_pin_memory_available_rejects_invalid_override(self):
+        with (
+            patch.dict("os.environ", {"VLLM_ASCEND_DISABLE_PIN_MEMORY": "true"}),
+            self.assertRaisesRegex(ValueError, "must be either '0' or '1'"),
+        ):
+            self.platform.is_pin_memory_available()
 
     def test_get_static_graph_wrapper_cls_returns_correct_value(self):
         self.assertEqual(
