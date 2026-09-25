@@ -4,10 +4,44 @@ import torch
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
+    compute_slot_mapping_fused_groups,
 )
 
 PAD_ID = -1
 TRITON_BLOCK_SIZE = 1024
+
+
+@pytest.mark.parametrize("num_reqs", [1, 2])
+@pytest.mark.filterwarnings("error:tl.where with a non-boolean condition")
+def test_fused_slot_mapping_int32_circular_flags(num_reqs):
+    """Integer metadata must be converted to predicates in both launch paths."""
+    device = "npu"
+    positions = torch.tensor(list(range(31, 48)) * num_reqs, dtype=torch.int64, device=device)
+    starts = torch.arange(num_reqs + 1, dtype=torch.int32, device=device) * 17
+    capacity = positions.numel() + 11
+    tables = [torch.tensor([[5, 7]] * num_reqs, dtype=torch.int32, device=device) for _ in range(2)]
+    outputs = [torch.full((capacity,), -77, dtype=torch.int32, device=device) for _ in range(2)]
+    compute_slot_mapping_fused_groups(
+        2,
+        num_reqs,
+        positions.numel(),
+        capacity,
+        starts,
+        positions,
+        torch.tensor([t.data_ptr() for t in tables], dtype=torch.uint64, device=device),
+        torch.tensor([t.data_ptr() for t in outputs], dtype=torch.uint64, device=device),
+        torch.tensor([2, 2], dtype=torch.int64, device=device),
+        torch.tensor([32, 32], dtype=torch.int32, device=device),
+        32,
+        pad_id=-1,
+        is_circular_ptr=torch.tensor([0, 1], dtype=torch.int32, device=device),
+    )
+    for circular, output in enumerate(outputs):
+        expected = torch.full((capacity,), -1, dtype=torch.int32)
+        for i, pos in enumerate(positions.cpu().tolist()):
+            block = 5 if circular or pos < 32 else 7
+            expected[i] = block * 32 + pos % 32
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 def _compute_slot_mapping_ref(

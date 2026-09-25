@@ -196,7 +196,7 @@ def _compute_slot_mapping_fused_groups_kernel(
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
     block_size = tl.load(block_sizes_ptr + group_idx)
-    is_circular = tl.load(is_circular_ptr + group_idx) if HAS_CIRCULAR else False
+    is_circular = (tl.load(is_circular_ptr + group_idx) != 0) if HAS_CIRCULAR else False
     row_offset = req_idx * block_table_stride
     block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(
@@ -269,7 +269,7 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
     end_idx = tl.load(query_start_loc_ptr + req_idx + 1).to(tl.int64)
     block_table_stride = tl.load(block_table_strides_ptr + group_idx)
     block_size = tl.load(block_sizes_ptr + group_idx)
-    is_circular = tl.load(is_circular_ptr + group_idx) if HAS_CIRCULAR else False
+    is_circular = (tl.load(is_circular_ptr + group_idx) != 0) if HAS_CIRCULAR else False
     request_tokens = end_idx - start_idx
     if request_tokens <= SMALL_TILE_BLOCK_SIZE:
         _compute_slot_mapping_request(
