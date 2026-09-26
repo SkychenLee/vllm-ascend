@@ -104,10 +104,12 @@ def _prepare_dflash_inputs_kernel_ascend(
             local = valid & ((virtual_offset // CP_INTERLEAVE) % CP_SIZE == cp_rank)
             slot = block_id * block_size + local_offset
         slot = tl.where(local & (block_id != 0), slot, PAD_SLOT_ID)
+        # Runtime stores last_sampled as int64 and next_prefill_tokens as
+        # int32; Triton requires both branch values to have the same type.
         if tl.load(num_sampled_ptr + req_idx) > 0:
-            bonus = tl.load(last_sampled_ptr + req_state_idx)
+            bonus = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
         else:
-            bonus = tl.load(next_prefill_tokens_ptr + req_state_idx)
+            bonus = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
         token = tl.where(offsets == 0, bonus, parallel_drafting_token_id)
         tl.store(out_input_ids_ptr + query_base + offsets, token, mask=valid)
         tl.store(out_query_positions_ptr + query_base + offsets, tl.minimum(pos, max_model_len - 1), mask=valid)

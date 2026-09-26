@@ -206,11 +206,23 @@ def test_prepare_dflash_parallel_cp(cp_size, cp_rank, interleave):
         torch.testing.assert_close(kwargs[name].cpu(), value, rtol=0, atol=0, msg=name)
 
 
+def test_prepare_dflash_mixed_bonus_token_dtypes():
+    # Runtime State stores sampled tokens as int64 and prefill tokens as int32.
+    # Both branches must produce the int32 draft input IDs without a Triton
+    # branch-type mismatch.
+    kwargs, expected = make_prepare_case((7, 1), True, capacity=2)
+    kwargs["last_sampled_ptr"] = kwargs["last_sampled_ptr"].to(torch.int64)
+    _prepare_dflash_inputs_kernel_ascend[(2, 1)](**kwargs)
+    for name, value in expected.items():
+        torch.testing.assert_close(kwargs[name].cpu(), value, rtol=0, atol=0, msg=name)
+
+
 def test_prepare_dflash_upstream_wrapper():
     """Exercise the actual pre-DCP caller ABI used by this checkout."""
     from vllm.v1.worker.gpu.spec_decode.dflash import speculator
 
     kwargs, expected = make_prepare_case((8192, 8184), True)
+    kwargs["last_sampled_ptr"] = kwargs["last_sampled_ptr"].to(torch.int64)
     outputs = {
         name.removeprefix("out_").removesuffix("_ptr"): value
         for name, value in kwargs.items()
