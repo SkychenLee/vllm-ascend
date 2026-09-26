@@ -336,6 +336,7 @@ class AscendConfig:
             "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
+            "moe_lora_ep_backend": "alltoall",
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
@@ -488,6 +489,7 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    moe_lora_ep_backend: Literal["alltoall", "allgather"] = "alltoall"
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -556,8 +558,37 @@ class AscendConfig:
     # pydantic after-validator). Preserves the original __init__ ordering —
     # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
+    def _validate_moe_lora_ep_backend(self, vc: VllmConfig) -> None:
+        if self.moe_lora_ep_backend == "allgather":
+            parallel = vc.parallel_config
+            lora = vc.lora_config
+            if lora is None or not parallel.enable_expert_parallel:
+                raise ValueError("moe_lora_ep_backend='allgather' requires LoRA and expert parallelism.")
+            if lora.fully_sharded_loras:
+                raise ValueError("moe_lora_ep_backend='allgather' requires ordinary (unsharded) MoE LoRA.")
+            if (
+                parallel.data_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+                or parallel.use_sequence_parallel_moe
+            ):
+                raise ValueError(
+                    "moe_lora_ep_backend='allgather' requires DP1, PCP1, DCP1, PP1 and no MoE sequence parallelism."
+                )
+            if (
+                parallel.enable_eplb
+                or self.enable_force_eplb
+                or self.eplb_config.dynamic_eplb
+                or parallel.expert_placement_strategy != "linear"
+            ):
+                raise ValueError("moe_lora_ep_backend='allgather' requires static linear expert placement.")
+            if self.enable_fused_mc2:
+                raise ValueError("moe_lora_ep_backend='allgather' requires enable_fused_mc2=0.")
+
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        self._validate_moe_lora_ep_backend(vc)
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

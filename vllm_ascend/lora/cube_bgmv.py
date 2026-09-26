@@ -7,7 +7,6 @@ import torch_npu
 
 from vllm_ascend import envs
 
-
 CUBE_BGMV_MIN_ROWS = 2049
 # The grouped Cube candidate changes BF16 model output in the current 8-card
 # precision gate. Keep it opt-in until that model-level gate is accepted.

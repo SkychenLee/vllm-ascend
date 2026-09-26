@@ -37,6 +37,7 @@ from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
@@ -46,6 +47,7 @@ _MOE_LORA_INDEX_FIELDS = (
     "permuted_lora_indices",
     "exchanged_lora_indices",
 )
+_MOE_LORA_EP_RECOVER_FUSED = ascend_envs.VLLM_ASCEND_MOE_LORA_EP_RECOVER_FUSED
 
 
 def has_lora(lora_context) -> bool:
@@ -187,7 +189,9 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
         )
 
 
-def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids):
+def _recover_moe_lora_routing_allgather(
+    lora_context, expanded_row_idx, topk_ids, *, expert_start: int = 0, num_local_experts: int = 0
+):
     """Recover per-permuted-row (expert_id, lora_slot) for the dispatched rows.
 
     npu_moe_init_routing semantics (verified empirically): ``expanded_row_idx``
@@ -200,6 +204,38 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     """
     top_k = lora_context.top_k
     token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    if getattr(lora_context, "use_ep", False):
+        if num_local_experts <= 0:
+            raise ValueError("AllGather EP MoE LoRA requires a positive local expert count.")
+        if expanded_row_idx.numel() == 0:
+            empty = torch.empty(0, dtype=torch.long, device=expanded_row_idx.device)
+            return empty, torch.empty_like(empty)
+        if token_lora_indices.numel() == 0:
+            raise ValueError("AllGather EP MoE LoRA requires token LoRA indices.")
+        if (
+            _MOE_LORA_EP_RECOVER_FUSED
+            and expanded_row_idx.device.type == "npu"
+            and hasattr(torch.ops._C_ascend, "moe_lora_recover_ep")
+        ):
+            return torch.ops._C_ascend.moe_lora_recover_ep(
+                expanded_row_idx.contiguous(),
+                topk_ids.contiguous(),
+                token_lora_indices.contiguous(),
+                top_k,
+                expert_start,
+                num_local_experts,
+            )
+        rows = expanded_row_idx.numel()
+        source = torch.arange(rows, device=expanded_row_idx.device, dtype=torch.long)
+        valid = expanded_row_idx >= 0
+        keys = torch.where(valid, expanded_row_idx.long(), rows + source)
+        # Float32 keys are exact while 2 * rows <= 2**24 and use the NPU
+        # vector argsort instead of the much slower int64 AiCPU fallback.
+        inverse = torch.argsort(keys.float() if rows <= (1 << 23) else keys)
+        local_experts = topk_ids.reshape(-1)[inverse].long() - expert_start
+        slots = token_lora_indices[(inverse // top_k).clamp(max=token_lora_indices.numel() - 1)]
+        active = valid[inverse] & (local_experts >= 0) & (local_experts < num_local_experts)
+        return torch.where(active, local_experts, -1), torch.where(active, slots, -1)
     max_exact_sort_rows = 1 << 24
     # In the current AllGather producer, use_ep=False implies ep_size=1,
     # expert_map=None, the complete expert range and active_num=N*top_k.

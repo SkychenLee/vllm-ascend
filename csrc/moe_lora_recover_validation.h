@@ -34,8 +34,9 @@ inline void check_moe_lora_recover_metadata(const at::Tensor& expanded, const at
                 "moe_lora_recover: tensors must be contiguous");
     TORCH_CHECK(expanded.numel() == 0 || slots.numel() > 0,
                 "moe_lora_recover: nonempty routing requires nonempty slots");
-    // Values are not read here: the caller must establish that abs(expanded)
-    // is a complete permutation of [0,M), with no repeated invalid sentinels.
+    // Values are not read here. The ordinary caller provides a complete
+    // permutation of [0,M); the EP caller may also provide repeated -1 values
+    // for remote experts and padded rows, with unique valid destinations.
 }
 
 }  // namespace vllm_ascend

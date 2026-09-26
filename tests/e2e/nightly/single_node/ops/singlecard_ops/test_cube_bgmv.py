@@ -6,7 +6,6 @@ from vllm_ascend.lora.cube_bgmv import cube_bgmv_expand, cube_bgmv_shrink, prepa
 from vllm_ascend.lora.lora_ops import bgmv_expand_slice, bgmv_shrink
 from vllm_ascend.utils import enable_custom_op
 
-
 enable_custom_op()
 
 

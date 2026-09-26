@@ -7,7 +7,7 @@ import torch
 from vllm_ascend.lora.fused_moe import _recover_moe_lora_routing_allgather
 
 
-@pytest.mark.parametrize("use_ep", [False, True, None, 0])
+@pytest.mark.parametrize("use_ep", [False, None, 0])
 @pytest.mark.parametrize("tokens,top_k,slot_count", [(0, 3, 0), (7, 3, 2), (513, 1, 7)])
 def test_cpu_routing_recovery_never_dispatches_native(use_ep, tokens, top_k, slot_count):
     rows = tokens * top_k
@@ -36,3 +36,13 @@ def test_cpu_routing_recovery_never_dispatches_native(use_ep, tokens, top_k, slo
         assert torch.equal(actual, torch.tensor(expected, dtype=torch.int64))
     for value, snapshot in zip((expanded, experts, slots), snapshots):
         assert torch.equal(value, snapshot)
+
+
+def test_ep_routing_recovery_filters_remote_experts_and_uses_local_ids():
+    expanded = torch.tensor([0, -1, 2, -1, 1, -1], dtype=torch.int32)
+    experts = torch.tensor([[5, 2], [3, 1], [4, 0]], dtype=torch.int64)
+    slots = torch.tensor([7, -1, 19], dtype=torch.int64)
+    context = SimpleNamespace(top_k=2, use_ep=True, punica_wrapper=SimpleNamespace(token_lora_indices=slots))
+    result = _recover_moe_lora_routing_allgather(context, expanded, experts, expert_start=3, num_local_experts=3)
+    assert torch.equal(result[0], torch.tensor([2, 1, 0, -1, -1, -1]))
+    assert torch.equal(result[1], torch.tensor([7, 19, -1, -1, -1, -1]))

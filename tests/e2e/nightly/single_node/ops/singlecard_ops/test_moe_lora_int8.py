@@ -232,7 +232,8 @@ def test_int8_lora_metadata_validation():
 
 
 @pytest.mark.parametrize("adapter_enabled", [[1, 1], [1, 0], [0, 0]])
-def test_quantized_mlp_matches_separate_int8_lora_stages(adapter_enabled):
+@pytest.mark.parametrize("expert_start", [0, 4])
+def test_quantized_mlp_matches_separate_int8_lora_stages(adapter_enabled, expert_start):
     # Exercise real routing recovery, both GMMs and the Punica interfaces.
     torch.manual_seed(451)
     rows, hidden, intermediate, rank, experts = 32, 128, 64, 16, 2
@@ -246,7 +247,7 @@ def test_quantized_mlp_matches_separate_int8_lora_stages(adapter_enabled):
         return torch.randn(*shape, device="npu", dtype=torch.bfloat16) * 0.05
 
     context = SimpleNamespace(
-        use_ep=False,
+        use_ep=expert_start != 0,
         top_k=1,
         tp_rank=0,
         tp_size=1,
@@ -276,13 +277,82 @@ def test_quantized_mlp_matches_separate_int8_lora_stages(adapter_enabled):
         fusion=True,
         swiglu_limit=10.0,
         expanded_row_idx=torch.arange(rows, device="npu", dtype=torch.int32),
-        topk_ids=(torch.arange(rows, device="npu", dtype=torch.int32) // (rows // experts))[:, None],
+        topk_ids=(torch.arange(rows, device="npu", dtype=torch.int32) // (rows // experts))[:, None] + expert_start,
+        expert_start=expert_start,
+        num_local_experts=experts,
         lora_context=context,
     )
     with patch("vllm_ascend.lora.quant_moe._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)):
         actual, _ = quant_apply_mlp_with_moe_lora(mlp_compute_input=payload)
         expected, _ = quant_apply_mlp_with_moe_lora(mlp_compute_input=replace(payload, fusion=False))
     assert actual.dtype == torch.bfloat16
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=2e-5, rtol=0.03)
+
+
+@pytest.mark.parametrize(
+    "rows,hidden,intermediate,experts,top_k,expert_start",
+    [
+        (48, 4096, 2048, 32, 6, 96),  # DeepSeek V4: 256 experts, EP8 rank 3.
+        (64, 2048, 768, 16, 8, 112),  # Qwen3 MoE: 128 experts, EP8 rank 7.
+    ],
+)
+def test_quantized_mlp_ep_target_shapes_match_framework_route(rows, hidden, intermediate, experts, top_k, expert_start):
+    torch.manual_seed(711)
+    rank = 16
+    tokens = rows // top_k
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper._token_lora_indices = (torch.arange(tokens, device="npu") % 3 - 1).long()
+    wrapper.indices_len = [tokens, 0, 0, 0]
+    wrapper.bgmv_shrink = bgmv_shrink
+    wrapper.bgmv_expand_slice = bgmv_expand_slice
+
+    def weight(*shape):
+        return torch.randn(*shape, device="npu", dtype=torch.bfloat16) * 0.01
+
+    counts = [rows // experts + (expert < rows % experts) for expert in range(experts)]
+    local_ids = torch.repeat_interleave(
+        torch.arange(experts, device="npu", dtype=torch.int32), torch.tensor(counts, device="npu")
+    )
+    context = SimpleNamespace(
+        use_ep=True,
+        top_k=top_k,
+        tp_rank=0,
+        tp_size=1,
+        fully_sharded=False,
+        punica_wrapper=wrapper,
+        adapter_enabled=torch.tensor([1, 0], device="npu", dtype=torch.int32),
+        w13_lora_a_stacked=[weight(2, experts, rank, hidden) for _ in range(2)],
+        w13_lora_b_stacked=[weight(2, experts, intermediate, rank) for _ in range(2)],
+        w2_lora_a_stacked=[weight(2, experts, rank, intermediate)],
+        w2_lora_b_stacked=[weight(2, experts, hidden, rank)],
+    )
+    x, scale = torch_npu.npu_dynamic_quant(weight(rows, hidden))
+    payload = MoEMlpComputeInput(
+        hidden_states=x,
+        dynamic_scale=scale,
+        output_dtype=torch.bfloat16,
+        group_list=torch.tensor(counts, device="npu", dtype=torch.int64),
+        group_list_type=1,
+        topk_scales=None,
+        weights=MoEWeights(
+            w1=[torch.randint(-20, 21, (experts, hidden, intermediate * 2), device="npu", dtype=torch.int8)],
+            w2=[torch.randint(-20, 21, (experts, intermediate, hidden), device="npu", dtype=torch.int8)],
+            w1_scale=[torch.full((experts, intermediate * 2), 0.01, device="npu", dtype=torch.bfloat16)],
+            w2_scale=[torch.full((experts, hidden), 0.01, device="npu", dtype=torch.bfloat16)],
+        ),
+        quant=MoEQuantParams(quant_type=QuantType.W8A8),
+        fusion=True,
+        swiglu_limit=10.0,
+        expanded_row_idx=torch.arange(rows, device="npu", dtype=torch.int32),
+        topk_ids=local_ids.reshape(tokens, top_k) + expert_start,
+        expert_start=expert_start,
+        num_local_experts=experts,
+        lora_context=context,
+    )
+    with patch("vllm_ascend.lora.quant_moe._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)):
+        actual, _ = quant_apply_mlp_with_moe_lora(mlp_compute_input=payload)
+        with patch("vllm_ascend.lora.fused_moe._MOE_LORA_EP_RECOVER_FUSED", False):
+            expected, _ = quant_apply_mlp_with_moe_lora(mlp_compute_input=payload)
     torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=2e-5, rtol=0.03)
 
 

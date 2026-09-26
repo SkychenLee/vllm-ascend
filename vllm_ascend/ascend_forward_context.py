@@ -391,11 +391,16 @@ def select_moe_comm_method(
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
-        # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
-        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
-        # is a single fused C++ op. This covers both normal model
-        # forward and _dummy_run during profile_run.
-        moe_comm_type = MoECommType.ALLTOALL
+        # Keep the established AlltoAll default; the AllGather EP LoRA path
+        # is selected explicitly after AscendConfig validates its layout.
+        backend = getattr(get_ascend_config(), "moe_lora_ep_backend", "alltoall")
+        moe_comm_type = MoECommType.ALLGATHER if backend == "allgather" else MoECommType.ALLTOALL
+        logger.info_once(
+            "MoE LoRA EP rank %d selected %s communication.",
+            get_ep_group().rank_in_group,
+            moe_comm_type.name,
+            scope="process",
+        )
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:

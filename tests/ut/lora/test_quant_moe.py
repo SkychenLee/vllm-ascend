@@ -113,6 +113,8 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
             mlp_input.lora_context,
             mlp_input.expanded_row_idx,
             mlp_input.topk_ids,
+            expert_start=mlp_input.expert_start,
+            num_local_experts=mlp_input.num_local_experts,
         )
         recover_all2all.assert_not_called()
     else:

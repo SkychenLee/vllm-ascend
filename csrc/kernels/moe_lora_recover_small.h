@@ -23,5 +23,13 @@ void moe_lora_recover_small_impl(void* stream, void* expanded, void* topk, void*
                                 uint64_t slotCount, uint32_t expandedElementBytes,
                                 uint32_t expertElementBytes, uint64_t ubBytes);
 
+// EP input uses -1 for nonlocal pairs. Valid destinations are unique and
+// form the prefix [0, active_rows); padded outputs receive -1.
+void moe_lora_recover_ep_small_impl(void* stream, void* expanded, void* topk, void* slots,
+                                   void* expertOut, void* slotOut, uint64_t rows, uint64_t topK,
+                                   uint64_t slotCount, uint32_t expandedElementBytes,
+                                   uint32_t expertElementBytes, uint64_t ubBytes,
+                                   int64_t expertStart, int64_t numLocalExperts);
+
 } // namespace vllm_ascend
 #endif

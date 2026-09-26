@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import torch_npu
 
 from vllm_ascend.lora.fused_moe import _recover_moe_lora_routing_allgather
 from vllm_ascend.utils import enable_custom_op
@@ -116,7 +117,7 @@ def test_moe_lora_recover_changed_graph_inputs(index_dtype, expert_dtype, tokens
         assert_outputs(outputs, inputs, current, top_k)
 
 
-@pytest.mark.parametrize("use_ep", [True, None, 0])
+@pytest.mark.parametrize("use_ep", [None, 0])
 @torch.inference_mode()
 def test_moe_lora_recover_filtered_context_retains_sort(use_ep):
     expanded = torch.tensor([0, -1, 2, -1, 1, -1], dtype=torch.int32, device="npu")
@@ -132,6 +133,135 @@ def test_moe_lora_recover_filtered_context_retains_sort(use_ep):
     expected = original_chain((expanded, experts, slots), 2)
     for actual, reference in zip(outputs, expected):
         assert torch.equal(actual, reference)
+
+
+@pytest.mark.parametrize(
+    "tokens,top_k,expert_start,num_local_experts",
+    [
+        (1, 6, 0, 32),
+        (8, 6, 96, 32),
+        (64, 8, 16, 16),
+        (512, 6, 0, 32),
+    ],
+)
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("expert_dtype", [torch.int32, torch.int64])
+@torch.inference_mode()
+def test_moe_lora_recover_ep_matches_fixed_shape_reference(
+    tokens, top_k, expert_start, num_local_experts, index_dtype, expert_dtype
+):
+    rows = tokens * top_k
+    experts = torch.arange(rows, dtype=torch.int32).remainder(num_local_experts * 2)
+    experts = (experts + expert_start - num_local_experts // 2).reshape(tokens, top_k)
+    expanded = torch.full((rows,), -1, dtype=torch.int32)
+    destinations = 0
+    for source, expert in enumerate(experts.flatten().tolist()):
+        if expert_start <= expert < expert_start + num_local_experts:
+            expanded[source] = destinations
+            destinations += 1
+    slots = (torch.arange(tokens, dtype=torch.int64) % 3) - 1
+    expected_experts = torch.full((rows,), -1, dtype=torch.int64)
+    expected_slots = torch.full((rows,), -1, dtype=torch.int64)
+    for source, destination in enumerate(expanded.tolist()):
+        if destination >= 0:
+            expected_experts[destination] = int(experts.flatten()[source]) - expert_start
+            expected_slots[destination] = slots[source // top_k]
+    npu_inputs = (expanded.to(index_dtype).npu(), experts.to(expert_dtype).npu(), slots.npu())
+    actual = torch.ops._C_ascend.moe_lora_recover_ep(*npu_inputs, top_k, expert_start, num_local_experts)
+    assert torch.equal(actual[0].cpu(), expected_experts)
+    assert torch.equal(actual[1].cpu(), expected_slots)
+
+
+@pytest.mark.parametrize("expert_start,num_local_experts", [(0, 32), (96, 32), (16, 16)])
+@torch.inference_mode()
+def test_moe_lora_recover_ep_graph_replay_updates_mapping(expert_start, num_local_experts):
+    tokens, top_k = 8, 6
+    rows = tokens * top_k
+    expanded = torch.empty(rows, dtype=torch.int32, device="npu")
+    experts = torch.empty((tokens, top_k), dtype=torch.int32, device="npu")
+    slots = torch.empty(tokens, dtype=torch.int64, device="npu")
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        local_experts, local_slots = torch.ops._C_ascend.moe_lora_recover_ep(
+            expanded, experts, slots, top_k, expert_start, num_local_experts
+        )
+    for seed in (0, 1, 2):
+        cpu_experts = (
+            torch.arange(rows, dtype=torch.int32).roll(seed * 3).remainder(num_local_experts * 2)
+            + expert_start
+            - num_local_experts // 2
+        ).view(tokens, top_k)
+        cpu_expanded = torch.full((rows,), -1, dtype=torch.int32)
+        valid_sources = [
+            i
+            for i, expert in enumerate(cpu_experts.flatten().tolist())
+            if expert_start <= expert < expert_start + num_local_experts
+        ]
+        for destination, source in enumerate(reversed(valid_sources)):
+            cpu_expanded[source] = destination
+        cpu_slots = torch.arange(tokens, dtype=torch.int64).roll(seed).remainder(3) - 1
+        expanded.copy_(cpu_expanded)
+        experts.copy_(cpu_experts)
+        slots.copy_(cpu_slots)
+        graph.replay()
+        expected_experts = torch.full((rows,), -1, dtype=torch.int64)
+        expected_slots = torch.full((rows,), -1, dtype=torch.int64)
+        for source, destination in enumerate(cpu_expanded.tolist()):
+            if destination >= 0:
+                expected_experts[destination] = int(cpu_experts.flatten()[source]) - expert_start
+                expected_slots[destination] = cpu_slots[source // top_k]
+        assert torch.equal(local_experts.cpu(), expected_experts)
+        assert torch.equal(local_slots.cpu(), expected_slots)
+
+
+@pytest.mark.parametrize("num_experts,top_k", [(256, 6), (128, 8)])
+@pytest.mark.parametrize("ep_size,ep_rank", [(2, 0), (2, 1), (8, 0), (8, 3), (8, 7)])
+@torch.inference_mode()
+def test_moe_lora_recover_ep_with_npu_routing(ep_size, ep_rank, num_experts, top_k):
+    tokens = 8
+    num_local = num_experts // ep_size
+    first = ep_rank * num_local
+    experts = torch.tensor(
+        [[(token * 17 + choice * 37) % num_experts for choice in range(top_k)] for token in range(tokens)],
+        dtype=torch.int32,
+    )
+    # Ensure both local and remote rows even at the final EP rank.
+    experts[:, 0] = first + torch.arange(tokens, dtype=torch.int32) % num_local
+    x = torch.randn(tokens, 32, dtype=torch.bfloat16, device="npu")
+    _, expanded, counts, _ = torch_npu.npu_moe_init_routing_v2(
+        x,
+        experts.npu(),
+        active_num=tokens * top_k,
+        expert_num=num_experts,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=[first, first + num_local],
+        quant_mode=-1,
+    )
+    slots = torch.tensor([0, 1, -1, 0, 1, -1, 0, 1], dtype=torch.int64)
+    context = SimpleNamespace(
+        use_ep=True,
+        top_k=top_k,
+        punica_wrapper=SimpleNamespace(token_lora_indices=slots.npu()),
+    )
+    local_experts, local_slots = _recover_moe_lora_routing_allgather(
+        context, expanded, experts.npu(), expert_start=first, num_local_experts=num_local
+    )
+    with patch("vllm_ascend.lora.fused_moe._MOE_LORA_EP_RECOVER_FUSED", False):
+        fallback_experts, fallback_slots = _recover_moe_lora_routing_allgather(
+            context, expanded, experts.npu(), expert_start=first, num_local_experts=num_local
+        )
+    expected_experts = torch.full((tokens * top_k,), -1, dtype=torch.int64)
+    expected_slots = torch.full_like(expected_experts, -1)
+    for source, destination in enumerate(expanded.cpu().tolist()):
+        if destination >= 0:
+            expected_experts[destination] = int(experts.flatten()[source]) - first
+            expected_slots[destination] = slots[source // top_k]
+    assert int(counts.sum().item()) == int((expanded >= 0).sum().item())
+    assert torch.equal(local_experts.cpu(), expected_experts)
+    assert torch.equal(local_slots.cpu(), expected_slots)
+    assert torch.equal(fallback_experts.cpu(), expected_experts)
+    assert torch.equal(fallback_slots.cpu(), expected_slots)
 
 
 @pytest.mark.parametrize("invalid", ["top-k", "dtype", "slots-empty", "noncontiguous", "rows"])

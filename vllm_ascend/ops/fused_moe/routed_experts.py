@@ -251,6 +251,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     lora_context,
                     mlp_compute_input.expanded_row_idx,
                     mlp_compute_input.topk_ids,
+                    expert_start=mlp_compute_input.expert_start,
+                    num_local_experts=mlp_compute_input.num_local_experts,
                 )
             elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
                 # AlltoAll path: tokens already sorted by expert after exchange.

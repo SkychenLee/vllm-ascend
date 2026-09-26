@@ -36,6 +36,44 @@ LoRA is supported for both dense and mixture-of-experts (MoE) models. The curren
 
 Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.
 
+### W8A8 expert parallel AllGather
+
+LoRA with expert parallelism uses AlltoAll by default. Set
+`additional_config.moe_lora_ep_backend` to `allgather` to select the W8A8
+AllGather path with expert-local LoRA weights. This option currently requires
+ordinary LoRA (no `--fully-sharded-loras`), DP=1, PCP=1, DCP=1, PP=1,
+static linear expert placement, and `enable_fused_mc2=0`.
+
+For example, on the eight Ascend devices used for the DeepSeek V4 W8A8
+validation:
+
+```shell
+ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15 \
+VLLM_ASCEND_DISABLE_PIN_MEMORY=1 \
+vllm serve /mnt/weight/DeepSeek-V4-Flash-0731-w8a8 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 8192 \
+    --tokenizer-mode deepseek_v4 \
+    --enable-lora \
+    --lora-target-modules experts gate_up_proj down_proj \
+    --lora-modules lora1=/mnt/share/litianchen/ds_lora_16 \
+    --max-lora-rank 16 \
+    --max-loras 3 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"moe_lora_ep_backend":"allgather","enable_fused_mc2":0}'
+```
+
+AllGather EP recovers adapter IDs only for the locally owned experts. Remote
+expert rows and padded routing rows carry no LoRA delta. The route recovery
+operator accepts arbitrary token counts, top-k values, expert ranges, and
+adapter slots; large shapes use a fixed-shape framework fallback.
+For an A/B performance run with the same service configuration, set
+`VLLM_ASCEND_MOE_LORA_EP_RECOVER_FUSED=0` before launching the service to use the
+framework recovery path at every shape.
+
 ### W8A8 AllGather activations
 
 The W8A8 AllGather path shares INT8 activations and FP32 per-token scales between

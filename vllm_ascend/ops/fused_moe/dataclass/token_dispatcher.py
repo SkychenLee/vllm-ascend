@@ -50,6 +50,8 @@ class MoEAllGatherCombineMetadata:
     topk_weights: torch.Tensor
     expanded_row_idx: torch.Tensor
     restore_shape: torch.Size
+    expert_start: int = 0
+    num_local_experts: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,7 +90,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
-    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size, rank_in_group=0))
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -273,6 +273,16 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
     vllm_config = _make_vllm_config(enable_expert_parallel=enable_expert_parallel)
 
     assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
+
+
+def test_select_moe_comm_method_lora_ep_backend(monkeypatch):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A3, ep_world_size=8)
+    vllm_config = _make_vllm_config(enable_expert_parallel=True)
+    vllm_config.lora_config = object()
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(moe_lora_ep_backend="allgather"))
+    assert afc.select_moe_comm_method(48, vllm_config) == MoECommType.ALLGATHER
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(moe_lora_ep_backend="alltoall"))
+    assert afc.select_moe_comm_method(48, vllm_config) == MoECommType.ALLTOALL
 
 
 @pytest.mark.parametrize(

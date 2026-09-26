@@ -402,7 +402,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = expert_map[topk_ids] != -1
             topk_weights = topk_weights * mask
-            first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
+            ep_rank = get_ep_group().rank_in_group
+            experts_per_rank, remainder = divmod(self.num_experts, self.ep_size)
+            first_expert_idx = ep_rank * experts_per_rank + min(ep_rank, remainder)
             last_expert_idx = first_expert_idx + self.num_experts_local
         else:
             first_expert_idx = 0
@@ -432,6 +434,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
+                expert_start=first_expert_idx,
+                num_local_experts=self.num_experts_local,
             ),
         )
 

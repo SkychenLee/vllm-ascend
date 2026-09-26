@@ -108,6 +108,63 @@ class TestRlConfig(TestBase):
 
 
 class TestAscendConfig(TestBase):
+    def test_moe_lora_ep_allgather_validates_parallel_layout(self):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            moe_lora_ep_backend="allgather",
+        )
+        parallel = SimpleNamespace(
+            enable_expert_parallel=True,
+            data_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            use_sequence_parallel_moe=False,
+            enable_eplb=False,
+            expert_placement_strategy="linear",
+        )
+        lora = SimpleNamespace(fully_sharded_loras=False)
+        vc = SimpleNamespace(parallel_config=parallel, lora_config=lora)
+        config._validate_moe_lora_ep_backend(vc)
+        for field, value, error in (
+            ("data_parallel_size", 2, "DP1"),
+            ("prefill_context_parallel_size", 2, "PCP1"),
+            ("decode_context_parallel_size", 2, "DCP1"),
+            ("pipeline_parallel_size", 2, "PP1"),
+            ("use_sequence_parallel_moe", True, "no MoE sequence parallelism"),
+            ("enable_eplb", True, "static linear"),
+            ("expert_placement_strategy", "round_robin", "static linear"),
+        ):
+            with self.subTest(field=field):
+                original = getattr(parallel, field)
+                setattr(parallel, field, value)
+                with self.assertRaisesRegex(ValueError, error):
+                    config._validate_moe_lora_ep_backend(vc)
+                setattr(parallel, field, original)
+        lora.fully_sharded_loras = True
+        with self.assertRaisesRegex(ValueError, "unsharded"):
+            config._validate_moe_lora_ep_backend(vc)
+        lora.fully_sharded_loras = False
+        config.enable_force_eplb = True
+        with self.assertRaisesRegex(ValueError, "static linear"):
+            config._validate_moe_lora_ep_backend(vc)
+        config.enable_force_eplb = False
+        config.eplb_config.dynamic_eplb = True
+        with self.assertRaisesRegex(ValueError, "static linear"):
+            config._validate_moe_lora_ep_backend(vc)
+        config.eplb_config.dynamic_eplb = False
+        config.enable_fused_mc2 = 1
+        with self.assertRaisesRegex(ValueError, "enable_fused_mc2=0"):
+            config._validate_moe_lora_ep_backend(vc)
+        config.enable_fused_mc2 = 0
+        vc.lora_config = None
+        with self.assertRaisesRegex(ValueError, "requires LoRA"):
+            config._validate_moe_lora_ep_backend(vc)
+        vc.lora_config = lora
+        parallel.enable_expert_parallel = False
+        with self.assertRaisesRegex(ValueError, "expert parallelism"):
+            config._validate_moe_lora_ep_backend(vc)
+
     @staticmethod
     def _clean_up_ascend_config(func):
         def wrapper(*args, **kwargs):

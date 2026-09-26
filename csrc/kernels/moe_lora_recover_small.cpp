@@ -17,18 +17,21 @@ constexpr uint64_t AlignBlock(uint64_t bytes)
 }
 } // namespace
 
-template <typename IndexType, typename ExpertT>
+template <typename IndexType, typename ExpertT, bool Filtered = false>
 class MoeLoraRecoverSmall {
 public:
     __aicore__ inline explicit MoeLoraRecoverSmall(AscendC::TPipe* pipe) : pipe_(pipe) {}
 
     __aicore__ inline void Init(GM_ADDR expanded, GM_ADDR topk, GM_ADDR slots,
                                 GM_ADDR expertOut, GM_ADDR slotOut, uint32_t rows,
-                                uint64_t topK, uint64_t slotCount)
+                                uint64_t topK, uint64_t slotCount,
+                                int64_t expertStart = 0, int64_t numLocalExperts = 0)
     {
         rows_ = rows;
         topK_ = topK;
         slotCount_ = slotCount;
+        expertStart_ = expertStart;
+        numLocalExperts_ = numLocalExperts;
         const uint64_t tokens = 1 + (static_cast<uint64_t>(rows) - 1) / topK;
         readSlots_ = static_cast<uint32_t>(slotCount < tokens ? slotCount : tokens);
         expandedGm_.SetGlobalBuffer(reinterpret_cast<__gm__ IndexType*>(expanded), rows);
@@ -58,8 +61,9 @@ public:
         // out of bounds. Zeroing also avoids exposing uninitialized output when
         // such invalid data leaves a hole. It does not define duplicate-index
         // argsort semantics or turn malformed input into supported input.
-        AscendC::Duplicate(expertOut.template ReinterpretCast<int32_t>(), int32_t{0}, rows_ * 2);
-        AscendC::Duplicate(slotOut.template ReinterpretCast<int32_t>(), int32_t{0}, rows_ * 2);
+        const int32_t invalid = Filtered ? -1 : 0;
+        AscendC::Duplicate(expertOut.template ReinterpretCast<int32_t>(), invalid, rows_ * 2);
+        AscendC::Duplicate(slotOut.template ReinterpretCast<int32_t>(), invalid, rows_ * 2);
         Sync<AscendC::HardEvent::MTE2_S>();
         Sync<AscendC::HardEvent::V_S>();
 
@@ -75,6 +79,9 @@ public:
             for (uint32_t lane = 0; lane < group; ++lane) {
                 const uint32_t source = p + lane;
                 const int64_t signedDestination = static_cast<int64_t>(expanded.GetValue(source));
+                if (Filtered && signedDestination < 0) {
+                    continue;
+                }
                 // Unsigned subtraction is defined even for INT64_MIN; skip an
                 // out-of-contract magnitude before any destination access.
                 const uint64_t destination = signedDestination < 0
@@ -83,7 +90,14 @@ public:
                 if (destination >= rows_) {
                     continue;
                 }
-                expertOut.SetValue(static_cast<uint32_t>(destination), static_cast<int64_t>(topk.GetValue(source)));
+                int64_t expert = static_cast<int64_t>(topk.GetValue(source));
+                if (Filtered) {
+                    if (expert < expertStart_ || expert - expertStart_ >= numLocalExperts_) {
+                        continue;
+                    }
+                    expert -= expertStart_;
+                }
+                expertOut.SetValue(static_cast<uint32_t>(destination), expert);
                 slotOut.SetValue(static_cast<uint32_t>(destination), slotValue);
             }
             p += group;
@@ -126,6 +140,8 @@ private:
     uint32_t readSlots_;
     uint64_t topK_;
     uint64_t slotCount_;
+    int64_t expertStart_;
+    int64_t numLocalExperts_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> expandedBuf_, topkBuf_, slotsBuf_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> expertOutBuf_, slotOutBuf_;
     AscendC::GlobalTensor<IndexType> expandedGm_;
@@ -150,6 +166,25 @@ DEFINE_RECOVER_KERNEL(moe_lora_recover_small_i32_i64, int32_t, int64_t)
 DEFINE_RECOVER_KERNEL(moe_lora_recover_small_i64_i32, int64_t, int32_t)
 DEFINE_RECOVER_KERNEL(moe_lora_recover_small_i64_i64, int64_t, int64_t)
 #undef DEFINE_RECOVER_KERNEL
+
+#define DEFINE_RECOVER_EP_KERNEL(name, index_type, expert_type) \
+extern "C" __global__ __aicore__ void name(GM_ADDR expanded, GM_ADDR topk, GM_ADDR slots, \
+    GM_ADDR expertOut, GM_ADDR slotOut, uint32_t rows, uint64_t topK, uint64_t slotCount, \
+    int64_t expertStart, int64_t numLocalExperts) \
+{ \
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY); \
+    if (rows == 0 || topK == 0 || slotCount == 0) { return; } \
+    AscendC::TPipe pipe; \
+    MoeLoraRecoverSmall<index_type, expert_type, true> op(&pipe); \
+    op.Init(expanded, topk, slots, expertOut, slotOut, rows, topK, slotCount, expertStart, numLocalExperts); \
+    op.Process(); \
+}
+
+DEFINE_RECOVER_EP_KERNEL(moe_lora_recover_ep_small_i32_i32, int32_t, int32_t)
+DEFINE_RECOVER_EP_KERNEL(moe_lora_recover_ep_small_i32_i64, int32_t, int64_t)
+DEFINE_RECOVER_EP_KERNEL(moe_lora_recover_ep_small_i64_i32, int64_t, int32_t)
+DEFINE_RECOVER_EP_KERNEL(moe_lora_recover_ep_small_i64_i64, int64_t, int64_t)
+#undef DEFINE_RECOVER_EP_KERNEL
 
 namespace vllm_ascend {
 
@@ -198,6 +233,34 @@ void moe_lora_recover_small_impl(void* stream, void* expanded, void* topk, void*
     } else {
         moe_lora_recover_small_i64_i64<<<1, nullptr, stream>>>(expanded, topk, slots, expertOut, slotOut,
             kernelRows, topK, slotCount);
+    }
+}
+
+void moe_lora_recover_ep_small_impl(void* stream, void* expanded, void* topk, void* slots,
+                                   void* expertOut, void* slotOut, uint64_t rows, uint64_t topK,
+                                   uint64_t slotCount, uint32_t expandedElementBytes,
+                                   uint32_t expertElementBytes, uint64_t ubBytes,
+                                   int64_t expertStart, int64_t numLocalExperts)
+{
+    if (rows == 0 || numLocalExperts <= 0 || !moe_lora_recover_small_supported(rows, topK, slotCount,
+        expandedElementBytes, expertElementBytes, ubBytes)) {
+        return;
+    }
+    const uint32_t kernelRows = static_cast<uint32_t>(rows);
+    if (expandedElementBytes == sizeof(int32_t)) {
+        if (expertElementBytes == sizeof(int32_t)) {
+            moe_lora_recover_ep_small_i32_i32<<<1, nullptr, stream>>>(expanded, topk, slots,
+                expertOut, slotOut, kernelRows, topK, slotCount, expertStart, numLocalExperts);
+        } else {
+            moe_lora_recover_ep_small_i32_i64<<<1, nullptr, stream>>>(expanded, topk, slots,
+                expertOut, slotOut, kernelRows, topK, slotCount, expertStart, numLocalExperts);
+        }
+    } else if (expertElementBytes == sizeof(int32_t)) {
+        moe_lora_recover_ep_small_i64_i32<<<1, nullptr, stream>>>(expanded, topk, slots,
+            expertOut, slotOut, kernelRows, topK, slotCount, expertStart, numLocalExperts);
+    } else {
+        moe_lora_recover_ep_small_i64_i64<<<1, nullptr, stream>>>(expanded, topk, slots,
+            expertOut, slotOut, kernelRows, topK, slotCount, expertStart, numLocalExperts);
     }
 }
 

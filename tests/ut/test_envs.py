@@ -79,3 +79,23 @@ class TestEnvVariables(TestBase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = original_val
+
+    def test_moe_lora_ep_recover_fused_defaults_on_and_is_strict(self):
+        name = "VLLM_ASCEND_MOE_LORA_EP_RECOVER_FUSED"
+        original_val = os.environ.pop(name, None)
+        try:
+            self.assertTrue(getattr(envs_ascend, name))
+            for value, expected in (("0", False), ("1", True)):
+                with self.subTest(value=value):
+                    os.environ[name] = value
+                    self.assertIs(getattr(envs_ascend, name), expected)
+            for value in ("", "2", "true"):
+                with self.subTest(invalid=value):
+                    os.environ[name] = value
+                    with self.assertRaises(ValueError):
+                        getattr(envs_ascend, name)
+        finally:
+            if original_val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original_val

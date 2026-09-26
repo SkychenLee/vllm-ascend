@@ -88,6 +88,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Valid values: 0 or 1. Not sensitive. Set before starting the engine;
     # disabling pinning may reduce CPU-to-NPU transfer performance.
     "VLLM_ASCEND_DISABLE_PIN_MEMORY": lambda: _strict_binary_env("VLLM_ASCEND_DISABLE_PIN_MEMORY"),
+    # Use the Ascend C EP MoE LoRA route recovery for small shapes. Default: 1
+    # (enabled); valid values: 0 or 1. Not sensitive. Disable for a same-shape
+    # framework baseline when profiling Decode TPOT. Read at module import.
+    "VLLM_ASCEND_MOE_LORA_EP_RECOVER_FUSED": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_EP_RECOVER_FUSED", "1"),
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),

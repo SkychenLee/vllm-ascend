@@ -57,6 +57,8 @@ class MoEMlpComputeInput:
     swiglu_beta: float = 0.0
     expanded_row_idx: torch.Tensor | None = None
     topk_ids: torch.Tensor | None = None
+    expert_start: int = 0
+    num_local_experts: int = 0
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
     # Floating-point expert output type, independent of routed activation dtype.
@@ -114,6 +116,8 @@ def build_mlp_compute_input(
         swiglu_beta=swiglu_beta,
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
+        expert_start=getattr(token_dispatch_output.combine_metadata, "expert_start", 0),
+        num_local_experts=getattr(token_dispatch_output.combine_metadata, "num_local_experts", 0),
         lora_context=fused_experts_input.lora_context,
         output_dtype=None if moe_config is None else moe_config.in_dtype,
     )

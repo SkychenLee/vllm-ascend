@@ -272,6 +272,8 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             mlp_compute_input.expanded_row_idx,
             mlp_compute_input.topk_ids,
+            expert_start=mlp_compute_input.expert_start,
+            num_local_experts=mlp_compute_input.num_local_experts,
         )
     else:
         lora_routing = _recover_moe_lora_routing_all2all(

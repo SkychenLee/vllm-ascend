@@ -53,11 +53,11 @@ def benchmark(
     intermediate=256,
     local_rank=2,
     full_rank=16,
+    groups=8,
     dtype=torch.bfloat16,
     inactive=False,
     inactive_fraction=0.0,
 ):
-    groups = 8
     indices = (torch.arange(rows, device="npu") % groups).long()
     if inactive:
         indices.fill_(-1)
@@ -92,6 +92,7 @@ def benchmark(
         "intermediate": intermediate,
         "local_rank": local_rank,
         "full_rank": full_rank,
+        "groups": groups,
         "dtype": str(dtype),
         "inactive": inactive,
         "inactive_fraction": 1.0 if inactive else inactive_fraction,
@@ -132,14 +133,15 @@ def benchmark(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", nargs="+", type=int, default=[6, 48, 384, 4096])
+    parser.add_argument("--groups", type=int, default=8)
     parser.add_argument("--graph", action="store_true")
     parser.add_argument("--sweep", action="store_true", help="Sweep both dtypes, ranks, widths and inactive adapters.")
     parser.add_argument("--adapter-mix", action="store_true", help="Sweep 0/25/50/75/100 percent inactive rows.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile-dir", type=Path, help="Also collect separate fused/unfused NPU traces.")
     args = parser.parse_args()
-    if any(rows <= 0 for rows in args.rows):
-        parser.error("rows must be positive")
+    if any(rows <= 0 for rows in args.rows) or args.groups <= 0:
+        parser.error("rows and groups must be positive")
     if args.sweep and args.adapter_mix:
         parser.error("choose either --sweep or --adapter-mix")
     if args.output.exists():
@@ -147,11 +149,20 @@ def main():
     assert enable_custom_op()
     torch.manual_seed(20260921)
     results = []
-    cases = [(rows, {}) for rows in args.rows]
+    cases = [(rows, {"groups": args.groups}) for rows in args.rows]
     if args.sweep:
         # Include rank/width boundaries and a generic (non-vectorized) width.
         cases = [
-            (rows, {"intermediate": width, "full_rank": rank, "local_rank": max(1, rank // 8), "dtype": dtype})
+            (
+                rows,
+                {
+                    "intermediate": width,
+                    "full_rank": rank,
+                    "local_rank": max(1, rank // 8),
+                    "dtype": dtype,
+                    "groups": args.groups,
+                },
+            )
             for dtype in (torch.bfloat16, torch.float16)
             for rows in (6, 48, 384, 4096)
             for width, rank in (
@@ -166,10 +177,12 @@ def main():
                 (256, 128),
             )
         ]
-        cases += [(rows, {"inactive": True}) for rows in (6, 48, 4096)]
+        cases += [(rows, {"inactive": True, "groups": args.groups}) for rows in (6, 48, 4096)]
     elif args.adapter_mix:
         cases = [
-            (rows, {"inactive_fraction": fraction}) for rows in args.rows for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)
+            (rows, {"inactive_fraction": fraction, "groups": args.groups})
+            for rows in args.rows
+            for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)
         ]
     for rows, options in cases:
         results.append(benchmark(rows, args.graph, args.profile_dir, **options))
