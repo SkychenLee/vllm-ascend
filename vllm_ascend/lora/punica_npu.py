@@ -364,7 +364,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
-    ) -> None:
+        input_scale: torch.Tensor | None = None,
+        swiglu_quant_limit: float | None = None,
+        combined_indices: torch.Tensor | None = None,
+        paired_a_stacked: torch.Tensor | None = None,
+        grouped_routing=None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
         same bgmv_shrink/bgmv_expand AscendC kernels (csrc/kernels/bgmv_*.cpp)
@@ -387,6 +392,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         zero-initialized shrink buffer / unmodified ``y`` in place), so
         inactive rows get a zero delta for free -- no Python-level branching
         needed.
+
+        With ``swiglu_quant_limit``, return INT8 activations, FP32 scales and
+        the masked combined indices. The caller can pass those indices to
+        w2 within the same forward; they must not be reused across batches.
         """
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config
@@ -396,18 +405,95 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
-        expert_idx = expert_ids.view(-1).to(torch.long)
-        num_experts = lora_a_stacked[0].shape[1]
-
-        lora_idx_safe = token_lora_mapping.clamp(min=0)
-        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-        combined_idx = torch.where(
-            enabled,
-            lora_idx_safe * num_experts + expert_idx,
-            torch.full_like(token_lora_mapping, -1),
-        ).contiguous()
+        if input_scale is not None:
+            input_scale = input_scale.reshape(-1).contiguous()
+        elif x.dtype == torch.int8:
+            raise ValueError("INT8 LoRA requires input_scale.")
+        if combined_indices is None:
+            expert_idx = expert_ids.view(-1).to(torch.long)
+            num_experts = lora_a_stacked[0].shape[1]
+            lora_idx_safe = token_lora_mapping.clamp(min=0)
+            enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+            combined_idx = torch.where(
+                enabled,
+                lora_idx_safe * num_experts + expert_idx,
+                torch.full_like(token_lora_mapping, -1),
+            ).contiguous()
+        else:
+            # w13 and w2 share the same routed rows and adapter mask.
+            combined_idx = combined_indices
 
         cur_offset = offset
+        fuse_swiglu = swiglu_quant_limit is not None
+        if fuse_swiglu and (len(lora_a_stacked) != 2 or offset != 0):
+            raise ValueError("Fused MoE SwiGLU requires gate and up projections without an output offset.")
+        if fuse_swiglu and input_scale is not None and paired_a_stacked is not None:
+            local_rank = paired_a_stacked.shape[-2]
+            full_rank = lora_b_stacked[0].shape[-1]
+            if local_rank <= 0 or full_rank % local_rank or (not fully_sharded and local_rank != full_rank):
+                raise ValueError("Invalid paired MoE LoRA TP rank layout.")
+            shards = full_rank // local_rank
+            rows = x2d.shape[0]
+            paired = torch.empty((rows, 2 * local_rank), dtype=torch.float32, device=x2d.device)
+            if grouped_routing is not None:
+                torch.ops._C_ascend.bgmv_shrink_int8_pair_grouped(
+                    x2d,
+                    paired_a_stacked.view(2, -1, local_rank, x2d.shape[-1]),
+                    grouped_routing.sorted_indices,
+                    grouped_routing.order,
+                    input_scale,
+                    paired,
+                )
+                paired = paired.index_select(0, grouped_routing.inverse)
+            else:
+                torch.ops._C_ascend.bgmv_shrink_int8_pair(
+                    x2d,
+                    paired_a_stacked.view(2, -1, local_rank, x2d.shape[-1]),
+                    combined_idx,
+                    input_scale,
+                    paired,
+                )
+            if rows == 0:
+                paired = torch.empty((shards, 0, 2 * local_rank), dtype=torch.float32, device=x2d.device)
+            else:
+                if fully_sharded:
+                    if local_rank == full_rank:
+                        paired = tensor_model_parallel_all_reduce(paired)
+                    else:
+                        # Keep rank-major HCCL output; gathering the last dim
+                        # would materialize a transpose before B projection.
+                        paired = tensor_model_parallel_all_gather(paired, dim=0)
+                paired = paired.view(shards, rows, 2 * local_rank)
+            if topk_weights is not None:
+                topk_weights = topk_weights.reshape(-1).float().contiguous()
+            bg, bu = lora_b_stacked
+            if grouped_routing is not None:
+                quantized, scale = torch.ops._C_ascend.moe_lora_expand_swiglu_quant_pair_grouped(
+                    y2d,
+                    paired,
+                    bg.view(-1, bg.shape[-2], full_rank),
+                    bu.view(-1, bu.shape[-2], full_rank),
+                    grouped_routing.sorted_indices,
+                    grouped_routing.order,
+                    topk_weights,
+                    swiglu_quant_limit,
+                )
+                quantized = quantized.index_select(0, grouped_routing.inverse)
+                scale = scale.index_select(0, grouped_routing.inverse)
+            else:
+                quantized, scale = torch.ops._C_ascend.moe_lora_expand_swiglu_quant_pair(
+                    y2d,
+                    paired,
+                    bg.view(-1, bg.shape[-2], full_rank),
+                    bu.view(-1, bu.shape[-2], full_rank),
+                    combined_idx,
+                    topk_weights,
+                    swiglu_quant_limit,
+                )
+            return quantized, scale, combined_idx
+
+        projections = []
+        expand_weights = []
         for slice_idx in range(len(lora_a_stacked)):
             # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
             # Flattening the leading two dims turns "gather by (lora, expert)"
@@ -421,19 +507,23 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
             # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32
             # (its X_T), so the shrink buffer is fp32.
-            shrink_out = torch.zeros(
-                (x2d.shape[0], local_rank),
-                dtype=torch.float32,
-                device=x2d.device,
-            )
-
-            self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
-
+            # The INT8 kernel writes every row, including inactive adapters.
+            # The legacy float kernel skips inactive rows and still needs zeros.
+            allocate_shrink = torch.empty if input_scale is not None else torch.zeros
+            shrink_out = allocate_shrink((x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
+            if input_scale is not None:
+                # The short-K rank-vectorized kernel remains faster for w2 A;
+                # group reuse pays off for its B projection below. Do not add
+                # scale/order gathers and restoration to this small projection.
+                torch.ops._C_ascend.bgmv_shrink_int8(x2d, a_flat, combined_idx, input_scale, shrink_out)
+            else:
+                self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
             if fully_sharded:
                 if local_rank == full_rank:
                     shrink_out = tensor_model_parallel_all_reduce(shrink_out)
                 else:
                     shrink_out = tensor_model_parallel_all_gather(shrink_out)
+                shrink_out = shrink_out.contiguous()
 
             if shrink_out.shape[-1] != full_rank:
                 raise ValueError(
@@ -443,12 +533,61 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 )
             b_flat = b.view(-1, out_size, full_rank)
 
+            if fuse_swiglu:
+                projections.append(shrink_out)
+                expand_weights.append(b_flat)
+                continue
+
             delta = shrink_out
             if mul_routed_weight and topk_weights is not None:
                 delta = shrink_out * topk_weights.view(-1, 1)
 
-            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            if (
+                grouped_routing is not None
+                and full_rank in (8, 16, 32, 64)
+                and out_size % 16 == 0
+                and cur_offset % 16 == 0
+                and y2d.shape[1] % 16 == 0
+                and out_size * full_rank <= 8192
+            ):
+                torch.ops._C_ascend.bgmv_expand_grouped(
+                    delta,
+                    b_flat,
+                    grouped_routing.sorted_indices,
+                    grouped_routing.order,
+                    y2d,
+                    cur_offset,
+                )
+            elif input_scale is not None and full_rank not in (8, 16, 32, 64):
+                # The legacy Vector expand only reduces ranks 8/16/32/64.
+                # Keep a bounded fallback for other supported LoRA ranks.
+                rows_per_tile = max(1, (1 << 21) // max(1, out_size * full_rank))
+                for start in range(0, x2d.shape[0], rows_per_tile):
+                    end = min(start + rows_per_tile, x2d.shape[0])
+                    indices = combined_idx[start:end]
+                    weights = b_flat.index_select(0, indices.clamp_min(0)).float()
+                    update = (weights * delta[start:end, None, :].float()).sum(dim=-1)
+                    target = y2d[start:end, cur_offset : cur_offset + out_size]
+                    updated = (target.float() + update).to(target.dtype)
+                    target.copy_(torch.where(indices[:, None] >= 0, updated, target))
+            else:
+                self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
             cur_offset += out_size
+
+        if fuse_swiglu:
+            if topk_weights is not None:
+                topk_weights = topk_weights.reshape(-1).float().contiguous()
+            quantized, scale = torch.ops._C_ascend.moe_lora_expand_swiglu_quant(
+                y2d,
+                projections[0],
+                projections[1],
+                expand_weights[0],
+                expand_weights[1],
+                combined_idx,
+                topk_weights,
+                swiglu_quant_limit,
+            )
+            return quantized, scale, combined_idx
 
     def add_lora_logits(
         self,

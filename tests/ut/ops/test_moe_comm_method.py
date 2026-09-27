@@ -39,6 +39,7 @@ class TestMoECommMethod(TestBase):
         # Mock FusedMoEConfig
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.num_experts = 8
+        self.moe_config.in_dtype = torch.bfloat16
         self.moe_config.num_local_experts = 2
         self.moe_config.experts_per_token = 2
         self.moe_config.tp_group = MagicMock()
@@ -261,6 +262,7 @@ class TestMoECommMethod(TestBase):
         mock_unified_apply_mlp.assert_called_once()
         mlp_compute_input = mock_unified_apply_mlp.call_args.kwargs["mlp_compute_input"]
         self.assertFalse(mlp_compute_input.fusion)
+        self.assertEqual(mlp_compute_input.output_dtype, torch.bfloat16)
         self.assertFalse(mlp_compute_input.quant.is_mxfp)
 
         # Verify token_combine was called

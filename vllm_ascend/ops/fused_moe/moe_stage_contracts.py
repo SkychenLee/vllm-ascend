@@ -151,6 +151,8 @@ class MoEMlpComputeInput:
     swiglu_beta: float = 0.0
     expanded_row_idx: torch.Tensor | None = None
     topk_ids: torch.Tensor | None = None
+    # Floating output type must survive INT8 AllGather dispatch.
+    output_dtype: torch.dtype | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
 

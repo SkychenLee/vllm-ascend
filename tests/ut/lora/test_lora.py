@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.lora.fused_moe import (
@@ -14,6 +15,21 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w13,
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+
+
+def _make_base_layer(*, num_local_experts=256, is_act_and_mul=True, shared_experts=None, use_ep=False):
+    return SimpleNamespace(
+        moe_config=SimpleNamespace(
+            hidden_dim=4096,
+            num_local_experts=num_local_experts,
+            num_experts=num_local_experts,
+            intermediate_size_per_partition=256,
+            experts_per_token=8,
+            moe_parallel_config=SimpleNamespace(tp_size=8, tp_rank=3, ep_rank=0, use_ep=use_ep),
+            is_act_and_mul=is_act_and_mul,
+        ),
+        _shared_experts=shared_experts,
+    )
 
 
 def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
@@ -240,3 +256,65 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [], 2, 100)
     assert wrapper.no_lora is expected_no_lora
+
+
+@pytest.mark.parametrize("sharded", [True])
+def test_packed_w13_storage_survives_adapter_load_reset(sharded):
+    base = _make_base_layer(num_local_experts=2)
+    base.moe_config.hidden_dim = 32
+    base.moe_config.intermediate_size_per_partition = 4
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(base)
+    cfg = SimpleNamespace(
+        max_loras=2,
+        max_lora_rank=16,
+        lora_dtype=torch.bfloat16,
+        fully_sharded_loras=sharded,
+        enable_moe_shared_loras=False,
+    )
+    wrapper.create_lora_weights(2, cfg)
+    packed = wrapper.w13_lora_a_packed
+    pointer = packed.data_ptr()
+    assert packed.shape == (2, 2, 2, 2 if sharded else 16, 32)
+    assert all(t.is_contiguous() for t in wrapper.w13_lora_a_stacked)
+    a = [torch.full((2, 16, 32), value, dtype=torch.bfloat16) for value in (1.0, 2.0, 3.0)]
+    b = [torch.ones(2, 32, 16, dtype=torch.bfloat16) for _ in range(3)]
+    wrapper.set_lora(1, a, b)
+    assert torch.all(packed[0, 1] == 1) and torch.all(packed[1, 1] == 3)
+    assert torch.count_nonzero(packed[:, 0]) == 0
+    wrapper.reset_lora(1)
+    assert torch.count_nonzero(packed) == 0
+    assert pointer == wrapper.w13_lora_a_packed.data_ptr()
+    a[0].fill_(7)
+    wrapper.set_lora(0, a, b)
+    assert torch.all(packed[0, 0] == 7) and torch.count_nonzero(packed[:, 1]) == 0
+
+
+@pytest.mark.parametrize("ep,slices", [(True, 2), (False, 1)])
+def test_packed_w13_preserves_ep_and_single_slice_allocation(ep, slices):
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(_make_base_layer(use_ep=ep, is_act_and_mul=slices == 2))
+    with patch.object(FusedMoEWithLoRA, "_create_lora_a_weights") as original:
+        wrapper.fully_sharded = True
+        wrapper._create_lora_a_weights(2, SimpleNamespace())
+    original.assert_called_once()
+    assert wrapper.w13_lora_a_packed is None
+
+
+def test_packed_w13_preserves_non_sharded_allocation():
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(_make_base_layer(num_local_experts=2))
+    wrapper.fully_sharded = False
+    with patch.object(FusedMoEWithLoRA, "_create_lora_a_weights") as original:
+        wrapper._create_lora_a_weights(2, SimpleNamespace())
+    original.assert_called_once()
+    assert wrapper.w13_lora_a_packed is None

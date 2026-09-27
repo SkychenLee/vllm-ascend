@@ -18,9 +18,9 @@
 The wrapper reuses upstream weight allocation, loading, and TP/EP slicing but
 publishes the resulting LoRA context through Ascend's MoERunner pipeline rather
 than the GPU modular kernel. Unquantized LoRA keeps the existing AllGather and
-AlltoAll implementations. Quantized backends inject deltas at their floating
-point GMM boundaries; the first implementation supports W8A8_DYNAMIC with
-AllGather TP and AlltoAll EP execution.
+AlltoAll implementations. W8A8_DYNAMIC TP fully-sharded AllGather shares
+quantized activations with the base experts; other modes retain floating-point
+LoRA boundaries, including the existing AlltoAll EP execution.
 
 Shared experts remain ordinary dense LoRA layers. This module preserves their
 module hierarchy and selects a compatible NPU dense expand implementation when
@@ -51,6 +51,15 @@ _MOE_LORA_INDEX_FIELDS = (
 def has_lora(lora_context) -> bool:
     """Return whether the current batch contains at least one LoRA token."""
     return lora_context is not None and not lora_context.punica_wrapper.no_lora
+
+
+def supports_tp_fully_sharded_lora(lora_context) -> bool:
+    """Restrict the backported optimized path to TP fully-sharded LoRA."""
+    return (
+        lora_context is not None
+        and getattr(lora_context, "fully_sharded", False) is True
+        and getattr(lora_context, "use_ep", None) is False
+    )
 
 
 def reset_lora_indices(lora_context) -> None:
@@ -199,6 +208,35 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     ``.item()``/data-dependent host sync.
     """
     top_k = lora_context.top_k
+    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    max_exact_sort_rows = 1 << 24
+    # In the current AllGather producer, use_ep=False implies ep_size=1,
+    # expert_map=None, the complete expert range and active_num=N*top_k.
+    # EP/subset/unknown callers keep the original sort, including -1 sentinels.
+    if (
+        supports_tp_fully_sharded_lora(lora_context)
+        and isinstance(top_k, int)
+        and top_k > 0
+        and expanded_row_idx.dim() == 1
+        and topk_ids.dim() == 2
+        and topk_ids.shape[1] == top_k
+        and expanded_row_idx.numel() == topk_ids.numel()
+        and expanded_row_idx.numel() <= max_exact_sort_rows
+        and token_lora_indices.dim() == 1
+        and (expanded_row_idx.numel() == 0 or token_lora_indices.numel() > 0)
+        and expanded_row_idx.dtype in (torch.int32, torch.int64)
+        and topk_ids.dtype in (torch.int32, torch.int64)
+        and token_lora_indices.dtype == torch.int64
+        and expanded_row_idx.device.type == "npu"
+        and topk_ids.device == expanded_row_idx.device
+        and token_lora_indices.device == expanded_row_idx.device
+        and hasattr(torch.ops._C_ascend, "moe_lora_recover")
+    ):
+        # The low-level kernel requires contiguous buffers. Tensor.contiguous
+        # is a no-op for the ordinary path and materializes only strided input.
+        return torch.ops._C_ascend.moe_lora_recover(
+            expanded_row_idx.contiguous(), topk_ids.contiguous(), token_lora_indices.contiguous(), top_k
+        )
     expanded = torch.abs(expanded_row_idx)
     inv_perm = torch.argsort(expanded)
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
@@ -250,7 +288,7 @@ def _recover_moe_lora_routing_all2all(
     return expert_per_row, lora_per_row
 
 
-def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing):
+def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing, input_scale=None):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
     Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
@@ -275,10 +313,45 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         adapter_enabled=lora_context.adapter_enabled,
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
+        **({"input_scale": input_scale} if input_scale is not None else {}),
     )
 
 
-def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
+def moe_lora_apply_w13_swiglu_quant(
+    lora_context,
+    *,
+    gate_up_out,
+    hidden_states,
+    input_scale,
+    lora_routing,
+    swiglu_limit,
+    topk_scales=None,
+    combined_indices=None,
+    grouped_routing=None,
+):
+    """Project LoRA A, communicate its TP shards, then fuse B/add/SwiGLU/quant."""
+    expert_per_row, lora_per_row = lora_routing
+    return lora_context.punica_wrapper.add_lora_fused_moe(
+        y=gate_up_out,
+        x=hidden_states,
+        lora_a_stacked=lora_context.w13_lora_a_stacked,
+        lora_b_stacked=lora_context.w13_lora_b_stacked,
+        expert_ids=expert_per_row,
+        adapter_enabled=lora_context.adapter_enabled,
+        fully_sharded=lora_context.fully_sharded,
+        token_lora_mapping=lora_per_row,
+        input_scale=input_scale,
+        swiglu_quant_limit=swiglu_limit,
+        paired_a_stacked=getattr(lora_context, "w13_lora_a_packed", None),
+        topk_weights=topk_scales,
+        **({"combined_indices": combined_indices} if combined_indices is not None else {}),
+        **({"grouped_routing": grouped_routing} if grouped_routing is not None else {}),
+    )
+
+
+def moe_lora_apply_w2(
+    lora_context, *, down_out, silu_out, lora_routing, input_scale=None, combined_indices=None, grouped_routing=None
+):
     """Add the w2 LoRA delta into ``down_out`` (in place), after the down GMM.
 
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
@@ -303,6 +376,9 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         fully_sharded=lora_context.fully_sharded,
         offset=offset,
         token_lora_mapping=lora_per_row,
+        **({"input_scale": input_scale} if input_scale is not None else {}),
+        **({"combined_indices": combined_indices} if combined_indices is not None else {}),
+        **({"grouped_routing": grouped_routing} if grouped_routing is not None else {}),
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for
@@ -355,9 +431,35 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
+    def _create_lora_a_weights(self, max_loras, lora_config):
+        self.w13_lora_a_packed = None
+        if not self.fully_sharded or self.use_ep or self._w13_slices != 2 or self.enable_moe_shared_loras:
+            return super()._create_lora_a_weights(max_loras, lora_config)
+        rank = lora_config.max_lora_rank
+        if self.fully_sharded:
+            if rank % self.tp_size:
+                raise ValueError("Fully sharded LoRA rank must be divisible by TP size.")
+            rank //= self.tp_size
+        # The old loader/reset methods write contiguous views of this storage.
+        # No duplicate weights, per-forward packing, or graph pointer changes.
+        self.w13_lora_a_packed = torch.zeros(
+            (2, max_loras, self.local_num_experts, rank, self.hidden_size),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.w13_lora_a_stacked = self.w13_lora_a_packed.unbind(0)
+        self.w2_lora_a_stacked = (
+            torch.zeros(
+                (max_loras, self.local_num_experts, lora_config.max_lora_rank, self.intermediate_size_per_partition),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            ),
+        )
+
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        lora_context.w13_lora_a_packed = getattr(self, "w13_lora_a_packed", None)
         return lora_context
 
     # ------------------------------------------------------------------

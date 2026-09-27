@@ -17,6 +17,12 @@
 import os
 
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
+
+# Include the grouped LoRA Prefill branch in the outer vLLM AOT cache key.
+# AscendCompiler hashes the same effective flag for its backend artifacts.
+# This registration can be removed when upstream exposes platform factors
+# to both caches; it changes no other cache policy.
+import vllm_ascend.patch.platform.patch_compile_cache  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa

@@ -226,6 +226,7 @@ def build_mlp_compute_input(
     fused_experts_input: MoEFusedExpertsInput,
     token_dispatch_output: MoETokenDispatchOutput[TMoECombineMetadata],
     use_fusion_ops: bool,
+    output_dtype: torch.dtype | None = None,
 ) -> MoEMlpComputeInput:
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
@@ -258,6 +259,7 @@ def build_mlp_compute_input(
         swiglu_beta=fused_experts_input.swiglu_beta,
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
+        output_dtype=output_dtype,
         lora_context=fused_experts_input.lora_context,
     )
 

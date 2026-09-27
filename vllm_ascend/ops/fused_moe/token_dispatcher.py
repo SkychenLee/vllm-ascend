@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import MoECommType, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
@@ -37,6 +37,7 @@ from vllm_ascend.lora.fused_moe import (
     has_lora,
     postprocess_lora_indices,
     preprocess_lora_indices,
+    supports_tp_fully_sharded_lora,
 )
 from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -380,8 +381,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 quant_type=quant_type,
                 hidden_states=token_dispatch_input.hidden_states,
                 dynamic_scale=dynamic_scale,
+                comm_type=MoECommType.ALLGATHER,
+                lora_context=self.lora_context,
             )
-            with_quant = False
+            with_quant = quant_type == QuantType.W8A8 and supports_tp_fully_sharded_lora(self.lora_context)
+            if with_quant and dynamic_scale is not None:
+                dynamic_scale = dynamic_scale.reshape(-1).contiguous()
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -410,7 +415,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
-            hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+            if with_quant and hidden_states.dtype == torch.int8 and supports_tp_fully_sharded_lora(self.lora_context):
+                dynamic_scale = dynamic_scale.reshape(-1) * topk_weights.reshape(-1).float()
+            else:
+                hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = expert_map[topk_ids] != -1

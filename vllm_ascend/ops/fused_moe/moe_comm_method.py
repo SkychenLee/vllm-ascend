@@ -162,6 +162,7 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
+            output_dtype=self.moe_config.in_dtype,
         )
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)

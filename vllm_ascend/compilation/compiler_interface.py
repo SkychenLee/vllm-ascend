@@ -240,10 +240,14 @@ class AscendCompiler(CompilerInterface):
 
         import torch_npu
 
+        from vllm_ascend.lora import grouped_prefill
+
         factors = {
             "torch_npu_version": torch_npu.__version__,
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
+            # Hash the effective import-time branch, not a later env mutation.
+            "moe_lora_grouped_prefill": grouped_prefill.ENABLE_GROUPED_PREFILL,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]

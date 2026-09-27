@@ -38,7 +38,7 @@ public:
         inputHiddenDim_ = inputHiddenDim;
         maxLoRARank_ = maxLoRARank;
         scale_ = scale;
-        singleLoRAWeightLen_ = inputHiddenDim_ * maxLoRARank_;
+        singleLoRAWeightLen_ = static_cast<uint64_t>(inputHiddenDim_) * maxLoRARank_;
         incremental_ = inputHiddenDim_ > TILE_LENGTH;
 
         xGm_.SetGlobalBuffer((__gm__ X_T *)x);
@@ -50,7 +50,7 @@ public:
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, TILE_LENGTH * sizeof(W_T));
         pipe_->InitBuffer(tmpBufferX_, TILE_LENGTH * sizeof(float));
         pipe_->InitBuffer(tmpBufferW_, TILE_LENGTH * sizeof(float));
-        
+
         pipe_->InitBuffer(outQueueY_, 1, maxLoRARank_ * sizeof(Y_T));
         pipe_->InitBuffer(outBufferY_, maxLoRARank_ * sizeof(float));
     }
@@ -119,14 +119,30 @@ private:
     __aicore__ inline void CopyInX(const int64_t idx, int32_t colIdx, int32_t numElements = TILE_LENGTH)
     {
         AscendC::LocalTensor<X_T> xLocal = inQueueX_.AllocTensor<X_T>();
-        DataCopy(xLocal, xGm_[inputHiddenDim_ * idx + colIdx * TILE_LENGTH], numElements);
+        const uint64_t offset = static_cast<uint64_t>(inputHiddenDim_) * idx + colIdx * TILE_LENGTH;
+        constexpr uint32_t blockElements = 32 / sizeof(X_T);
+        if (offset % blockElements == 0 && numElements % blockElements == 0) {
+            DataCopy(xLocal, xGm_[offset], numElements);
+        } else {
+            const AscendC::DataCopyExtParams params{1, static_cast<uint32_t>(numElements * sizeof(X_T)), 0, 0, 0};
+            const AscendC::DataCopyPadExtParams<X_T> padding{false, 0, 0, 0};
+            DataCopyPad(xLocal, xGm_[offset], params, padding);
+        }
         inQueueX_.EnQue(xLocal);
     }
 
     __aicore__ inline void CopyInW(int32_t rowIdx, int32_t colIdx, int32_t numElements = TILE_LENGTH)
     {
         AscendC::LocalTensor<W_T> wLocal = inQueueW_.AllocTensor<W_T>();
-        DataCopy(wLocal, wGm_[reqLoRAWeightOffset_ + rowIdx * inputHiddenDim_ + colIdx * TILE_LENGTH], numElements);
+        const uint64_t offset = reqLoRAWeightOffset_ + static_cast<uint64_t>(rowIdx) * inputHiddenDim_ + colIdx * TILE_LENGTH;
+        constexpr uint32_t blockElements = 32 / sizeof(W_T);
+        if (offset % blockElements == 0 && numElements % blockElements == 0) {
+            DataCopy(wLocal, wGm_[offset], numElements);
+        } else {
+            const AscendC::DataCopyExtParams params{1, static_cast<uint32_t>(numElements * sizeof(W_T)), 0, 0, 0};
+            const AscendC::DataCopyPadExtParams<W_T> padding{false, 0, 0, 0};
+            DataCopyPad(wLocal, wGm_[offset], params, padding);
+        }
         inQueueW_.EnQue(wLocal);
     }
 
@@ -149,7 +165,7 @@ private:
             AscendC::PipeBarrier<PIPE_V>();
             inQueueW_.FreeTensor(wLocal);
         }
-        // dot product of the one tile of X and W 
+        // dot product of the one tile of X and W
         Mul(wTmpTensor, xTmpTensor, wTmpTensor, numElements);
         AscendC::PipeBarrier<PIPE_V>();
         // reduce sum generate one number, which is the summation of all the dot product
@@ -188,7 +204,8 @@ private:
     __aicore__ inline void CopyOut(const int64_t idx)
     {
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.DeQue<Y_T>();
-        DataCopy(yOutGm_[maxLoRARank_ * idx], yOutLocal, maxLoRARank_);
+        uint16_t blockLen = static_cast<uint16_t>(maxLoRARank_ * sizeof(Y_T));
+        DataCopyPad(yOutGm_[maxLoRARank_ * idx], yOutLocal, {1, blockLen, 0, 0});
         outQueueY_.FreeTensor(yOutLocal);
     }
 
@@ -206,7 +223,7 @@ private:
     uint32_t inputHiddenDim_;
     uint32_t maxLoRARank_;
     float scale_;
-    uint32_t singleLoRAWeightLen_;
+    uint64_t singleLoRAWeightLen_;
     int64_t reqLoRAIndex_;
     uint64_t reqLoRAWeightOffset_;
     bool incremental_;
@@ -237,11 +254,11 @@ extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
+        bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore,
                                                         inputHiddenDim, maxLoRARank, scale);
     } else if (type == AscendType::BF16) {
         #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
-        bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore, 
+        bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, y, batchSize, numTokensPerCore,
                                                                   inputHiddenDim, maxLoRARank, scale);
         #endif
     } else {
@@ -249,4 +266,24 @@ extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
     }
 }
 
+} // namespace vllm_ascend
+
+// Preserve the public pair entry point for existing callers. Its two
+// projections now use the original Vector shrink implementation.
+namespace vllm_ascend {
+extern void bgmv_shrink_pair_impl(AscendType type, void* stream, void* x, void* weight0, void* weight1,
+                                  void* indices, uint32_t indicesSize, void* yPair, uint32_t batchSize,
+                                  uint32_t aivNum, uint32_t inputHiddenDim, uint32_t maxLoRARank, float scale)
+{
+    if (batchSize == 0) {
+        return;
+    }
+    const uint32_t cores = aivNum > 0 ? aivNum : 1;
+    const uint32_t numTokensPerCore = (static_cast<uint64_t>(batchSize) + cores - 1) / cores;
+    void* ySecond = static_cast<float*>(yPair) + static_cast<uint64_t>(batchSize) * maxLoRARank;
+    bgmv_shrink_impl(type, stream, x, weight0, indices, indicesSize, yPair, batchSize, numTokensPerCore,
+                     inputHiddenDim, maxLoRARank, scale);
+    bgmv_shrink_impl(type, stream, x, weight1, indices, indicesSize, ySecond, batchSize, numTokensPerCore,
+                     inputHiddenDim, maxLoRARank, scale);
+}
 } // namespace vllm_ascend

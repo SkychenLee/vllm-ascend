@@ -108,7 +108,19 @@ set(
   ${ASCEND_HOME_PATH}/include
 )
 
-pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+# Keep the SDK's old std::string ABI confined to a Torch-free object target.
+set(RECOVER_PLATFORM_SRC ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe_lora_recover_platform.cpp)
+list(REMOVE_ITEM VLLM_ASCEND_SRC ${RECOVER_PLATFORM_SRC})
+set(RECOVER_PLATFORM_OBJECTS "")
+if(NOT (SOC_VERSION MATCHES "ascend310p.*|ascend950"))
+  add_library(moe_lora_recover_platform OBJECT ${RECOVER_PLATFORM_SRC})
+  set_target_properties(moe_lora_recover_platform PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(moe_lora_recover_platform PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+  target_include_directories(moe_lora_recover_platform PRIVATE ${ASCEND_HOME_PATH}/include)
+  set(RECOVER_PLATFORM_OBJECTS $<TARGET_OBJECTS:moe_lora_recover_platform>)
+endif()
+
+pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC} ${RECOVER_PLATFORM_OBJECTS})
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered

@@ -35,7 +35,9 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if "int(" in handler_source:
+                    if "_strict_binary_env(" in handler_source:
+                        test_vals = ["0", "1"]
+                    elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     elif "bool(int(" in handler_source:
                         test_vals = ["0", "1"]
@@ -57,3 +59,23 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_grouped_moe_lora_prefill_is_strict_and_disabled_by_default(self):
+        name = "VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL"
+        original_val = os.environ.pop(name, None)
+        try:
+            self.assertIs(getattr(envs_ascend, name), False)
+            for value, expected in (("0", False), ("1", True)):
+                with self.subTest(value=value):
+                    os.environ[name] = value
+                    self.assertIs(getattr(envs_ascend, name), expected)
+            for value in ("", "2", "true", "-1"):
+                with self.subTest(invalid=value):
+                    os.environ[name] = value
+                    with self.assertRaises(ValueError):
+                        getattr(envs_ascend, name)
+        finally:
+            if original_val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original_val

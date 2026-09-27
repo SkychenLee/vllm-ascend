@@ -27,6 +27,14 @@ from typing import Any
 
 # begin-env-vars-definition
 
+
+def _strict_binary_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
+    return value == "1"
+
+
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -66,6 +74,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
+    # Enable independently grouped multi-row MoE LoRA Prefill kernels.
+    # Default: 0 (experimental/off); valid values: 0 or 1. Not sensitive.
+    # Only TP fully-sharded AllGather with supported shapes uses this path.
+    "VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL"),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
     # DEPRECATED: use additional_config.enable_flashcomm1 instead.
