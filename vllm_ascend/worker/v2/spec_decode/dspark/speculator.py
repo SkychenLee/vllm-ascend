@@ -28,6 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
 
@@ -55,16 +56,19 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         model_state: Any,
         kv_cache_config: Any,
         block_tables: Any,
-        target_input_buffers: Any,
-        target_attn_groups: Any,
+        target_input_buffers: Any = None,
+        target_attn_groups: Any = None,
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
+        if vllm_version_is("0.25.1"):
+            super().set_attn(model_state, kv_cache_config, block_tables)
+        else:
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
         self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
         # npu needs attn_backends to update full graph params in run_fullgraph.
         attn_backends: dict[str, type[AttentionBackend]] = {}
@@ -89,7 +93,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 num_reqs=num_reqs_padded,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
-                causal=self._group_causal,
+                causal=self.dflash_causal if vllm_version_is("0.25.1") else self._group_causal,
             )
         return [attn_metadata]
 
