@@ -1,3 +1,7 @@
+// Load toolkit ACL headers before torch_npu's bundled headers to avoid mixing
+// runtime declarations with types from a different CANN version.
+#include <acl/acl_rt.h>
+
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
