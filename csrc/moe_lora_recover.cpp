@@ -7,7 +7,8 @@
 #include <ATen/ATen.h>
 #include <ATen/TensorIndexing.h>
 #include <algorithm>
-#include <acl/acl_rt.h>
+// Keep runtime and model declarations from the same toolkit ACL version.
+#include <acl/acl.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
