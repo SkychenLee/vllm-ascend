@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
@@ -288,10 +289,8 @@ def _apply_dynamic_int8_moe_lora(
     ):
         if can_use_grouped_moe_lora(lora_context, quantized_input, gate_up_out.shape[-1] // 2):
             expert_ids, slots = lora_routing
-            safe_slots = slots.clamp_min(0)
-            enabled = (slots >= 0) & lora_context.adapter_enabled[safe_slots].bool()
             experts = lora_context.w13_lora_a_stacked[0].shape[1]
-            combined_lora_indices = torch.where(enabled, safe_slots * experts + expert_ids, -1).contiguous()
+            combined_lora_indices = combined_moe_lora_indices(expert_ids, slots, lora_context.adapter_enabled, experts)
             groups = lora_context.w13_lora_a_stacked[0].shape[0] * experts
             grouped_routing = prepare_grouped_moe_lora_routing(combined_lora_indices, groups)
         quantized_activated, activated_scale, combined_lora_indices = moe_lora_apply_w13_swiglu_quant(

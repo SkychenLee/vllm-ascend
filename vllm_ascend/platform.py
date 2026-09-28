@@ -33,6 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
@@ -877,7 +878,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        return True
+        return not envs_ascend.VLLM_ASCEND_DISABLE_PIN_MEMORY
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

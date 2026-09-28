@@ -89,12 +89,20 @@ def assert_exact(outputs, inputs, cpu_inputs, top_k):
     "tokens,top_k,slot_count",
     [
         (8192, 6, 8192),  # DeepSeek 49152 routed rows.
+        (16384, 6, 16384),  # Full 16K scheduling budget: 98304 routed rows.
+        (16384, 6, 19),  # Clamp after multiple tiles with nonintegral TILE/top_k.
         (8192, 8, 8192),  # Qwen 65536 routed rows.
+        (32768, 8, 32768),  # Upper workspace boundary with both int64 payload words.
         (8193, 6, 13),  # Tail and short slot table use exact floor/clamp.
         (8193, 8, 1),
         (8160, 1, 8160),
         (8161, 1, 7),
         (2731, 3, 2731),  # 8193 rows, odd top-k and odd tail.
+        (1171, 7, 1171),
+        (33, 257, 33),  # Quotient transitions within and across tiles.
+        (17, 512, 17),
+        (9, 1024, 9),  # top_k larger than a tile.
+        (1, 262144, 1),  # Largest top_k allowed by the large-path row budget.
     ],
 )
 @torch.inference_mode()
@@ -119,11 +127,12 @@ def test_large_recover_dispatch_and_workspace_boundaries(rows):
 
 @pytest.mark.parametrize("top_k", [6, 8])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("tokens", [8192, 16384])
 @torch.inference_mode()
-def test_large_recover_graph_reads_updated_permutation_experts_and_slots(top_k, index_dtype):
+def test_large_recover_graph_reads_updated_permutation_experts_and_slots(top_k, index_dtype, tokens):
     # Both main shapes lie inside the native large-row interval. Tensor data
     # changes in place while the captured shapes and addresses stay constant.
-    tokens, slot_count = 8192, 19
+    slot_count = 19
     cpu_inputs = make_case(tokens, top_k, slot_count, index_dtype, torch.int64)
     inputs = tuple(value.npu() for value in cpu_inputs)
     for _ in range(3):

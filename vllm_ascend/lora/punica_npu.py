@@ -9,6 +9,7 @@ from vllm.distributed import (
 )
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -410,15 +411,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         elif x.dtype == torch.int8:
             raise ValueError("INT8 LoRA requires input_scale.")
         if combined_indices is None:
-            expert_idx = expert_ids.view(-1).to(torch.long)
             num_experts = lora_a_stacked[0].shape[1]
-            lora_idx_safe = token_lora_mapping.clamp(min=0)
-            enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
-            combined_idx = torch.where(
-                enabled,
-                lora_idx_safe * num_experts + expert_idx,
-                torch.full_like(token_lora_mapping, -1),
-            ).contiguous()
+            combined_idx = combined_moe_lora_indices(expert_ids, token_lora_mapping, adapter_enabled, num_experts)
         else:
             # w13 and w2 share the same routed rows and adapter mask.
             combined_idx = combined_indices
@@ -548,9 +542,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 and out_size % 16 == 0
                 and cur_offset % 16 == 0
                 and y2d.shape[1] % 16 == 0
-                and out_size * full_rank <= 8192
+                # The grouped kernel tiles columns within its UB budget.
+                and 0 < out_size <= 8192
+                and (out_size * full_rank <= 8192 or hasattr(torch.ops._C_ascend, "bgmv_expand_grouped_tiled"))
             ):
-                torch.ops._C_ascend.bgmv_expand_grouped(
+                # Keep new Python compatible with an older narrow-only .so.
+                grouped_expand = (
+                    torch.ops._C_ascend.bgmv_expand_grouped
+                    if out_size * full_rank <= 8192
+                    else torch.ops._C_ascend.bgmv_expand_grouped_tiled
+                )
+                grouped_expand(
                     delta,
                     b_flat,
                     grouped_routing.sorted_indices,

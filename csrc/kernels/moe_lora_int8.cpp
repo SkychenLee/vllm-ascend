@@ -9,6 +9,8 @@ constexpr uint32_t SHRINK_TILE = 4096;
 constexpr uint32_t EXPAND_TILE = 256;
 constexpr uint32_t MAX_RANK = 512;
 constexpr uint32_t MAX_WIDTH = 8192;
+constexpr uint32_t GROUPED_B_CACHE_ELEMENTS = 8192;
+constexpr uint32_t GROUPED_B_ROWS_PER_UNIT = 8;
 
 template <HardEvent event>
 __aicore__ inline void Sync() {
@@ -547,35 +549,48 @@ class GroupedExpandAdd {
     GlobalTensor<float> xgm; xgm.SetGlobalBuffer((__gm__ float*)x);
     GlobalTensor<T> wgm, ygm; wgm.SetGlobalBuffer((__gm__ T*)w); ygm.SetGlobalBuffer((__gm__ T*)y);
     GlobalTensor<int64_t> igm, ogm; igm.SetGlobalBuffer((__gm__ int64_t*)ids); ogm.SetGlobalBuffer((__gm__ int64_t*)order);
-    uint32_t elements = width * rank;
-    pipe.InitBuffer(wb, elements * sizeof(T));
-    pipe.InitBuffer(cache, elements * sizeof(float));
-    pipe.InitBuffer(product, elements * sizeof(float));
+    // Bound UB independently of the full output width. Each task owns one
+    // column tile of eight sorted rows; distinct tasks never write the same
+    // output element. The single-tile case retains the previous schedule.
+    const uint32_t tileWidth = Min(width, GROUPED_B_CACHE_ELEMENTS / rank);
+    const uint32_t columnTiles = (width + tileWidth - 1) / tileWidth;
+    const uint32_t maxElements = tileWidth * rank;
+    pipe.InitBuffer(wb, maxElements * sizeof(T));
+    pipe.InitBuffer(cache, maxElements * sizeof(float));
+    pipe.InitBuffer(product, maxElements * sizeof(float));
     pipe.InitBuffer(ab, 64 * sizeof(float));
     pipe.InitBuffer(dup, 64 * sizeof(float));
-    pipe.InitBuffer(base, width * sizeof(T));
-    pipe.InitBuffer(baseFloat, width * sizeof(float));
+    pipe.InitBuffer(base, tileWidth * sizeof(T));
+    pipe.InitBuffer(baseFloat, tileWidth * sizeof(float));
     // Reduction instructions may write a full vector past the logical tail.
-    pipe.InitBuffer(result, ((width + 63) / 64 * 64) * sizeof(float));
+    pipe.InitBuffer(result, ((tileWidth + 63) / 64 * 64) * sizeof(float));
     pipe.InitBuffer(meta, 128);
     auto i = meta.Get<int64_t>(); auto o = meta.Get<int64_t>()[8];
     auto weights = wb.Get<T>(); auto saved = cache.Get<float>(); auto f = product.Get<float>();
     auto a = ab.Get<float>(); auto repeated = dup.Get<float>();
     auto b = base.Get<T>(); auto bf = baseFloat.Get<float>(); auto out = result.Get<float>();
     int64_t cachedId = -1;
+    uint32_t cachedColumn = width;
     // Invalid rows are sorted last and skip B entirely. Round-robin units
     // balance active projections even when most adapters are disabled.
-    for (uint32_t start = GetBlockIdx() * 8; start < rows; start += GetBlockNum() * 8) {
-      uint32_t count = Min(8, rows - start);
+    const uint64_t units = (static_cast<uint64_t>(rows) + GROUPED_B_ROWS_PER_UNIT - 1) /
+                           GROUPED_B_ROWS_PER_UNIT;
+    for (uint64_t task = GetBlockIdx(); task < units * columnTiles; task += GetBlockNum()) {
+      const uint32_t start = (task / columnTiles) * GROUPED_B_ROWS_PER_UNIT;
+      const uint32_t column = (task % columnTiles) * tileWidth;
+      const uint32_t tileCount = Min(tileWidth, width - column);
+      const uint32_t elements = tileCount * rank;
+      uint32_t count = Min(GROUPED_B_ROWS_PER_UNIT, rows - start);
       Load(i, igm[start], count); Load(o, ogm[start], count); Sync<HardEvent::MTE2_S>();
       for (uint32_t j = 0; j < count; ++j) {
         int64_t id = i.GetValue(j);
         if (id < 0 || id >= groups) continue;
         uint32_t row = o.GetValue(j);
-        if (id != cachedId) {
-          Load(weights, wgm[(uint64_t)id * elements], elements);
+        if (id != cachedId || column != cachedColumn) {
+          Load(weights, wgm[(uint64_t)id * width * rank + (uint64_t)column * rank], elements);
           Cast(saved, weights, RoundMode::CAST_NONE, elements); PipeBarrier<PIPE_V>();
           cachedId = id;
+          cachedColumn = column;
         }
         Load(a, xgm[(uint64_t)row * rank], rank);
         for (uint32_t k = 0; k < 64; k += rank) DataCopy(repeated[k], a, rank);
@@ -596,11 +611,11 @@ class GroupedExpandAdd {
           }
           PipeBarrier<PIPE_V>();
         }
-        auto target = ygm[(uint64_t)row * fullWidth + offset];
-        Load(b, target, width); Cast(bf, b, RoundMode::CAST_NONE, width); PipeBarrier<PIPE_V>();
-        Add(out, out, bf, width); PipeBarrier<PIPE_V>();
-        Cast(b, out, RoundMode::CAST_RINT, width); PipeBarrier<PIPE_V>();
-        Store(target, b, width);
+        auto target = ygm[(uint64_t)row * fullWidth + offset + column];
+        Load(b, target, tileCount); Cast(bf, b, RoundMode::CAST_NONE, tileCount); PipeBarrier<PIPE_V>();
+        Add(out, out, bf, tileCount); PipeBarrier<PIPE_V>();
+        Cast(b, out, RoundMode::CAST_RINT, tileCount); PipeBarrier<PIPE_V>();
+        Store(target, b, tileCount);
       }
     }
   }
@@ -621,8 +636,12 @@ DECLARE_GROUPED_B(bfloat16_t)
 namespace vllm_ascend {
 void bgmv_expand_grouped_impl(AscendType type, void* stream, void* x, void* w, void* ids, void* order, void* y,
     uint32_t rows, uint32_t rank, uint32_t width, uint32_t full_width, uint32_t offset, uint32_t groups, uint32_t cores) {
-  uint32_t grid = (rows + 7) / 8;
-  if (grid > cores) grid = cores;
+  const uint32_t cacheWidth = GROUPED_B_CACHE_ELEMENTS / rank;
+  const uint32_t tileWidth = width < cacheWidth ? width : cacheWidth;
+  const uint32_t columnTiles = (width + tileWidth - 1) / tileWidth;
+  const uint64_t tasks = ((static_cast<uint64_t>(rows) + GROUPED_B_ROWS_PER_UNIT - 1) /
+                         GROUPED_B_ROWS_PER_UNIT) * columnTiles;
+  uint32_t grid = tasks < cores ? static_cast<uint32_t>(tasks) : cores;
 #define LAUNCH_GROUPED_B(T) \
   lora_expand_add_grouped_##T<<<grid, nullptr, stream>>>((GM_ADDR)x, (GM_ADDR)w, (GM_ADDR)ids, (GM_ADDR)order, (GM_ADDR)y, \
       rows, rank, width, full_width, offset, groups);

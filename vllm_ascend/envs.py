@@ -78,6 +78,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Default: 0 (experimental/off); valid values: 0 or 1. Not sensitive.
     # Only TP fully-sharded AllGather with supported shapes uses this path.
     "VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL"),
+    # Disable host pinning when the driver cannot allocate pinned host memory.
+    # Set before starting the engine; valid values: 0 or 1 (default: 0).
+    "VLLM_ASCEND_DISABLE_PIN_MEMORY": lambda: _strict_binary_env("VLLM_ASCEND_DISABLE_PIN_MEMORY"),
+    # Fuse <=98304 routed rows of MoE LoRA index construction. Experimental:
+    # default 0; valid values 0 or 1; not sensitive. Requires the native op.
+    "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_ROUTING"),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
     # DEPRECATED: use additional_config.enable_flashcomm1 instead.

@@ -311,7 +311,7 @@ void grouped_b_meta(const at::Tensor& x, const at::Tensor& w, const at::Tensor& 
   grouped_order_check(order, x);
   auto r = x.size(1), width = w.size(1);
   TORCH_CHECK((r == 8 || r == 16 || r == 32 || r == 64) && w.size(2) == r && w.size(0) > 0 &&
-              width > 0 && width % 16 == 0 && width * r <= 8192 && offset >= 0 && offset % 16 == 0 &&
+              width > 0 && width <= MAX_WIDTH && width % 16 == 0 && offset >= 0 && offset % 16 == 0 &&
               y.size(1) % 16 == 0 && offset + width <= y.size(1) && x.size(0) == y.size(0) && ids.size(0) == x.size(0),
               "Grouped LoRA B: invalid row, rank, aligned output or offset");
   TORCH_CHECK(x.size(0) <= std::numeric_limits<int32_t>::max() && y.size(1) <= std::numeric_limits<int32_t>::max() &&
@@ -341,6 +341,10 @@ void grouped_b(const at::Tensor& x, const at::Tensor& w, const at::Tensor& ids,
 TORCH_LIBRARY_FRAGMENT(_C_ascend, ops) {
   ops.def("bgmv_expand_grouped(Tensor x, Tensor weight, Tensor indices, Tensor row_order, Tensor(a!) y, int offset) -> ()");
   ops.impl("bgmv_expand_grouped", c10::DispatchKey::PrivateUse1, &vllm_ascend::grouped_b);
+  // Presence of this schema advertises column tiling to Python dispatch. An
+  // older installed library may expose only the narrow grouped operator.
+  ops.def("bgmv_expand_grouped_tiled(Tensor x, Tensor weight, Tensor indices, Tensor row_order, Tensor(a!) y, int offset) -> ()");
+  ops.impl("bgmv_expand_grouped_tiled", c10::DispatchKey::PrivateUse1, &vllm_ascend::grouped_b);
   ops.def("bgmv_shrink_int8_pair_grouped(Tensor x, Tensor weight, Tensor indices, Tensor row_order, Tensor scale, Tensor(a!) y) -> ()");
   ops.impl("bgmv_shrink_int8_pair_grouped", c10::DispatchKey::PrivateUse1, &vllm_ascend::grouped_shrink);
   ops.def("moe_lora_expand_swiglu_quant_pair_grouped(Tensor base, Tensor paired, Tensor bg, Tensor bu, Tensor indices, Tensor row_order, Tensor? topk, float limit) -> (Tensor, Tensor)");
@@ -360,6 +364,7 @@ TORCH_LIBRARY_FRAGMENT(_C_ascend, ops) {
 }
 TORCH_LIBRARY_IMPL(_C_ascend, Meta, ops) {
   ops.impl("bgmv_expand_grouped", &vllm_ascend::grouped_b_meta);
+  ops.impl("bgmv_expand_grouped_tiled", &vllm_ascend::grouped_b_meta);
   ops.impl("bgmv_shrink_int8_pair_grouped", &vllm_ascend::grouped_shrink_meta);
   ops.impl("moe_lora_expand_swiglu_quant_pair_grouped", &vllm_ascend::grouped_expand_meta);
   ops.impl("bgmv_shrink_int8_pair", &vllm_ascend::bgmv_shrink_int8_pair_meta);
