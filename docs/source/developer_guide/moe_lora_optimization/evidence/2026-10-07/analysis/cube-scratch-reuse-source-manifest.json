@@ -1,0 +1,19 @@
+{
+  "host_source_only": true,
+  "installed_source_modified_by_subtask": false,
+  "physical_device": 12,
+  "files": {
+    "vllm_ascend/lora/cube_moe.py": "8a9e5397f3402f4aab5a2c3806bee8b2d2735942a106ef5d85ddb7ab26ec7186",
+    "tests/ut/lora/test_cube_scratch_reuse.py": "524063dcd1cb432ad3980ab1cd04426fa674b07b9923e4b146368ff3b432322c"
+  },
+  "cpu_tests": "51 passed (4 new scratch tests + 47 existing DSpark tests)",
+  "lint": "ruff format/check PASS; git diff --check PASS",
+  "old_scratch_bytes": 309218698,
+  "new_scratch_bytes": 191778186,
+  "saved_bytes": 117440512,
+  "native_validation": "cube-scratch-reuse-validation.json",
+  "where_peak_increment_bytes": 0,
+  "where_aten_clone_calls": 0,
+  "max_abs_cube_vs_legacy_bgmv": 1.6391277313232422e-07,
+  "max_abs_cpu_fp64_sample": 1.1175870895385742e-07
+}

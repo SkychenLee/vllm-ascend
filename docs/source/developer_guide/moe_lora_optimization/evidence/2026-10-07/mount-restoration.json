@@ -1,0 +1,11 @@
+{
+  "container": "ds-ltc-v25-ep",
+  "container_host_pid": 3606303,
+  "method": "open_tree(OPEN_TREE_CLONE), setns(mount), move_mount(MOVE_MOUNT_F_EMPTY_PATH)",
+  "targets": [
+    "/mnt/weight",
+    "/mnt/share/remote_share"
+  ],
+  "verified_model_and_adapter_visible": true,
+  "changes_host_mounts": false
+}

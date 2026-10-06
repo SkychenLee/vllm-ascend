@@ -1,0 +1,45 @@
+Baseline rank0 Decode profile, 2026-10-07
+Source: {profiles_root}/tp-ep-lora-dspark5-baseline-20261007/dp0_pp0_tp0_dcp0_ep0_rank0_83371_20261006182459752_ascend_pt/ASCEND_PROFILER_OUTPUT
+Only physical device8/rank0 parsed; CPU-only read-only SQLite. Other ranks retain raw traces.
+
+Measured target: TP8/EP8/AllGather/W8A8/LoRA rank16/DSpark5, eight active requests.
+Model49 repeats11 homogeneous graphs; selected final5 replays6–10. TargetT48/R288/K6/H4096/I2048/localE32; preceding Model37 isT6/R36 once.
+CANN shapes are present, but actual profiler_info says PyTorch record_shapes=false.
+
+Main device span mean 81.614707ms, range 81.222948–82.021139ms.
+Tracked noncommunication kernel union 72.818290ms; including AIV 79.611706ms. Arithmetic kernel sum 81.809002ms.
+
+routed_lora_bgmv: 258 calls/replay; summed 13.942081ms (selected5 mean).
+shared_lora_sgmv: 258 calls/replay; summed 4.427427ms (selected5 mean).
+ep_inverse_routing_recovery: 1462 calls/replay; summed 5.913537ms (selected5 mean).
+combined_lora_slot_metadata: 430 calls/replay; summed 1.782222ms (selected5 mean).
+routed_mask_and_buffer_copy: 258 calls/replay; summed 3.817205ms (selected5 mean).
+routed_lora_zero_intermediates: 129 calls/replay; summed 0.237009ms (selected5 mean).
+routed_swiglu_and_output_quant: 86 calls/replay; summed 1.263201ms (selected5 mean).
+routed_input_quant: 43 calls/replay; summed 0.559294ms (selected5 mean).
+mtp_full_buffer_moves: 2 calls/replay; summed 1.714136ms (selected5 mean).
+base_expert_grouped_matmuls: 86 calls/replay; summed 8.312155ms (selected5 mean).
+attention_indexer_compression: 188 calls/replay; summed 7.037779ms (selected5 mean).
+hc_pre_post: 172 calls/replay; summed 4.942360ms (selected5 mean).
+allreduce_aiv: 87 calls/replay; summed 6.793416ms (selected5 mean).
+
+BGMV+SGMV arithmetic scope 18.369508ms, 22.454% of summed graph kernels.
+Broader LoRA path including recovery/slot metadata/zero/masks/copies: 30.119480ms, 36.817% of summed graph kernels. Masks/copies also protect base MoE unwritten routed rows; this scope is not exclusive LoRA overhead.
+Do not interpret either ratio as a critical-path share or expected speedup. Streams and operator scopes overlap, and each candidate requires a fresh-server full benchmark.
+
+Routing inverse recovery: identical34-kernel pattern across43 layers; metadata slot calculation identical10-kernel pattern per layer. Refer JSON for exact name/shape patterns.
+Routed activation is ordinarySwiGlu(288x4096), attr_0:-1. No routed clamp. Limit10 clamp is shared expert48x256. New activation fusion must dispatch limit0 atR288.
+MTP buffer exhibits two full-buffer moves/replay: [16384,16384] and [268435456], together1.714136ms mean. This is observed whole-model graph evidence, not inferred from the prior synthetic microbenchmark.
+Main graph has87AllReduce/replay; hcom and AivKernel identify the same tasks and must not be added.
+
+Inter-main last4 gap mean 40.769380ms; ranges38.91–41.08ms acrossall10 gaps.
+Each steady gap has eager draft queryT40/R240 and3 draft MoE+attention layers. FusedGroupedMatmulSwigluQuantW13 appears3 times; W2 GMM3 times. No BGMV/SGMV primitive in any captured inter-main eager interval.
+These gaps also contain target/draft logits, sampling, metadata, communication and host dispatch; no full43-layer trace attribution attempted.
+Gap after replay6: span40.358533ms, noncomm kernel union8.013302ms, trackedAIV union11.723809ms, no trackedcompute/AIV20.621422ms.
+Gap after replay7: span40.677146ms, noncomm kernel union7.950059ms, trackedAIV union14.420319ms, no trackedcompute/AIV18.306768ms.
+Gap after replay8: span40.966118ms, noncomm kernel union7.802589ms, trackedAIV union14.651543ms, no trackedcompute/AIV18.511986ms.
+Gap after replay9: span41.075722ms, noncomm kernel union8.069841ms, trackedAIV union14.453161ms, no trackedcompute/AIV18.552720ms.
+Untracked time is not pure CPU idle. AIV is a communication subset; some collectives use other tasks. Host API durations nest and overlap. Last gap contains4aclrtSynchronizeEvent calls ~2.61ms summed,40aten::item calls ~0.078ms summed,3dsa and3moe_forward_shared scopes; do not sum parent scopes with children.
+
+Profile workload8192input/128output/C8 contains profiler overhead. Formal8192input/4096output/C8 result is259.432696token/s and is a separate unprofiled run.
+Adapter sampled BF16 words are zero, not a complete adapter scan. No model-output-quality or full nonzero-adapter verification.

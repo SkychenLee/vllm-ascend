@@ -27,6 +27,7 @@ from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
+from vllm import envs as vllm_envs
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
@@ -243,6 +244,7 @@ class AscendCompiler(CompilerInterface):
 
         from vllm_ascend.lora import grouped_prefill
 
+        speculative_config = getattr(vllm_config, "speculative_config", None)
         factors = {
             "torch_npu_version": torch_npu.__version__,
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
@@ -253,7 +255,15 @@ class AscendCompiler(CompilerInterface):
             # Separate their persisted graphs even for an identical config.
             "moe_lora_fused_routing": envs.VLLM_ASCEND_MOE_LORA_FUSED_ROUTING,
             "moe_lora_fused_activation": envs.VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION,
+            "moe_lora_fused_shrink_pair": envs.VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR,
             "optimize_mtp_buffer_copy": envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY,
+            # Match the constructor branch without importing model kernels.
+            "skip_dspark_mtp_buffer": (
+                envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY
+                and vllm_envs.VLLM_USE_V2_MODEL_RUNNER is False
+                and speculative_config is not None
+                and speculative_config.use_dspark()
+            ),
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]

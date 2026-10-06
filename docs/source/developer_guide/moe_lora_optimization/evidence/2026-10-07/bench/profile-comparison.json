@@ -1,0 +1,223 @@
+{
+  "baseline_source": "{profiles_root}/tp-ep-lora-dspark5-baseline-20261007/dp0_pp0_tp0_dcp0_ep0_rank0_83371_20261006182459752_ascend_pt/ASCEND_PROFILER_OUTPUT",
+  "optimized_source": "{profiles_root}/tp-ep-lora-dspark5-optimized-20261007/dp0_pp0_tp0_dcp0_ep0_rank0_120447_20261006191715184_ascend_pt/ASCEND_PROFILER_OUTPUT",
+  "selection": "rank0 graph49, final5 replays6..10 of11 homogeneous T48/R288 replays; same method for both profiles",
+  "main_device_span_ms": {
+    "baseline": {
+      "count": 5,
+      "mean": 81.614707,
+      "median": 81.608243,
+      "min": 81.222948,
+      "max": 82.021139
+    },
+    "optimized": {
+      "count": 5,
+      "mean": 66.4014424,
+      "median": 66.428435,
+      "min": 65.920856,
+      "max": 67.073301
+    },
+    "percent_change": -18.640347014907498
+  },
+  "main_start_interval_ms": {
+    "baseline": {
+      "mean": 122.38570275,
+      "min": 121.900094,
+      "max": 122.805769,
+      "count": 4
+    },
+    "optimized": {
+      "mean": 104.206316,
+      "min": 103.776709,
+      "max": 104.827371,
+      "count": 4
+    }
+  },
+  "last4_inter_main_gap_ms": {
+    "baseline": {
+      "count": 4,
+      "mean": 40.76937975,
+      "median": 40.821632,
+      "min": 40.358533,
+      "max": 41.075722
+    },
+    "optimized": {
+      "count": 4,
+      "mean": 37.687477,
+      "median": 37.708488,
+      "min": 37.477079,
+      "max": 37.855853
+    }
+  },
+  "groups": {
+    "allreduce_aiv": {
+      "baseline_calls": 87,
+      "optimized_calls": 87,
+      "baseline_summed_device_ms": 6.7934158,
+      "optimized_summed_device_ms": 6.1046064,
+      "difference_ms": -0.6888094000000002,
+      "percent_change": -10.139367591779092
+    },
+    "attention_indexer_compression": {
+      "baseline_calls": 188,
+      "optimized_calls": 188,
+      "baseline_summed_device_ms": 7.0377792,
+      "optimized_summed_device_ms": 6.9462316,
+      "difference_ms": -0.09154760000000017,
+      "percent_change": -1.3008023894810483
+    },
+    "base_expert_grouped_matmuls": {
+      "baseline_calls": 86,
+      "optimized_calls": 86,
+      "baseline_summed_device_ms": 8.312155,
+      "optimized_summed_device_ms": 8.520375399999999,
+      "difference_ms": 0.2082203999999983,
+      "percent_change": 2.5050110350444355
+    },
+    "combined_lora_slot_metadata": {
+      "baseline_calls": 430,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 1.7822224,
+      "optimized_summed_device_ms": 0.321933,
+      "difference_ms": -1.4602894,
+      "percent_change": -81.93642948265042
+    },
+    "ep_inverse_routing_recovery": {
+      "baseline_calls": 1462,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 5.9135366,
+      "optimized_summed_device_ms": 0.4916638,
+      "difference_ms": -5.421872799999999,
+      "percent_change": -91.68579086836124
+    },
+    "hc_pre_post": {
+      "baseline_calls": 172,
+      "optimized_calls": 172,
+      "baseline_summed_device_ms": 4.9423604,
+      "optimized_summed_device_ms": 4.9468672,
+      "difference_ms": 0.0045067999999997,
+      "percent_change": 0.0911871987320012
+    },
+    "legacy_single_shrink": {
+      "baseline_calls": 0,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 0,
+      "optimized_summed_device_ms": 2.8540646,
+      "difference_ms": 2.8540646,
+      "percent_change": null
+    },
+    "mtp_full_buffer_moves": {
+      "baseline_calls": 2,
+      "optimized_calls": 0,
+      "baseline_summed_device_ms": 1.7141364000000001,
+      "optimized_summed_device_ms": 0.0,
+      "difference_ms": -1.7141364000000001,
+      "percent_change": -100.0
+    },
+    "native_activation_quant": {
+      "baseline_calls": 0,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 0,
+      "optimized_summed_device_ms": 0.8394804,
+      "difference_ms": 0.8394804,
+      "percent_change": null
+    },
+    "native_pair_shrink": {
+      "baseline_calls": 0,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 0,
+      "optimized_summed_device_ms": 1.8993148,
+      "difference_ms": 1.8993148,
+      "percent_change": null
+    },
+    "routed_input_quant": {
+      "baseline_calls": 43,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 0.559294,
+      "optimized_summed_device_ms": 0.5469350000000001,
+      "difference_ms": -0.012358999999999898,
+      "percent_change": -2.209750149295342
+    },
+    "routed_lora_bgmv": {
+      "baseline_calls": 258,
+      "optimized_calls": 215,
+      "baseline_summed_device_ms": 13.9420808,
+      "optimized_summed_device_ms": 8.805095,
+      "difference_ms": -5.1369858,
+      "percent_change": -36.845187412771274
+    },
+    "routed_lora_zero_intermediates": {
+      "baseline_calls": 129,
+      "optimized_calls": 86,
+      "baseline_summed_device_ms": 0.2370088,
+      "optimized_summed_device_ms": 0.198433,
+      "difference_ms": -0.03857579999999999,
+      "percent_change": -16.27610451595046
+    },
+    "routed_mask_and_buffer_copy": {
+      "baseline_calls": 258,
+      "optimized_calls": 258,
+      "baseline_summed_device_ms": 3.817205,
+      "optimized_summed_device_ms": 3.9206646,
+      "difference_ms": 0.10345959999999987,
+      "percent_change": 2.710349588245853
+    },
+    "routed_swiglu_and_output_quant": {
+      "baseline_calls": 86,
+      "optimized_calls": 43,
+      "baseline_summed_device_ms": 1.263201,
+      "optimized_summed_device_ms": 0.8394804,
+      "difference_ms": -0.4237206,
+      "percent_change": -33.54340283137838
+    },
+    "shared_lora_sgmv": {
+      "baseline_calls": 258,
+      "optimized_calls": 258,
+      "baseline_summed_device_ms": 4.4274268,
+      "optimized_summed_device_ms": 4.2871534,
+      "difference_ms": -0.14027339999999988,
+      "percent_change": -3.1682827596381635
+    }
+  },
+  "gap_breakdown": {
+    "baseline": {
+      "span_ms": 40.76937975,
+      "compute_kernel_union_ms": 7.95894775,
+      "aiv_kernel_union_ms": 13.812208,
+      "all_compute_and_aiv_union_ms": 21.77115575,
+      "without_tracked_compute_or_aiv_ms": 18.998224,
+      "gap_fraction_of_main_start_interval": 0.33312207908206826
+    },
+    "optimized": {
+      "span_ms": 37.687477,
+      "compute_kernel_union_ms": 7.99910475,
+      "aiv_kernel_union_ms": 3.8624545,
+      "all_compute_and_aiv_union_ms": 11.861559249999999,
+      "without_tracked_compute_or_aiv_ms": 25.82591775,
+      "gap_fraction_of_main_start_interval": 0.3616621184458723
+    }
+  },
+  "shape": {
+    "requests": 8,
+    "num_speculative_tokens": 5,
+    "main_target_tokens": 48,
+    "main_routed_rows": 288,
+    "draft_query_tokens": 40,
+    "draft_routed_rows": 240,
+    "topk": 6,
+    "hidden_size": 4096,
+    "intermediate_size": 2048,
+    "local_experts": 32,
+    "lora_rank": 16,
+    "target_layers": 43,
+    "draft_layers_seen_per_gap": 3
+  },
+  "limits": [
+    "Profile is8192input/128output/C8, not formal8192/4096 throughput.",
+    "All arithmetic scopes may overlap; native subgroup counters overlap parent BGMV/activation scope.",
+    "Main graph latency drop is a measured combined candidate condition, not exact per-flag speedup.",
+    "Output sequences and DSpark acceptance differ between full runs; no numerical-equivalence or quality claim.",
+    "KVpool shapes differ slightly as allocation changed; maxlen/util/serving argv remain identical.",
+    "Untracked inter-main time is not pure CPU idle."
+  ]
+}

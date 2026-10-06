@@ -1,0 +1,16 @@
+Baseline TP8 + EP8 + AllGather + W8A8 + LoRA + DSpark5, 2026-10-07
+
+Devices: 8–15 only. User launcher parameters preserved, including max_model_len128000, max_num_batched_tokens16384, prefix caching, max_loras3. Routing/activation/MTP/Cube optimization flags are zero.
+
+Formal run: 8/8 PASS; each exact8192 input and4096 output; verified outputs 32768.
+Wall 126.306362s; effective output throughput 259.432696token/s (includes prefill).
+TTFT mean 17.550260s, p50 17.963946s, p95 27.730107s.
+TPOT mean 23.084438ms, p50 22.815040ms, p95 28.475438ms.
+Drafts 6191; proposed 30955; accepted 26580; draft acceptance 85.866581%; mean accepted length including bonus 5.293329.
+Prefix cache hits zero; preemptions zero. Smoke and profile also8/8 PASS. Profiler run has overhead and is excluded from formal performance.
+
+No shared first32-token prefixes within each run. Fixed full seed2026100702 must be replayed on a fresh optimized engine, to avoid prefix cache reuse.
+Baseline service stopped using verified owner PID/startticks; npu-smi confirmed all devices without running NPU processes.
+Hashes and complete counters: baseline-summary.json, baseline-service-owner.json. Raw profile: {profiles_root}/tp-ep-lora-dspark5-baseline-20261007. Rank0 offline analysis in progress.
+
+Adapter sample is zero but not a complete scan. Random token workload and these checks do not establish output quality.

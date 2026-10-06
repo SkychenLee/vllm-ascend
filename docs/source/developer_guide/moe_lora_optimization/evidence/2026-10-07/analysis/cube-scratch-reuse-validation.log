@@ -1,0 +1,14 @@
+INFO 10-06 19:06:57 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-06 19:06:57 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-06 19:06:57 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-06 19:06:57 [__init__.py:237] Platform plugin ascend is activated
+INFO 10-06 19:06:57 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+[W1006 19:07:02.774024510 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+/usr/local/python3.12.13/lib/python3.12/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+partial_tiles_a tiles 11 old/new bits [0, 0]
+two_waves_a tiles 240 old/new bits [0, 0]
+two_layers_shared_arena_b tiles 240 old/new bits [0, 0]
+changed_counts_back_a tiles 240 old/new bits [0, 0]
+reload_slot1_small_after_large tiles 8 old/new bits [0, 0]
+{"pass": true, "result": "{experiment_root}/analysis/cube-scratch-reuse-validation.json", "scratch_bytes": {"old": 309218698, "new": 191778186}, "where_peak_increment": 0}

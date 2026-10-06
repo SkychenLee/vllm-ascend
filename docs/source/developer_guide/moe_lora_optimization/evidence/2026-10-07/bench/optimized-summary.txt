@@ -1,0 +1,37 @@
+2026-10-07 TP8+EP8 AllGather W8A8 INT8 LoRA DSpark5 — optimized validation complete
+Container ds-ltc-v25-ep, physical8–15; original max_model_len128000/util0.93 preserved.
+Formal exact8192 input+4096 output/C8, max_num_batched_tokens16384, lora1, seed2026100702.
+Smoke512/128 C8, formal8192/4096 C8 and profile8192/128 C8: all8/8 PASS.
+Formal comparison VALID_COMPARISON: same exact prompts/model+adapter config hashes/argv apart from profiler directory; optimization flags intentionally differ and runtime source hashes are recorded; fresh services; cache hits0, preemptions0.
+Effective output throughput259.432696→278.559021 tok/s (+7.372365%), each condition32768 verified output tokens.
+Wall126.306362→117.633957s; TTFT mean17.550260→13.484378s (−23.1671%); TPOT mean23.084438→20.106955ms (−12.8982%).
+DSpark acceptance85.866581%→82.720150% (−3.146430pp), drafts6191→6382, accepted26580→26396.
+All8 output sequences differ; first differences at token indexes[2, 23, 0, 18, 3, 0, 3, 3]. No precision/quality equivalence claim or attributed cause.
+Optimized KV capacity128277 (available10.32GiB) vs baseline128438; margin277 over128000. First candidate126909 blocked all benchmark requests and was stopped.
+Cube arena reuse saved exactly112MiB; shared scratch182.894MiB +43×8MiB packs =526.894MiB, excluding dynamic workspace/allocator.
+Actual main graph49: T48/R288/K6/H4096/I2048/E32/r16,43 target layers; draft T40/R240,3 layers.
+Selected final5/11 homogeneous main replays: mean81.614707→66.401442ms (−18.6403%). Start interval122.385703→104.206316ms; intervening gap40.769380→37.687477ms.
+Per main replay native pair43calls, EP inverse43, combined metadata43, activation+quant43; full MTP buffer TensorMove2→0.
+Real Prefill Cube: all8 ranks×43 states prepare_accept/pair_submitted. Rank0 profile251 tile BMMs BF16×BF16→FP32,118 S shapes,24.201237ms summed;0 in graph49. Existing aten BMM path, not a new grouped_w13_cube C++ integration.
+Decode routed BGMV13.942081→8.805095ms; shared SGMV4.427427→4.287153ms; both scope times and other groups must not be double counted.
+Owned service119690/startticks29930099 and controller119720 safely stopped; no remaining owned PID. npu-smi confirmed all16 physical devices empty.
+Only one full run/condition, rank0 profile and shorter profile output; no critical-path attribution or repeatability claim.
+All5 optimized flags1:
+  VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION=1
+  VLLM_ASCEND_MOE_LORA_FUSED_ROUTING=1
+  VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR=1
+  VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL=1
+  VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY=1
+Artifacts:
+  {experiment_root}/bench/optimized-summary.json
+  {experiment_root}/bench/optimized-summary.txt
+  {experiment_root}/bench/optimized-comparison.json
+  {experiment_root}/bench/optimized-output-diagnostic.json
+  {experiment_root}/bench/optimized-rank0-hotspots.json
+  {experiment_root}/bench/optimized-rank0-hotspots.txt
+  {experiment_root}/bench/profile-comparison.json
+  {experiment_root}/bench/optimized-cube-profile-evidence.json
+  {experiment_root}/bench/optimized-service-owner.json
+  {experiment_root}/bench/optimized-service-stop.json
+  {experiment_root}/bench/optimized-stop-npu-smi.txt
+  {experiment_root}/bench/optimized-full/result.json

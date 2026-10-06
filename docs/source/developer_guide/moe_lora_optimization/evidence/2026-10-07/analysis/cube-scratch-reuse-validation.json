@@ -1,0 +1,502 @@
+{
+  "timestamp_unix": 1791313622.7252996,
+  "scope": "Host source-only Cube arena reuse; old/new Cube same BMM, eager NPU, no model throughput",
+  "physical_device": 12,
+  "task_queue_enable": 1,
+  "source_sha256": {
+    "{repo_root}/vllm_ascend/lora/cube_moe.py": "8a9e5397f3402f4aab5a2c3806bee8b2d2735942a106ef5d85ddb7ab26ec7186",
+    "{experiment_root}/analysis/cube_moe.before-scratch-reuse.py": "28f9f9c0c6b9208386ec25235337d15afd136636cbfc521663092e63278765a2",
+    "{repo_root}/tests/ut/lora/test_cube_scratch_reuse.py": "524063dcd1cb432ad3980ab1cd04426fa674b07b9923e4b146368ff3b432322c"
+  },
+  "torch_version": "2.10.0+cpu",
+  "torch_npu_version": "2.10.0.post4",
+  "scratch_bytes": {
+    "old": 309218698,
+    "new": 191778186
+  },
+  "same_shared_scratch_two_layers": true,
+  "cases": [
+    {
+      "name": "partial_tiles_a",
+      "rows": 6144,
+      "total_valid": 512,
+      "slot": 0,
+      "counts": [
+        65,
+        31,
+        0,
+        2,
+        64,
+        127,
+        223,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "old_waves": 1,
+      "old_tiles": 11,
+      "old_canary": [
+        true,
+        true
+      ],
+      "old_tail_zero": [
+        true,
+        true
+      ],
+      "new_waves": 1,
+      "new_tiles": 11,
+      "new_canary": [
+        true,
+        true
+      ],
+      "new_tail_zero": [
+        true,
+        true
+      ],
+      "old_new_raw_bits_unequal": [
+        0,
+        0
+      ],
+      "legacy_bgmv_error": [
+        {
+          "max_abs": 1.1920928955078125e-07,
+          "max_rel": 0.0017917369259521365
+        },
+        {
+          "max_abs": 8.195638656616211e-08,
+          "max_rel": 0.0011922763660550117
+        }
+      ],
+      "cpu_fp64_sample_error": [
+        {
+          "max_abs": 5.960464477539063e-08,
+          "max_rel": 0.00014790751447435468
+        },
+        {
+          "max_abs": 6.705522537231445e-08,
+          "max_rel": 8.723426617507357e-06
+        }
+      ],
+      "cpu_sample_rows": 16,
+      "pass": true
+    },
+    {
+      "name": "two_waves_a",
+      "rows": 16384,
+      "total_valid": 14416,
+      "slot": 0,
+      "counts": [
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        901,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "old_waves": 2,
+      "old_tiles": 240,
+      "old_canary": [
+        true,
+        true
+      ],
+      "old_tail_zero": [
+        true,
+        true
+      ],
+      "new_waves": 2,
+      "new_tiles": 240,
+      "new_canary": [
+        true,
+        true
+      ],
+      "new_tail_zero": [
+        true,
+        true
+      ],
+      "old_new_raw_bits_unequal": [
+        0,
+        0
+      ],
+      "legacy_bgmv_error": [
+        {
+          "max_abs": 1.2665987014770508e-07,
+          "max_rel": 0.012921348214149475
+        },
+        {
+          "max_abs": 1.341104507446289e-07,
+          "max_rel": 0.22351741790771484
+        }
+      ],
+      "cpu_fp64_sample_error": [
+        {
+          "max_abs": 3.5390257835388184e-08,
+          "max_rel": 9.337861411040649e-05
+        },
+        {
+          "max_abs": 4.842877388000488e-08,
+          "max_rel": 1.7635034964769147e-05
+        }
+      ],
+      "cpu_sample_rows": 16,
+      "pass": true
+    },
+    {
+      "name": "two_layers_shared_arena_b",
+      "rows": 16384,
+      "total_valid": 14448,
+      "slot": 0,
+      "counts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903
+      ],
+      "old_waves": 2,
+      "old_tiles": 240,
+      "old_canary": [
+        true,
+        true
+      ],
+      "old_tail_zero": [
+        true,
+        true
+      ],
+      "new_waves": 2,
+      "new_tiles": 240,
+      "new_canary": [
+        true,
+        true
+      ],
+      "new_tail_zero": [
+        true,
+        true
+      ],
+      "old_new_raw_bits_unequal": [
+        0,
+        0
+      ],
+      "legacy_bgmv_error": [
+        {
+          "max_abs": 1.2665987014770508e-07,
+          "max_rel": 0.033487893640995026
+        },
+        {
+          "max_abs": 1.6391277313232422e-07,
+          "max_rel": 0.03259629011154175
+        }
+      ],
+      "cpu_fp64_sample_error": [
+        {
+          "max_abs": 1.1175870895385742e-07,
+          "max_rel": 2.3983559003681876e-05
+        },
+        {
+          "max_abs": 3.725290298461914e-08,
+          "max_rel": 0.00023923283151816577
+        }
+      ],
+      "cpu_sample_rows": 16,
+      "pass": true
+    },
+    {
+      "name": "changed_counts_back_a",
+      "rows": 16384,
+      "total_valid": 14448,
+      "slot": 0,
+      "counts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903,
+        903
+      ],
+      "old_waves": 2,
+      "old_tiles": 240,
+      "old_canary": [
+        true,
+        true
+      ],
+      "old_tail_zero": [
+        true,
+        true
+      ],
+      "new_waves": 2,
+      "new_tiles": 240,
+      "new_canary": [
+        true,
+        true
+      ],
+      "new_tail_zero": [
+        true,
+        true
+      ],
+      "old_new_raw_bits_unequal": [
+        0,
+        0
+      ],
+      "legacy_bgmv_error": [
+        {
+          "max_abs": 1.1920928955078125e-07,
+          "max_rel": 0.019920319318771362
+        },
+        {
+          "max_abs": 1.1175870895385742e-07,
+          "max_rel": 0.007586705032736063
+        }
+      ],
+      "cpu_fp64_sample_error": [
+        {
+          "max_abs": 4.842877388000488e-08,
+          "max_rel": 3.992206256953068e-05
+        },
+        {
+          "max_abs": 5.21540641784668e-08,
+          "max_rel": 2.1540643501793966e-05
+        }
+      ],
+      "cpu_sample_rows": 16,
+      "pass": true
+    },
+    {
+      "name": "reload_slot1_small_after_large",
+      "rows": 6144,
+      "total_valid": 512,
+      "slot": 1,
+      "counts": [
+        512,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "old_waves": 1,
+      "old_tiles": 8,
+      "old_canary": [
+        true,
+        true
+      ],
+      "old_tail_zero": [
+        true,
+        true
+      ],
+      "new_waves": 1,
+      "new_tiles": 8,
+      "new_canary": [
+        true,
+        true
+      ],
+      "new_tail_zero": [
+        true,
+        true
+      ],
+      "old_new_raw_bits_unequal": [
+        0,
+        0
+      ],
+      "legacy_bgmv_error": [
+        {
+          "max_abs": 4.842877388000488e-08,
+          "max_rel": 0.0017038558144122362
+        },
+        {
+          "max_abs": 5.960464477539063e-08,
+          "max_rel": 0.005387931130826473
+        }
+      ],
+      "cpu_fp64_sample_error": [
+        {
+          "max_abs": 2.0489096641540527e-08,
+          "max_rel": 3.05438443319872e-05
+        },
+        {
+          "max_abs": 2.60770320892334e-08,
+          "max_rel": 9.744684939505532e-05
+        }
+      ],
+      "cpu_sample_rows": 16,
+      "pass": true
+    }
+  ],
+  "where_alias": {
+    "shape": [
+      224,
+      64,
+      4096
+    ],
+    "input_output_same_pointer": true,
+    "allocated_before": 568644096,
+    "allocated_after": 568644096,
+    "peak_increment_bytes": 0,
+    "aten_clone_calls": 0,
+    "cpu_profile_events": [
+      {
+        "key": "aten::where",
+        "count": 1,
+        "cpu_memory_usage": 0,
+        "input_shapes": [
+          [
+            224,
+            64,
+            1
+          ],
+          [
+            224,
+            64,
+            4096
+          ],
+          [],
+          [
+            224,
+            64,
+            4096
+          ]
+        ]
+      },
+      {
+        "key": "aclnnSWhere",
+        "count": 1,
+        "cpu_memory_usage": 0,
+        "input_shapes": []
+      }
+    ],
+    "padding_zero": true,
+    "unmasked_preserved": true
+  },
+  "pack_count": {
+    "old_a": 2,
+    "new_a": 2,
+    "old_b": 1,
+    "new_b": 1
+  },
+  "pass": true
+}

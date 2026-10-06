@@ -1,0 +1,479 @@
+{
+  "analysis_date": "2026-10-07",
+  "source": "{profiles_root}/tp-ep-lora-dspark5-optimized-20261007/dp0_pp0_tp0_dcp0_ep0_rank0_120447_20261006191715184_ascend_pt/ASCEND_PROFILER_OUTPUT",
+  "rank": 0,
+  "physical_device": 8,
+  "model_id": 49,
+  "model_table": [
+    [
+      4294967295,
+      275800,
+      268710,
+      1791314235322529743,
+      1791314259111937543
+    ],
+    [
+      49,
+      73887,
+      6717,
+      1791314257956879524,
+      1791314259074445944
+    ],
+    [
+      37,
+      6717,
+      6717,
+      1791314238113126471,
+      1791314238153331558
+    ]
+  ],
+  "total_steady_replays": 11,
+  "selected_replays": [
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "method": "TASK.modelId is authoritative. Every globalTaskId of model49 repeats exactly11 times. Assign chronological occurrence to replay; summarize last5 homogeneous main graph replays6–10. CANN kernel input shapes remain available although PyTorch record_shapes is false. All duration sums are arithmetic work, not critical-path savings; streams and category scopes may overlap. hcom_allReduce and AivKernel identify the same communication task and must not be added. Inter-main gaps include eager draft, sampler, metadata and host dispatch; untracked-device time is not a pure CPU-idle metric.",
+  "shape_evidence": {
+    "requests": 8,
+    "num_speculative_tokens": 5,
+    "main_target_tokens": 48,
+    "main_routed_rows": 288,
+    "draft_query_tokens": 40,
+    "draft_routed_rows": 240,
+    "topk": 6,
+    "hidden_size": 4096,
+    "intermediate_size": 2048,
+    "local_experts": 32,
+    "lora_rank": 16,
+    "target_layers": 43,
+    "draft_layers_seen_per_gap": 3
+  },
+  "activation_semantics": "Main legacy routed SwiGlu(288x4096) has attr_0:-1 and no routed activation clamp. A candidate native moe_lora_activation kernel implements the same limit0 path; its dispatch semantics must be corroborated with source and installed operator validation because custom shapes/attributes may be N/A. Limit10 clamps have shape48x256 and belong to TP-sharded shared activation. Gap draft GroupedMatmulSwigluQuant has240 routed rows.",
+  "main_device_span_ms": {
+    "count": 5,
+    "mean": 66.4014424,
+    "median": 66.428435,
+    "min": 65.920856,
+    "max": 67.073301
+  },
+  "main_noncomm_compute_union_ms": {
+    "count": 5,
+    "mean": 58.4130104,
+    "median": 58.47503,
+    "min": 58.039694,
+    "max": 58.687365
+  },
+  "main_compute_and_aiv_union_ms": {
+    "count": 5,
+    "mean": 64.5176168,
+    "median": 64.522032,
+    "min": 64.026686,
+    "max": 65.206682
+  },
+  "main_summed_compute_and_aiv_ms": {
+    "count": 5,
+    "mean": 66.69653939999999,
+    "median": 66.699621,
+    "min": 66.211106,
+    "max": 67.378171
+  },
+  "groups": {
+    "routed_lora_bgmv": {
+      "calls_per_replay": 215,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 8.805095,
+        "median": 8.795047,
+        "min": 8.766991,
+        "max": 8.855959
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 8.805095,
+        "median": 8.795047,
+        "min": 8.766991,
+        "max": 8.855959
+      }
+    },
+    "native_pair_shrink": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.8993148,
+        "median": 1.90781,
+        "min": 1.865874,
+        "max": 1.937281
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.8993148,
+        "median": 1.90781,
+        "min": 1.865874,
+        "max": 1.937281
+      }
+    },
+    "legacy_single_shrink": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 2.8540646,
+        "median": 2.857677,
+        "min": 2.828194,
+        "max": 2.888293
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 2.8540646,
+        "median": 2.857677,
+        "min": 2.828194,
+        "max": 2.888293
+      }
+    },
+    "native_activation_quant": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.8394804,
+        "median": 0.839132,
+        "min": 0.837574,
+        "max": 0.842352
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.8394804,
+        "median": 0.839132,
+        "min": 0.837574,
+        "max": 0.842352
+      }
+    },
+    "shared_lora_sgmv": {
+      "calls_per_replay": 258,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.2871534,
+        "median": 4.285347,
+        "min": 4.284206,
+        "max": 4.294791
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.2871534,
+        "median": 4.285347,
+        "min": 4.284206,
+        "max": 4.294791
+      }
+    },
+    "ep_inverse_routing_recovery": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.4916638,
+        "median": 0.491483,
+        "min": 0.489119,
+        "max": 0.493559
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.4916638,
+        "median": 0.491483,
+        "min": 0.489119,
+        "max": 0.493559
+      }
+    },
+    "combined_lora_slot_metadata": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.321933,
+        "median": 0.322137,
+        "min": 0.320673,
+        "max": 0.322656
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.321933,
+        "median": 0.322137,
+        "min": 0.320673,
+        "max": 0.322656
+      }
+    },
+    "routed_lora_zero_intermediates": {
+      "calls_per_replay": 86,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.198433,
+        "median": 0.19847,
+        "min": 0.197471,
+        "max": 0.198987
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.198433,
+        "median": 0.19847,
+        "min": 0.197471,
+        "max": 0.198987
+      }
+    },
+    "routed_mask_and_buffer_copy": {
+      "calls_per_replay": 258,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 3.9206646,
+        "median": 3.921942,
+        "min": 3.917082,
+        "max": 3.923253
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 3.9206646,
+        "median": 3.921942,
+        "min": 3.917082,
+        "max": 3.923253
+      }
+    },
+    "routed_swiglu_and_output_quant": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.8394804,
+        "median": 0.839132,
+        "min": 0.837574,
+        "max": 0.842352
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.8394804,
+        "median": 0.839132,
+        "min": 0.837574,
+        "max": 0.842352
+      }
+    },
+    "routed_input_quant": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.5469350000000001,
+        "median": 0.546904,
+        "min": 0.54622,
+        "max": 0.547645
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.5469350000000001,
+        "median": 0.546904,
+        "min": 0.54622,
+        "max": 0.547645
+      }
+    },
+    "mtp_full_buffer_moves": {
+      "calls_per_replay": 0,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "base_expert_grouped_matmuls": {
+      "calls_per_replay": 86,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 8.520375399999999,
+        "median": 8.566424,
+        "min": 8.179967,
+        "max": 8.79203
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 8.520375399999999,
+        "median": 8.566424,
+        "min": 8.179967,
+        "max": 8.79203
+      }
+    },
+    "hc_pre_post": {
+      "calls_per_replay": 172,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.9468672,
+        "median": 4.94536,
+        "min": 4.943443,
+        "max": 4.951098
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.9468672,
+        "median": 4.94536,
+        "min": 4.943443,
+        "max": 4.951098
+      }
+    },
+    "attention_indexer_compression": {
+      "calls_per_replay": 188,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 6.9462316,
+        "median": 6.953993,
+        "min": 6.898957,
+        "max": 6.963313
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 6.9462316,
+        "median": 6.953993,
+        "min": 6.898957,
+        "max": 6.963313
+      }
+    },
+    "allreduce_aiv": {
+      "calls_per_replay": 87,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 6.1046064,
+        "median": 6.047002,
+        "min": 5.371553,
+        "max": 7.166988
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 6.1046064,
+        "median": 6.047002,
+        "min": 5.371553,
+        "max": 7.166988
+      }
+    }
+  },
+  "routing_recovery_pattern": {
+    "layers": 43,
+    "kernels_per_layer": 1,
+    "pattern": [
+      [
+        "ep_routing_iii_10",
+        "N/A"
+      ]
+    ]
+  },
+  "combined_metadata_pattern": {
+    "layers": 43,
+    "kernels_per_layer": 1,
+    "pattern": [
+      [
+        "moe_lora_combined_i64_9",
+        "N/A"
+      ]
+    ]
+  },
+  "last_steady_gap_span_ms": {
+    "count": 4,
+    "mean": 37.687477,
+    "median": 37.708488,
+    "min": 37.477079,
+    "max": 37.855853
+  },
+  "communication_kernel_details_all11": {
+    "hcom_allReduce": {
+      "calls_per_replay": 87.0,
+      "summed_device_ms_per_replay": 6.642008000000002
+    }
+  },
+  "graph_execute_host_calls": [
+    [
+      1791314238108060590,
+      1791314238113010750,
+      305787
+    ],
+    [
+      1791314257950291880,
+      1791314257955907570,
+      635096
+    ],
+    [
+      1791314258060765410,
+      1791314258060782690,
+      638945
+    ],
+    [
+      1791314258164920280,
+      1791314258164944660,
+      642795
+    ],
+    [
+      1791314258271115580,
+      1791314258271132260,
+      646644
+    ],
+    [
+      1791314258378604860,
+      1791314258378620650,
+      650494
+    ],
+    [
+      1791314258485172740,
+      1791314258485188180,
+      654569
+    ],
+    [
+      1791314258590673470,
+      1791314258590697730,
+      658419
+    ],
+    [
+      1791314258695495140,
+      1791314258695510050,
+      662269
+    ],
+    [
+      1791314258799614350,
+      1791314258799630430,
+      666121
+    ],
+    [
+      1791314258903709320,
+      1791314258903725290,
+      669969
+    ],
+    [
+      1791314259007479140,
+      1791314259007494770,
+      673819
+    ]
+  ],
+  "swiglu_host_api_counts": {
+    "npu::npu_swiglu": 344,
+    "aclnnSwiGlu": 344,
+    "_C_ascend::grouped_matmul_swiglu_quant_weight_nz": 60,
+    "aclnnGroupedMatmulSwigluQuantWeightNZ": 60,
+    "_C_ascend::npu_dequant_swiglu_quant": 60,
+    "aclnnDequantSwigluQuantV2": 60
+  },
+  "limitations": [
+    "Profile is8K-input/128-output/C8 and is excluded from formal8192/4096 performance.",
+    "Only rank0/device8 was parsed; other ranks may contain different waiting time.",
+    "No full43-layer CPU/device trace attribution or cross-rank critical-path calculation.",
+    "Adapter sampled A/B values were zero; adapter quality and complete nonzero status are unverified.",
+    "Nested host API/scope durations overlap; their summed columns must not be added together.",
+    "Gap AIV union is a tracked communication subset; some collectives use other device tasks.",
+    "native_pair_shrink/legacy_single_shrink overlap routed_lora_bgmv scope; native_activation_quant overlaps activation scope."
+  ],
+  "portable_evidence": {
+    "original_artifact_sha256": "9624e09eb82e58287e1f0e799fb55dc39e2fc4f8c139ecc0c69534d62d00dc29",
+    "omitted_fields": [
+      "steps",
+      "operations",
+      "inter_main_gaps"
+    ],
+    "measurement_values_preserved": true,
+    "raw_profiler_included": false
+  }
+}

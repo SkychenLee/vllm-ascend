@@ -22,12 +22,14 @@
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "ops.h"
 #include "bgmv_shrink_pair_validation.h"
+#include "kernels/bgmv_shrink_pair_config.h"
 #include <ATen/MemoryOverlap.h>
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
@@ -329,6 +331,16 @@ void bgmv_shrink_pair(const at::Tensor& x, const at::Tensor& weight0, const at::
         return;
     }
     const c10_npu::NPUGuard device_guard(x.device());
+    if (x.size(1) == MOE_LORA_SHRINK_PAIR_HIDDEN && y_pair.size(2) == MOE_LORA_SHRINK_PAIR_RANK &&
+        x.size(0) <= MOE_LORA_SHRINK_PAIR_MAX_ROWS) {
+        // Logical contiguity does not guarantee row-major physical storage.
+        // Query descriptors only on NPU dispatch, never Meta/FakeTensor.
+        for (const auto& tensor : {x, weight0, weight1, indices, y_pair}) {
+            const auto format = at_npu::native::get_npu_format(tensor);
+            TORCH_CHECK(format == ACL_FORMAT_ND || format == ACL_FORMAT_NCHW,
+                        "bgmv_shrink_pair: Decode fusion requires ND/base storage (format 0 or 2)");
+        }
+    }
     int32_t device_id = -1;
     TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS,
                 "bgmv_shrink_pair: cannot query the current NPU device");
@@ -351,8 +363,8 @@ void bgmv_shrink_pair(const at::Tensor& x, const at::Tensor& weight0, const at::
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_shrink_pair");
     cmd.SetCustomHandler([=]() -> int {
-        // The native host owns plane/base alignment and core-count fallback.
-        // It preserves two single launches when parallel planes are unsuitable.
+        // The specialized Decode shape shares X in one launch. Other shapes
+        // retain the original two-launch pair implementation.
         bgmv_shrink_pair_impl(dtype, stream, x_ptr, weight0_ptr, weight1_ptr, indices_ptr,
                               rows, y_ptr, rows, cores, hidden, rank, scale_f);
         return 0;

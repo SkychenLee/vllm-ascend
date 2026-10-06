@@ -62,6 +62,61 @@ def state_for(methods, dtype=torch.bfloat16, enabled=True):
     return state
 
 
+def initialize_mtp_buffer(enabled, method, runner_v2):
+    """Execute the real constructor's buffer setup with a CPU-only model shell."""
+    tree = ast.parse(MODEL_PATH.read_text())
+    model = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DeepseekV4Model")
+    initializer = next(node for node in model.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    selected = [
+        node
+        for node in initializer.body
+        if isinstance(node, ast.Assign)
+        and any(
+            (isinstance(target, ast.Name) and target.id in {"speculative_config", "skip_mtp_buffer"})
+            or (isinstance(target, ast.Attribute) and target.attr in {"_mtp_hidden_buffer", "_mtp_buffer_row_indices"})
+            for target in node.targets
+        )
+    ]
+    allocations = SimpleNamespace(empty=Mock(wraps=torch.empty), arange=Mock(wraps=torch.arange), int64=torch.int64)
+    config = SimpleNamespace(
+        speculative_config=None if method is None else SimpleNamespace(use_dspark=lambda: method == "dspark"),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    state = SimpleNamespace(device="cpu")
+    namespace = {
+        "self": state,
+        "torch": allocations,
+        "vllm_config": config,
+        "hc_dim": 12,
+        "envs": SimpleNamespace(VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY=enabled),
+        "vllm_envs": SimpleNamespace(VLLM_USE_V2_MODEL_RUNNER=runner_v2),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(MODEL_PATH), "exec"), namespace)
+    return state, allocations
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("method", [None, "mtp", "dspark", "eagle3"])
+@pytest.mark.parametrize("runner_v2", [False, True, None])
+def test_only_explicit_v1_dspark_skips_mtp_allocations(enabled, method, runner_v2):
+    state, allocations = initialize_mtp_buffer(enabled, method, runner_v2)
+    skip = enabled and method == "dspark" and runner_v2 is False
+    if skip:
+        assert state._mtp_hidden_buffer is None
+        assert state._mtp_buffer_row_indices is None
+        allocations.empty.assert_not_called()
+        allocations.arange.assert_not_called()
+    else:
+        assert state._mtp_hidden_buffer.shape == (32, 12)
+        allocations.empty.assert_called_once()
+        assert allocations.arange.call_count == int(enabled)
+        if enabled:
+            assert torch.equal(state._mtp_buffer_row_indices, torch.arange(32)[:, None])
+        else:
+            assert state._mtp_buffer_row_indices is None
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_model_initializer_allocates_persistent_indices_only_when_enabled(enabled):
     tree = ast.parse(MODEL_PATH.read_text())
@@ -168,3 +223,55 @@ def test_forward_refreshes_through_same_helper_after_sp_gather(methods, sp, padd
     assert gather.call_count == int(sp)
     if sp:
         assert gather.call_args.kwargs == {"dim": 0}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("method", [None, "mtp", "dspark"])
+@pytest.mark.parametrize("runner_v2", [False, True, None])
+@pytest.mark.parametrize("tp_size", [1, 8])
+@pytest.mark.parametrize("sp", [False, True])
+def test_speculative_mode_preserves_aux_and_target_output(methods, enabled, method, runner_v2, tp_size, sp):
+    namespace, _, gather, context = methods
+    state, _ = initialize_mtp_buffer(enabled, method, runner_v2)
+    source = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4).to(torch.bfloat16)
+    expected_hidden = source + 1
+
+    class Layer:
+        layer_idx = 0
+
+        def __call__(self, positions, states, *args):
+            return states + 1, None
+
+    state.layers = [Layer()]
+    state.start_layer, state.end_layer = 0, 1
+    state.aux_hidden_state_layers = {1}
+    state.hc_head_fn = state.hc_head_scale = state.hc_head_base = None
+    state.hc_head = Mock(side_effect=lambda hidden, *args: hidden.mean(dim=1))
+    state.norm = Mock(side_effect=lambda hidden: hidden + 2)
+    state._copy_mtp_hidden_states = Mock(side_effect=MethodType(namespace["_copy_mtp_hidden_states"], state))
+    namespace["get_pp_group"]().is_last_rank = True
+    if sp:
+        context.get_forward_context.return_value = SimpleNamespace(flash_comm_v1_enabled=True, pad_size=0)
+        gather.return_value = torch.cat([expected_hidden.flatten(1)] * tp_size, dim=0)
+
+    output, aux = namespace["forward"](state, None, torch.arange(3), {"hidden_states": source})
+    assert torch.equal(output, expected_hidden.mean(dim=1) + 2)
+    assert len(aux) == 1 and torch.equal(aux[0], expected_hidden.mean(dim=1))
+    assert torch.equal(state.hc_head.call_args.args[0], expected_hidden)
+    skip = enabled and method == "dspark" and runner_v2 is False
+    if skip:
+        context.get_forward_context.assert_not_called()
+        gather.assert_not_called()
+        state._copy_mtp_hidden_states.assert_not_called()
+    else:
+        expected_stash = gather.return_value if sp else expected_hidden.flatten(1)
+        state._copy_mtp_hidden_states.assert_called_once()
+        assert torch.equal(state._mtp_hidden_buffer[: expected_stash.shape[0]], expected_stash)
+        assert gather.call_count == int(sp)
+
+
+def test_disabled_buffer_helper_does_not_write(methods):
+    state = state_for(methods)
+    state._mtp_hidden_buffer = state._mtp_buffer_row_indices = None
+    assert state._copy_mtp_hidden_states(torch.zeros(3, 12)) is None
+    methods[1].npu_scatter_nd_update_.assert_not_called()

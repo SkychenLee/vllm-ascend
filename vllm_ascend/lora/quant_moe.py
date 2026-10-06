@@ -25,7 +25,6 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
@@ -33,6 +32,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.activation import can_fuse_moe_lora_activation
 from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
+from vllm_ascend.lora.cube_moe import supports_cube_target_prefill_context
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
@@ -256,11 +256,7 @@ def _apply_dynamic_int8_moe_lora(
         cube_forward = get_forward_context()
         # Only actual eager Prefill can read counts back. Profile/dummy without
         # attention metadata and all graph modes retain the original BGMV path.
-        if (
-            cube_forward.cudagraph_runtime_mode == CUDAGraphMode.NONE
-            and not getattr(cube_forward, "in_profile_run", True)
-            and cube_forward.attn_metadata is not None
-        ):
+        if supports_cube_target_prefill_context(cube_forward):
             cube_routing = cube_state.prepare(
                 hidden_states,
                 mlp_compute_input.group_list,

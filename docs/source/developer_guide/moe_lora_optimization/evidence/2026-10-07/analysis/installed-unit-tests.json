@@ -1,0 +1,13 @@
+{
+  "source": "{installed_repo}/vllm_ascend/__init__.py",
+  "exit_code": 0,
+  "tests": [
+    "tests/ut/lora/test_float_moe_shrink_pair.py",
+    "tests/ut/lora/test_decode_moe_lora.py",
+    "tests/ut/lora/test_cube_dspark.py",
+    "tests/ut/lora/test_quant_moe.py",
+    "tests/ut/models/test_deepseek_v4_mtp_copy.py",
+    "tests/ut/compilation/test_compiler_hash.py"
+  ],
+  "timestamp_unix": 1791312408.1231654
+}

@@ -9,7 +9,11 @@ import torch_npu
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import MoECommType
 
-MAX_FUSED_ACTIVATION_ROWS = 48
+MAX_FUSED_ACTIVATION_ROWS = 288
+# Positive clipping removes the separate clamp/cat kernels as well as SwiGLU
+# and quantization. The larger region is useful for speculative Decode; keep
+# unclipped inputs in the separately measured region.
+MAX_FUSED_CLIPPED_ACTIVATION_ROWS = 384
 FUSED_ACTIVATION_WIDTH = 2048
 MAX_FUSED_ACTIVATION_LIMIT = 65504
 
@@ -28,7 +32,9 @@ def can_fuse_moe_lora_activation(gate_up_out, mlp_compute_input, comm_type) -> b
         and gate_up_out.device.type == "npu"
         and gate_up_out.dtype in (torch.bfloat16, torch.float16)
         and gate_up_out.ndim == 2
-        and 0 < gate_up_out.shape[0] <= MAX_FUSED_ACTIVATION_ROWS
+        and 0
+        < gate_up_out.shape[0]
+        <= (MAX_FUSED_CLIPPED_ACTIVATION_ROWS if mlp_compute_input.swiglu_limit > 0 else MAX_FUSED_ACTIVATION_ROWS)
         and gate_up_out.shape[1] == 2 * FUSED_ACTIVATION_WIDTH
         and gate_up_out.is_contiguous()
         # FakeTensor has no storage descriptor. The runtime C++ dispatch

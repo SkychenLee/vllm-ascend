@@ -1,0 +1,479 @@
+{
+  "status": "VALID_COMPARISON",
+  "candidate": "optimized",
+  "contract": {
+    "baseline": {
+      "argv_without_profiler": [
+        "vllm",
+        "serve",
+        "{model_path}",
+        "--safetensors-load-strategy",
+        "prefetch",
+        "--max-model-len",
+        "128000",
+        "--max-num-batched-tokens",
+        "16384",
+        "--served-model-name",
+        "ds",
+        "--gpu-memory-utilization",
+        "0.93",
+        "--max-num-seqs",
+        "8",
+        "--data-parallel-size",
+        "1",
+        "--tensor-parallel-size",
+        "8",
+        "--quantization",
+        "ascend",
+        "--port",
+        "8888",
+        "--block-size",
+        "32",
+        "--enable-chunked-prefill",
+        "--enable-prefix-caching",
+        "--tokenizer-mode",
+        "deepseek_v4",
+        "--tool-call-parser",
+        "deepseek_v4",
+        "--enable-expert-parallel",
+        "--enable-auto-tool-choice",
+        "--reasoning-parser",
+        "deepseek_v4",
+        "--async-scheduling",
+        "--compilation-config",
+        "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}",
+        "--additional-config",
+        "{\"ascend_compilation_config\":{\"enable_npugraph_ex\":true,\"enable_static_kernel\":false},\"enable_cpu_binding\": \"true\",\"multistream_overlap_shared_expert\":false,\"moe_lora_ep_backend\":\"allgather\"}",
+        "--speculative-config",
+        "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"greedy\"}",
+        "--enable-lora",
+        "--lora-target-modules",
+        "experts",
+        "gate_up_proj",
+        "down_proj",
+        "--lora-modules",
+        "lora1={adapter_path}",
+        "--max-lora-rank",
+        "16",
+        "--max-loras",
+        "3"
+      ],
+      "fixed_env": {
+        "FLA_NPU_DISABLE_PTH": "1",
+        "GLOO_SOCKET_IFNAME": "lo",
+        "VLLM_DISABLE_COMPILE_CACHE": "1",
+        "VLLM_ASCEND_DISABLE_PIN_MEMORY": "1",
+        "OMP_PROC_BIND": "false",
+        "OMP_NUM_THREADS": "10",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "TASK_QUEUE_ENABLE": "1",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "HCCL_BUFFSIZE": "512",
+        "ASCEND_RT_VISIBLE_DEVICES": "8,9,10,11,12,13,14,15",
+        "VLLM_ASCEND_DECODE_GRAPH_EVIDENCE": "0"
+      },
+      "optimization_flags": {
+        "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION": "0",
+        "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": "0",
+        "VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR": "0",
+        "VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL": "0",
+        "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY": "0"
+      },
+      "sha256": "467898db813b7d1af93e0c2bd1aad6f891ba120d8494abf7a5e37233e2a1928f"
+    },
+    "optimized": {
+      "argv_without_profiler": [
+        "vllm",
+        "serve",
+        "{model_path}",
+        "--safetensors-load-strategy",
+        "prefetch",
+        "--max-model-len",
+        "128000",
+        "--max-num-batched-tokens",
+        "16384",
+        "--served-model-name",
+        "ds",
+        "--gpu-memory-utilization",
+        "0.93",
+        "--max-num-seqs",
+        "8",
+        "--data-parallel-size",
+        "1",
+        "--tensor-parallel-size",
+        "8",
+        "--quantization",
+        "ascend",
+        "--port",
+        "8888",
+        "--block-size",
+        "32",
+        "--enable-chunked-prefill",
+        "--enable-prefix-caching",
+        "--tokenizer-mode",
+        "deepseek_v4",
+        "--tool-call-parser",
+        "deepseek_v4",
+        "--enable-expert-parallel",
+        "--enable-auto-tool-choice",
+        "--reasoning-parser",
+        "deepseek_v4",
+        "--async-scheduling",
+        "--compilation-config",
+        "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}",
+        "--additional-config",
+        "{\"ascend_compilation_config\":{\"enable_npugraph_ex\":true,\"enable_static_kernel\":false},\"enable_cpu_binding\": \"true\",\"multistream_overlap_shared_expert\":false,\"moe_lora_ep_backend\":\"allgather\"}",
+        "--speculative-config",
+        "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"greedy\"}",
+        "--enable-lora",
+        "--lora-target-modules",
+        "experts",
+        "gate_up_proj",
+        "down_proj",
+        "--lora-modules",
+        "lora1={adapter_path}",
+        "--max-lora-rank",
+        "16",
+        "--max-loras",
+        "3"
+      ],
+      "fixed_env": {
+        "FLA_NPU_DISABLE_PTH": "1",
+        "GLOO_SOCKET_IFNAME": "lo",
+        "VLLM_DISABLE_COMPILE_CACHE": "1",
+        "VLLM_ASCEND_DISABLE_PIN_MEMORY": "1",
+        "OMP_PROC_BIND": "false",
+        "OMP_NUM_THREADS": "10",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "TASK_QUEUE_ENABLE": "1",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "HCCL_BUFFSIZE": "512",
+        "ASCEND_RT_VISIBLE_DEVICES": "8,9,10,11,12,13,14,15",
+        "VLLM_ASCEND_DECODE_GRAPH_EVIDENCE": "0"
+      },
+      "optimization_flags": {
+        "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION": "1",
+        "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": "1",
+        "VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR": "1",
+        "VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL": "1",
+        "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY": "1"
+      },
+      "sha256": "9ab45c1e5964b69572de9bb89c90a73d2d866da3ac70e341702d5cbc541042cd"
+    }
+  },
+  "prompt_sha256": "69e1529bfb3b8225c8ea57ff4228c3ab36e191e321af9dd8819ac63893de4ff7",
+  "comparisons": {
+    "measurement_wall_s": {
+      "baseline": 126.3063617600128,
+      "candidate": 117.63395745999878,
+      "candidate_vs_baseline_percent": -6.86616586779053
+    },
+    "effective_output_tokens_per_second": {
+      "baseline": 259.43269636932877,
+      "candidate": 278.5590207754653,
+      "candidate_vs_baseline_percent": 7.372364653261854
+    },
+    "ttft_s": {
+      "mean": {
+        "baseline": 17.55026039250515,
+        "candidate": 13.484377998749551,
+        "candidate_vs_baseline_percent": -23.16707731294937
+      },
+      "p50": {
+        "baseline": 17.96394645998953,
+        "candidate": 13.797042724996572,
+        "candidate_vs_baseline_percent": -23.195926041495152
+      },
+      "p95": {
+        "baseline": 27.73010670501972,
+        "candidate": 21.318258712478567,
+        "candidate_vs_baseline_percent": -23.12233436656944
+      }
+    },
+    "tpot_ms": {
+      "mean": {
+        "baseline": 23.084438055249386,
+        "candidate": 20.106955226496904,
+        "candidate_vs_baseline_percent": -12.898225296306942
+      },
+      "p50": {
+        "baseline": 22.815039769229813,
+        "candidate": 19.34720264957116,
+        "candidate_vs_baseline_percent": -15.199785556962542
+      },
+      "p95": {
+        "baseline": 28.475437847001484,
+        "candidate": 25.326538960809305,
+        "candidate_vs_baseline_percent": -11.058298394255461
+      }
+    },
+    "latency_s": {
+      "mean": {
+        "baseline": 112.08119614001043,
+        "candidate": 95.82249323000724,
+        "candidate_vs_baseline_percent": -14.506182544387759
+      },
+      "p50": {
+        "baseline": 110.70273282000562,
+        "candidate": 88.55894014498335,
+        "candidate_vs_baseline_percent": -20.002932277224282
+      },
+      "p95": {
+        "baseline": 123.72262148801529,
+        "candidate": 116.98787658000947,
+        "candidate_vs_baseline_percent": -5.443422412980636
+      }
+    }
+  },
+  "speculative_metrics": {
+    "baseline": {
+      "counter_deltas": {
+        "python_gc_objects_collected_total": 0.0,
+        "python_gc_objects_uncollectable_total": 0.0,
+        "python_gc_collections_total": 3.0,
+        "process_cpu_seconds_total": 0.8900000000000006,
+        "vllm:spec_decode_num_drafts_total": 6191.0,
+        "vllm:spec_decode_num_draft_tokens_total": 30955.0,
+        "vllm:spec_decode_num_accepted_tokens_total": 26580.0,
+        "vllm:spec_decode_num_accepted_tokens_per_pos_total": 26580.0,
+        "vllm:estimated_flops_per_gpu_total": 0.0,
+        "vllm:estimated_read_bytes_per_gpu_total": 0.0,
+        "vllm:estimated_write_bytes_per_gpu_total": 0.0,
+        "vllm:prefix_cache_queries_total": 90112.0,
+        "vllm:prefix_cache_hits_total": 0.0,
+        "vllm:external_prefix_cache_queries_total": 0.0,
+        "vllm:external_prefix_cache_hits_total": 0.0,
+        "vllm:mm_cache_queries_total": 0.0,
+        "vllm:mm_cache_hits_total": 0.0,
+        "vllm:num_preemptions_total": 0.0,
+        "vllm:prompt_tokens_total": 65536.0,
+        "vllm:prompt_tokens_by_source_total": 65536.0,
+        "vllm:prompt_tokens_cached_total": 0.0,
+        "vllm:generation_tokens_total": 32768.0,
+        "vllm:request_success_total": 8.0,
+        "http_requests_total": 8.0,
+        "vllm:tool_call_parser_invocations_total": 0.0
+      },
+      "counter_resets": [],
+      "drafts": 6191.0,
+      "draft_tokens": 30955.0,
+      "accepted_draft_tokens": 26580.0,
+      "draft_acceptance_rate": 0.8586658052010984,
+      "mean_acceptance_length_including_bonus": 5.293329026005492,
+      "scope": "Global server counters across snapshot interval; valid request attribution requires an otherwise idle server."
+    },
+    "optimized": {
+      "counter_deltas": {
+        "python_gc_objects_collected_total": 0.0,
+        "python_gc_objects_uncollectable_total": 0.0,
+        "python_gc_collections_total": 3.0,
+        "process_cpu_seconds_total": 1.0500000000000007,
+        "vllm:spec_decode_num_drafts_total": 6382.0,
+        "vllm:spec_decode_num_draft_tokens_total": 31910.0,
+        "vllm:spec_decode_num_accepted_tokens_total": 26396.0,
+        "vllm:spec_decode_num_accepted_tokens_per_pos_total": 26396.0,
+        "vllm:estimated_flops_per_gpu_total": 0.0,
+        "vllm:estimated_read_bytes_per_gpu_total": 0.0,
+        "vllm:estimated_write_bytes_per_gpu_total": 0.0,
+        "vllm:prefix_cache_queries_total": 90112.0,
+        "vllm:prefix_cache_hits_total": 0.0,
+        "vllm:external_prefix_cache_queries_total": 0.0,
+        "vllm:external_prefix_cache_hits_total": 0.0,
+        "vllm:mm_cache_queries_total": 0.0,
+        "vllm:mm_cache_hits_total": 0.0,
+        "vllm:num_preemptions_total": 0.0,
+        "vllm:prompt_tokens_total": 65536.0,
+        "vllm:prompt_tokens_by_source_total": 65536.0,
+        "vllm:prompt_tokens_cached_total": 0.0,
+        "vllm:generation_tokens_total": 32768.0,
+        "vllm:request_success_total": 8.0,
+        "http_requests_total": 8.0,
+        "vllm:tool_call_parser_invocations_total": 0.0
+      },
+      "counter_resets": [],
+      "drafts": 6382.0,
+      "draft_tokens": 31910.0,
+      "accepted_draft_tokens": 26396.0,
+      "draft_acceptance_rate": 0.8272015042306488,
+      "mean_acceptance_length_including_bonus": 5.136007521153243,
+      "scope": "Global server counters across snapshot interval; valid request attribution requires an otherwise idle server."
+    }
+  },
+  "startup_memory": {
+    "baseline": {
+      "kv_capacity_tokens": 128438,
+      "available_kv_memory_gib_logged": [
+        10.33
+      ]
+    },
+    "optimized": {
+      "kv_capacity_tokens": 128277,
+      "available_kv_memory_gib_logged": [
+        10.32
+      ]
+    }
+  },
+  "owners": {
+    "baseline": {
+      "started_at_unix": 1791310252.5188112,
+      "container": "ds-ltc-v25-ep",
+      "pid": 82570,
+      "pgid": 82570,
+      "startticks": "29580369",
+      "argv": [
+        "/bin/sh",
+        "{experiment_root}/bench/launch_baseline.sh"
+      ],
+      "cwd": "{installed_repo}",
+      "server_log": "{experiment_root}/bench/baseline-server.log",
+      "visible_devices": "8,9,10,11,12,13,14,15",
+      "launcher_sha256": "467898db813b7d1af93e0c2bd1aad6f891ba120d8494abf7a5e37233e2a1928f",
+      "model_config_sha256": "6c6cdc4a47e00e41137081429b95bd5c1cf91ba62e87309d1398431de7f4a8e1",
+      "adapter_config_sha256": "ea858f7f6cd8c4dc3d3a6bab8a126e26e7e539b4c48481e10741be30340118ec",
+      "source_hashes": {
+        "{installed_repo}/vllm_ascend/envs.py": "ca35cba2b1f7e725f1593c11e127232e59286f0ff038d3d27260e9fee604b513",
+        "{installed_repo}/vllm_ascend/lora/activation.py": "e8ba4d3103cd1b204abf11009d550009294a1373d92c7170af9225b0cb6c8296",
+        "{installed_repo}/vllm_ascend/lora/quant_moe.py": "3e11795136afea1b1dc2699d6a5a32edb42b87fa1671510792af43e86aa76aef",
+        "{installed_repo}/vllm_ascend/lora/fused_moe.py": "a8846e6f90ffbfe77e895478d3877b7c3b5184e051c88dac846eefea4d35c624",
+        "{installed_repo}/vllm_ascend/lora/routing.py": "a71de30ebf28b9dc43880cd27d514a175c5cf8ac85a0e91b221993304fe092a7",
+        "{installed_repo}/csrc/moe_lora_activation.cpp": "a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e",
+        "{installed_repo}/csrc/kernels/moe_lora_activation.cpp": "368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9",
+        "{installed_repo}/csrc/kernels/moe_lora_activation.h": "a1d915fb81be26ad17c7e34209c5496c4d9ded4eab5bec3c5e7b6a62df66987c",
+        "{installed_repo}/csrc/moe_lora_ep_routing.cpp": "14720e1cdb90e03d5bd0a54fafee6a69981aadb85a269db06839b364c72ecde0",
+        "{installed_repo}/csrc/kernels/moe_lora_ep_routing.cpp": "0453e2dbe84444296b6aee7851d3ee2e4126598db2140e480b8b90a376f11de6",
+        "{installed_repo}/csrc/kernels/moe_lora_ep_routing.h": "e8b87b54ff893afa06991763a1a0277ec6dccdaae90e23f78789b9bd61875482",
+        "{installed_repo}/tests/ut/lora/test_decode_moe_lora.py": "3afbd4ef7d4bd12e5c979138ce4c4ea4bfa9498dc4247b71aaa8a79969ccc68c",
+        "{installed_repo}/tests/ut/lora/test_ep_routing_fusion.py": "6fd5d490d574c90931e53685d6fd9ce638c1c78eb03df53371ac921d16752eab",
+        "{installed_repo}/benchmarks/benchmark_moe_lora_decode.py": "19075e19487eb19cd37d65cf7dccc221f6a7a157d8d1747ec9fb6cabe43db642",
+        "{installed_repo}/vllm_ascend/models/deepseek_v4.py": "d3172918978c5ea4da3df03e0c23cf7e33dd110660f2f384c36efa1e326b7f7e",
+        "{installed_repo}/tests/ut/models/test_deepseek_v4_mtp_copy.py": "9c14ce5d372dbd543cd5a05ac4e004e073bb143b6b0fca8d9a9ac156e5c8c2f7",
+        "{installed_repo}/vllm_ascend/compilation/compiler_interface.py": "77861bac21cf55d6ec7515ece2003d49aa3005dc8f0a7bc3163ec2ca76c8c8c1",
+        "{installed_repo}/vllm_ascend/patch/platform/patch_compile_cache.py": "f4298f84390f0d3f7bf612351be2a09be155517a85e3626ce6f8ac95b8efa0b9",
+        "{installed_repo}/tests/ut/compilation/test_compiler_hash.py": "d63a300ab4b6ee32d6402e0041f5221924a30a13daf8d9f7bdb4144f7faa60f6",
+        "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": "360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839",
+        "{installed_repo}/vllm_ascend/libvllm_ascend_kernels.so": "9be9047e3d41c1155458433de43b1bfceb6f1c3b01601279739dc9f052d9c6cf"
+      }
+    },
+    "optimized": {
+      "started_at_unix": 1791313749.8205824,
+      "container": "ds-ltc-v25-ep",
+      "pid": 119690,
+      "pgid": 119690,
+      "startticks": "29930099",
+      "argv": [
+        "/bin/sh",
+        "{experiment_root}/bench/launch_optimized.sh"
+      ],
+      "cwd": "{installed_repo}",
+      "server_log": "{experiment_root}/bench/optimized-server.log",
+      "visible_devices": "8,9,10,11,12,13,14,15",
+      "launcher_sha256": "9ab45c1e5964b69572de9bb89c90a73d2d866da3ac70e341702d5cbc541042cd",
+      "model_config_sha256": "6c6cdc4a47e00e41137081429b95bd5c1cf91ba62e87309d1398431de7f4a8e1",
+      "adapter_config_sha256": "ea858f7f6cd8c4dc3d3a6bab8a126e26e7e539b4c48481e10741be30340118ec",
+      "source_hashes": {
+        "{installed_repo}/vllm_ascend/envs.py": "2b12bc29fdce59ef37b341f19755360befde966481c0cd205aa5ff683bf74361",
+        "{installed_repo}/vllm_ascend/lora/activation.py": "e9238576a601bc9f38b78dc97b175954606fe74826ec72e03ed1968cda666b8b",
+        "{installed_repo}/vllm_ascend/lora/quant_moe.py": "7642c5ad2ee16f0e95a616331a7901cfb95cd8f1e4b3d756cdb9aa3acf274506",
+        "{installed_repo}/vllm_ascend/lora/fused_moe.py": "a8846e6f90ffbfe77e895478d3877b7c3b5184e051c88dac846eefea4d35c624",
+        "{installed_repo}/vllm_ascend/lora/routing.py": "a71de30ebf28b9dc43880cd27d514a175c5cf8ac85a0e91b221993304fe092a7",
+        "{installed_repo}/vllm_ascend/lora/combined_indices.py": "b29304c9df821b5d73462d3d6e96a0f9ab4af83778b7dbc8903cf123a30fa029",
+        "{installed_repo}/vllm_ascend/lora/punica_npu.py": "0e39007c4da9ba6de74cea25b69cb32391951a815a6aa3c1f65c58b09659495f",
+        "{installed_repo}/vllm_ascend/lora/cube_moe.py": "8a9e5397f3402f4aab5a2c3806bee8b2d2735942a106ef5d85ddb7ab26ec7186",
+        "{installed_repo}/vllm_ascend/models/deepseek_v4.py": "727dea8949d971873cfe4948b26acff4c5d204235818743f1123f490b8a5f733",
+        "{installed_repo}/vllm_ascend/models/deepseek_v4_dspark.py": "12b4758a01df81f6a5a0d98af411f5296dd4cc39f71fda045bd485f600438746",
+        "{installed_repo}/vllm_ascend/spec_decode/dspark_proposer.py": "916cad15b496ca143e4c5cef627754760089215ad674dde5b9d94003b5c7ccf1",
+        "{installed_repo}/vllm_ascend/compilation/compiler_interface.py": "6e557a39fa7863dce44a0bc04f0aabcd6610cbfcca812058d01d77297f1eca8b",
+        "{installed_repo}/vllm_ascend/patch/platform/patch_compile_cache.py": "772b0db298fe0c4f59eb16edd87486df6a82cc8a936118521ccb1e5fa75e762b",
+        "{installed_repo}/csrc/kernels/bgmv_shrink.cpp": "600974537f5db6f7057fa9cb22a1896cc85b8a8d04c4ad411bfc91487cf5d92f",
+        "{installed_repo}/csrc/kernels/bgmv_shrink_pair_config.h": "68364907d8b5a7cc7257bdc5bc8684162564839888473bcee5322645d923ce07",
+        "{installed_repo}/csrc/bgmv_shrink_pair_validation.h": "deec37900faf1e72d979dc58ada44e709fdbc036354526c380a6380744f81b28",
+        "{installed_repo}/csrc/torch_binding.cpp": "454f6be60f64c8da39ea7128f68de9063816a653f3b559f5f657a50a86b402d9",
+        "{installed_repo}/csrc/torch_binding_meta.cpp": "261dfafe1193858c696679f218a8398977be5985990e8112fb0a480fb944a497",
+        "{installed_repo}/csrc/moe_lora_activation.cpp": "a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e",
+        "{installed_repo}/csrc/kernels/moe_lora_activation.cpp": "368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9",
+        "{installed_repo}/csrc/kernels/moe_lora_activation.h": "a1d915fb81be26ad17c7e34209c5496c4d9ded4eab5bec3c5e7b6a62df66987c",
+        "{installed_repo}/csrc/moe_lora_ep_routing.cpp": "14720e1cdb90e03d5bd0a54fafee6a69981aadb85a269db06839b364c72ecde0",
+        "{installed_repo}/csrc/kernels/moe_lora_ep_routing.cpp": "0453e2dbe84444296b6aee7851d3ee2e4126598db2140e480b8b90a376f11de6",
+        "{installed_repo}/csrc/kernels/moe_lora_ep_routing.h": "e8b87b54ff893afa06991763a1a0277ec6dccdaae90e23f78789b9bd61875482",
+        "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": "f7355731daa346a7fd7ff87bdaaddbceaea402fb391bcd7339644e8a45c7a674",
+        "{installed_repo}/vllm_ascend/libvllm_ascend_kernels.so": "ff5266af525ae36ea604856c9ddc81fd9bda7bbffc50560a9b441a1f2a9c6894"
+      }
+    }
+  },
+  "output_token_diagnostic": [
+    {
+      "request_index": 0,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 4065
+    },
+    {
+      "request_index": 1,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 4061
+    },
+    {
+      "request_index": 2,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 4096
+    },
+    {
+      "request_index": 3,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 4078
+    },
+    {
+      "request_index": 4,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 2867
+    },
+    {
+      "request_index": 5,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 3075
+    },
+    {
+      "request_index": 6,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 4093
+    },
+    {
+      "request_index": 7,
+      "baseline_count": 4096,
+      "candidate_count": 4096,
+      "identical": false,
+      "different_positions": 3949
+    }
+  ],
+  "limits": [
+    "One unprofiled full run per condition; no statistical repeatability claim.",
+    "Random token workload and sampled-zero adapter do not validate model output quality.",
+    "Flags are a combined candidate, so throughput difference does not identify each flag's contribution.",
+    "Streaming DSpark TPOT is an aggregate token-arrival metric."
+  ],
+  "portable_evidence": {
+    "original_artifact_sha256": "ca2e1e098825e92fcd8b416e20723f60c4ed5b7761359ecf6664eef0ffdea649",
+    "omitted_fields": [
+      "owners.optimized.build_source_manifests",
+      "startup_memory.baseline.cube_decision_lines",
+      "startup_memory.optimized.cube_decision_lines"
+    ],
+    "measurement_values_preserved": true,
+    "raw_profiler_included": false
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "status": "PASS",
+  "mode": "full",
+  "model": "lora1",
+  "seed": 2026100702,
+  "input_tokens_per_request": 8192,
+  "output_tokens_per_request": 4096,
+  "concurrency": 8,
+  "requests": 8,
+  "successful_requests": 8,
+  "measurement_wall_s": 126.3063617600128,
+  "verified_output_tokens": 32768,
+  "effective_output_tokens_per_second": 259.43269636932877,
+  "ttft_s": {
+    "count": 8,
+    "mean": 17.55026039250515,
+    "p50": 17.96394645998953,
+    "p95": 27.73010670501972,
+    "min": 3.563886310032103,
+    "max": 28.977426870027557
+  },
+  "tpot_ms": {
+    "count": 8,
+    "mean": 23.084438055249386,
+    "p50": 22.815039769229813,
+    "p95": 28.475437847001484,
+    "min": 18.57870141880346,
+    "max": 29.9737009743481
+  },
+  "latency_s": {
+    "count": 8,
+    "mean": 112.08119614001043,
+    "p50": 110.70273282000562,
+    "p95": 123.72262148801529,
+    "min": 103.88853986997856,
+    "max": 126.30628324003192
+  },
+  "speculative_metrics": {
+    "counter_deltas": {
+      "python_gc_objects_collected_total": 0.0,
+      "python_gc_objects_uncollectable_total": 0.0,
+      "python_gc_collections_total": 3.0,
+      "process_cpu_seconds_total": 0.8900000000000006,
+      "vllm:spec_decode_num_drafts_total": 6191.0,
+      "vllm:spec_decode_num_draft_tokens_total": 30955.0,
+      "vllm:spec_decode_num_accepted_tokens_total": 26580.0,
+      "vllm:spec_decode_num_accepted_tokens_per_pos_total": 26580.0,
+      "vllm:estimated_flops_per_gpu_total": 0.0,
+      "vllm:estimated_read_bytes_per_gpu_total": 0.0,
+      "vllm:estimated_write_bytes_per_gpu_total": 0.0,
+      "vllm:prefix_cache_queries_total": 90112.0,
+      "vllm:prefix_cache_hits_total": 0.0,
+      "vllm:external_prefix_cache_queries_total": 0.0,
+      "vllm:external_prefix_cache_hits_total": 0.0,
+      "vllm:mm_cache_queries_total": 0.0,
+      "vllm:mm_cache_hits_total": 0.0,
+      "vllm:num_preemptions_total": 0.0,
+      "vllm:prompt_tokens_total": 65536.0,
+      "vllm:prompt_tokens_by_source_total": 65536.0,
+      "vllm:prompt_tokens_cached_total": 0.0,
+      "vllm:generation_tokens_total": 32768.0,
+      "vllm:request_success_total": 8.0,
+      "http_requests_total": 8.0,
+      "vllm:tool_call_parser_invocations_total": 0.0
+    },
+    "counter_resets": [],
+    "drafts": 6191.0,
+    "draft_tokens": 30955.0,
+    "accepted_draft_tokens": 26580.0,
+    "draft_acceptance_rate": 0.8586658052010984,
+    "mean_acceptance_length_including_bonus": 5.293329026005492,
+    "scope": "Global server counters across snapshot interval; valid request attribution requires an otherwise idle server."
+  },
+  "measurement_notes": [
+    "Each request submits exact token IDs; no chat template or client retokenization.",
+    "Independent random prefixes avoid intra-run prefix-cache reuse; repeats of a seed on the same live prefix-caching engine are invalid comparisons.",
+    "TTFT uses first nonempty output-token-ID chunk; TPOT=(last token arrival-first token arrival)/(output_tokens-1).",
+    "DSpark can return multiple tokens per chunk; chunk intervals are not per-token decode latency.",
+    "Output throughput includes full prompt/prefill and all eight requests; only fully verified successful outputs count.",
+    "Profile runs contain profiler overhead and are excluded from performance comparisons.",
+    "Random token performance workload does not establish model/adapter output quality."
+  ]
+}

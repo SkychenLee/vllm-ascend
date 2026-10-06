@@ -1,0 +1,1723 @@
+{
+  "timestamp_unix": 1791311420.6596172,
+  "physical_device": 12,
+  "scope": "Synthetic operator and output initialization; no end-to-end model throughput",
+  "library": "{experiment_root}/analysis/shrink-pair-probe/build/libmoe_shrink_pair_probe.so",
+  "library_sha256": "e2fc3db27e7bee9c833673a7a254605299c5647bcd432f7e2cff391e834eb4cc",
+  "adapter": "Torch-free POD kernel probe",
+  "task_queue_enable": "0",
+  "probe_cores": 64,
+  "weight_slots": 96,
+  "timing": {
+    "operators_per_graph": 100,
+    "replays": 20,
+    "samples": 3
+  },
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "pattern": "prefix",
+      "valid_rows_initial": 6,
+      "unique_slots_initial": 6,
+      "valid_rows_timed": 6,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          22.977310180664062,
+          22.952470779418945,
+          22.95417022705078
+        ],
+        "median_operator_us": 22.95417022705078
+      },
+      "pair": {
+        "samples_operator_us": [
+          20.477249145507812,
+          20.47616958618164,
+          20.47818946838379
+        ],
+        "median_operator_us": 20.477249145507812
+      },
+      "speedup": 1.120959659373307
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "pattern": "random",
+      "valid_rows_initial": 6,
+      "unique_slots_initial": 6,
+      "valid_rows_timed": 6,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          24.31226921081543,
+          24.31121063232422,
+          24.28927993774414
+        ],
+        "median_operator_us": 24.31121063232422
+      },
+      "pair": {
+        "samples_operator_us": [
+          20.96742057800293,
+          20.97113037109375,
+          20.965349197387695
+        ],
+        "median_operator_us": 20.96742057800293
+      },
+      "speedup": 1.1594755082954402
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "pattern": "full",
+      "valid_rows_initial": 48,
+      "unique_slots_initial": 39,
+      "valid_rows_timed": 48,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          43.23514938354492,
+          43.251129150390625,
+          43.2877311706543
+        ],
+        "median_operator_us": 43.251129150390625
+      },
+      "pair": {
+        "samples_operator_us": [
+          39.79518127441406,
+          39.77907180786133,
+          39.794921875
+        ],
+        "median_operator_us": 39.794921875
+      },
+      "speedup": 1.0868504601226994
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 144,
+      "pattern": "prefix",
+      "valid_rows_initial": 18,
+      "unique_slots_initial": 17,
+      "valid_rows_timed": 18,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          56.78968048095703,
+          56.79225158691406,
+          56.795188903808594
+        ],
+        "median_operator_us": 56.79225158691406
+      },
+      "pair": {
+        "samples_operator_us": [
+          22.705589294433594,
+          22.71002960205078,
+          22.705080032348633
+        ],
+        "median_operator_us": 22.705589294433594
+      },
+      "speedup": 2.501245435670635
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 144,
+      "pattern": "random",
+      "valid_rows_initial": 18,
+      "unique_slots_initial": 13,
+      "valid_rows_timed": 18,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          40.321510314941406,
+          40.330780029296875,
+          40.33087158203125
+        ],
+        "median_operator_us": 40.330780029296875
+      },
+      "pair": {
+        "samples_operator_us": [
+          38.23712921142578,
+          38.23398971557617,
+          38.2388916015625
+        ],
+        "median_operator_us": 38.23712921142578
+      },
+      "speedup": 1.0547543934664814
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 144,
+      "pattern": "full",
+      "valid_rows_initial": 144,
+      "unique_slots_initial": 74,
+      "valid_rows_timed": 144,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          110.63870239257812,
+          110.66574096679688,
+          110.62554931640625
+        ],
+        "median_operator_us": 110.63870239257812
+      },
+      "pair": {
+        "samples_operator_us": [
+          91.2729721069336,
+          91.26531982421875,
+          91.26835632324219
+        ],
+        "median_operator_us": 91.26835632324219
+      },
+      "speedup": 1.2122350708358614
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 288,
+      "pattern": "prefix",
+      "valid_rows_initial": 36,
+      "unique_slots_initial": 27,
+      "valid_rows_timed": 36,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          90.81420135498047,
+          90.81075286865234,
+          90.79341125488281
+        ],
+        "median_operator_us": 90.81075286865234
+      },
+      "pair": {
+        "samples_operator_us": [
+          25.36113929748535,
+          25.356199264526367,
+          25.365699768066406
+        ],
+        "median_operator_us": 25.36113929748535
+      },
+      "speedup": 3.5807047863049495
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 288,
+      "pattern": "random",
+      "valid_rows_initial": 36,
+      "unique_slots_initial": 33,
+      "valid_rows_timed": 36,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          57.3885498046875,
+          57.39250183105469,
+          57.391578674316406
+        ],
+        "median_operator_us": 57.391578674316406
+      },
+      "pair": {
+        "samples_operator_us": [
+          56.7989616394043,
+          56.801300048828125,
+          56.79690170288086
+        ],
+        "median_operator_us": 56.7989616394043
+      },
+      "speedup": 1.0104335892383811
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 288,
+      "pattern": "full",
+      "valid_rows_initial": 288,
+      "unique_slots_initial": 94,
+      "valid_rows_timed": 288,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          179.33511352539062,
+          179.32655334472656,
+          179.35670471191406
+        ],
+        "median_operator_us": 179.33511352539062
+      },
+      "pair": {
+        "samples_operator_us": [
+          162.44061279296875,
+          162.4281005859375,
+          162.4492645263672
+        ],
+        "median_operator_us": 162.44061279296875
+      },
+      "speedup": 1.1040041676889878
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "pattern": "prefix",
+      "valid_rows_initial": 48,
+      "unique_slots_initial": 37,
+      "valid_rows_timed": 48,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          107.85198974609375,
+          107.86096954345703,
+          107.85885620117188
+        ],
+        "median_operator_us": 107.85885620117188
+      },
+      "pair": {
+        "samples_operator_us": [
+          41.180301666259766,
+          41.159019470214844,
+          41.14945983886719
+        ],
+        "median_operator_us": 41.159019470214844
+      },
+      "speedup": 2.620539983447008
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "pattern": "random",
+      "valid_rows_initial": 48,
+      "unique_slots_initial": 38,
+      "valid_rows_timed": 48,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          72.59573364257812,
+          72.59432983398438,
+          72.59719848632812
+        ],
+        "median_operator_us": 72.59573364257812
+      },
+      "pair": {
+        "samples_operator_us": [
+          56.761940002441406,
+          56.741859436035156,
+          56.74877166748047
+        ],
+        "median_operator_us": 56.74877166748047
+      },
+      "speedup": 1.2792476649178057
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "pattern": "full",
+      "valid_rows_initial": 384,
+      "unique_slots_initial": 96,
+      "valid_rows_timed": 384,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          213.42916870117188,
+          213.4280548095703,
+          213.42025756835938
+        ],
+        "median_operator_us": 213.4280548095703
+      },
+      "pair": {
+        "samples_operator_us": [
+          215.64511108398438,
+          215.6471710205078,
+          215.6362762451172
+        ],
+        "median_operator_us": 215.64511108398438
+      },
+      "speedup": 0.9897189587871036
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "pattern": "prefix",
+      "valid_rows_initial": 6,
+      "unique_slots_initial": 6,
+      "valid_rows_timed": 6,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          23.068279266357422,
+          23.069799423217773,
+          23.06501007080078
+        ],
+        "median_operator_us": 23.068279266357422
+      },
+      "pair": {
+        "samples_operator_us": [
+          20.590280532836914,
+          20.59568977355957,
+          20.596769332885742
+        ],
+        "median_operator_us": 20.59568977355957
+      },
+      "speedup": 1.1200537355137348
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "pattern": "random",
+      "valid_rows_initial": 6,
+      "unique_slots_initial": 6,
+      "valid_rows_timed": 6,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          24.13616943359375,
+          24.104290008544922,
+          24.093639373779297
+        ],
+        "median_operator_us": 24.104290008544922
+      },
+      "pair": {
+        "samples_operator_us": [
+          20.860380172729492,
+          20.873119354248047,
+          20.877769470214844
+        ],
+        "median_operator_us": 20.873119354248047
+      },
+      "speedup": 1.1548005642788257
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "pattern": "full",
+      "valid_rows_initial": 48,
+      "unique_slots_initial": 39,
+      "valid_rows_timed": 48,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          43.14188003540039,
+          43.12765121459961,
+          43.12934112548828
+        ],
+        "median_operator_us": 43.12934112548828
+      },
+      "pair": {
+        "samples_operator_us": [
+          39.531131744384766,
+          39.55672836303711,
+          39.527400970458984
+        ],
+        "median_operator_us": 39.531131744384766
+      },
+      "speedup": 1.09102216967554
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 144,
+      "pattern": "prefix",
+      "valid_rows_initial": 18,
+      "unique_slots_initial": 17,
+      "valid_rows_timed": 18,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          56.769168853759766,
+          56.76271057128906,
+          56.784088134765625
+        ],
+        "median_operator_us": 56.769168853759766
+      },
+      "pair": {
+        "samples_operator_us": [
+          22.64974021911621,
+          22.649749755859375,
+          22.643930435180664
+        ],
+        "median_operator_us": 22.64974021911621
+      },
+      "speedup": 2.5063938175258635
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 144,
+      "pattern": "random",
+      "valid_rows_initial": 18,
+      "unique_slots_initial": 13,
+      "valid_rows_timed": 18,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          40.296958923339844,
+          40.30998992919922,
+          40.30413055419922
+        ],
+        "median_operator_us": 40.30413055419922
+      },
+      "pair": {
+        "samples_operator_us": [
+          38.23463821411133,
+          38.23920822143555,
+          38.24726104736328
+        ],
+        "median_operator_us": 38.23920822143555
+      },
+      "speedup": 1.05400013307823
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 144,
+      "pattern": "full",
+      "valid_rows_initial": 144,
+      "unique_slots_initial": 74,
+      "valid_rows_timed": 144,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          110.95197296142578,
+          110.9320068359375,
+          110.9277114868164
+        ],
+        "median_operator_us": 110.9320068359375
+      },
+      "pair": {
+        "samples_operator_us": [
+          91.21524047851562,
+          91.22386169433594,
+          91.24028015136719
+        ],
+        "median_operator_us": 91.22386169433594
+      },
+      "speedup": 1.2160415572806784
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 288,
+      "pattern": "prefix",
+      "valid_rows_initial": 36,
+      "unique_slots_initial": 27,
+      "valid_rows_timed": 36,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          90.84632873535156,
+          90.8469467163086,
+          90.84114837646484
+        ],
+        "median_operator_us": 90.84632873535156
+      },
+      "pair": {
+        "samples_operator_us": [
+          25.378589630126953,
+          25.377519607543945,
+          25.37656021118164
+        ],
+        "median_operator_us": 25.377519607543945
+      },
+      "speedup": 3.5797954307695927
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 288,
+      "pattern": "random",
+      "valid_rows_initial": 36,
+      "unique_slots_initial": 33,
+      "valid_rows_timed": 36,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          57.54182815551758,
+          57.55084991455078,
+          57.53681945800781
+        ],
+        "median_operator_us": 57.54182815551758
+      },
+      "pair": {
+        "samples_operator_us": [
+          56.8153190612793,
+          56.81822967529297,
+          56.81584930419922
+        ],
+        "median_operator_us": 56.81584930419922
+      },
+      "speedup": 1.0127777523386368
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 288,
+      "pattern": "full",
+      "valid_rows_initial": 288,
+      "unique_slots_initial": 94,
+      "valid_rows_timed": 288,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          179.4733123779297,
+          179.46336364746094,
+          179.4590301513672
+        ],
+        "median_operator_us": 179.46336364746094
+      },
+      "pair": {
+        "samples_operator_us": [
+          162.5296630859375,
+          162.51368713378906,
+          162.54229736328125
+        ],
+        "median_operator_us": 162.5296630859375
+      },
+      "speedup": 1.10418836931059
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "pattern": "prefix",
+      "valid_rows_initial": 48,
+      "unique_slots_initial": 37,
+      "valid_rows_timed": 48,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "prefix",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          107.98748016357422,
+          107.9831314086914,
+          107.97975158691406
+        ],
+        "median_operator_us": 107.9831314086914
+      },
+      "pair": {
+        "samples_operator_us": [
+          41.191551208496094,
+          41.22536849975586,
+          41.204769134521484
+        ],
+        "median_operator_us": 41.204769134521484
+      },
+      "speedup": 2.6206464367306164
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "pattern": "random",
+      "valid_rows_initial": 48,
+      "unique_slots_initial": 38,
+      "valid_rows_timed": 48,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "random",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          72.51155090332031,
+          72.51368713378906,
+          72.532470703125
+        ],
+        "median_operator_us": 72.51368713378906
+      },
+      "pair": {
+        "samples_operator_us": [
+          56.81100845336914,
+          56.79378128051758,
+          56.813201904296875
+        ],
+        "median_operator_us": 56.81100845336914
+      },
+      "speedup": 1.2764020408704553
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "pattern": "full",
+      "valid_rows_initial": 384,
+      "unique_slots_initial": 96,
+      "valid_rows_timed": 384,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_output_bits_unequal": [
+        0,
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "changed_input": [
+        {
+          "replay": 0,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "pattern": "inactive",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 3,
+          "pattern": "full",
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "baseline": {
+        "samples_operator_us": [
+          213.3981475830078,
+          213.3991241455078,
+          213.42431640625
+        ],
+        "median_operator_us": 213.3991241455078
+      },
+      "pair": {
+        "samples_operator_us": [
+          215.6189727783203,
+          215.6334228515625,
+          215.61451721191406
+        ],
+        "median_operator_us": 215.6189727783203
+      },
+      "speedup": 0.9897047620429268
+    }
+  ],
+  "pass": true
+}

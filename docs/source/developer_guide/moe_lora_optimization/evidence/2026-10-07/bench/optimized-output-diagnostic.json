@@ -1,0 +1,107 @@
+{
+  "status": "OUTPUTS_DIFFER",
+  "same_exact_prompt_bytes": true,
+  "requests": [
+    {
+      "request_index": 0,
+      "first_different_token_index": 2,
+      "common_prefix_tokens": 2,
+      "unequal_positions": 4065,
+      "baseline_first_different_token": 547,
+      "optimized_first_different_token": 19,
+      "baseline_ttft_s": 3.563886310032103,
+      "optimized_ttft_s": 8.092543160018977
+    },
+    {
+      "request_index": 1,
+      "first_different_token_index": 23,
+      "common_prefix_tokens": 23,
+      "unequal_positions": 4061,
+      "baseline_first_different_token": 12983,
+      "optimized_first_different_token": 223,
+      "baseline_ttft_s": 17.788732999993954,
+      "optimized_ttft_s": 8.43421669001691
+    },
+    {
+      "request_index": 2,
+      "first_different_token_index": 0,
+      "common_prefix_tokens": 0,
+      "unequal_positions": 4096,
+      "baseline_first_different_token": 201,
+      "optimized_first_different_token": 223,
+      "baseline_ttft_s": 10.919017429987434,
+      "optimized_ttft_s": 13.61730391002493
+    },
+    {
+      "request_index": 3,
+      "first_different_token_index": 18,
+      "common_prefix_tokens": 18,
+      "unequal_positions": 4078,
+      "baseline_first_different_token": 6154,
+      "optimized_first_different_token": 34448,
+      "baseline_ttft_s": 25.056584270030726,
+      "optimized_ttft_s": 19.55688555998495
+    },
+    {
+      "request_index": 4,
+      "first_different_token_index": 3,
+      "common_prefix_tokens": 3,
+      "unequal_positions": 2867,
+      "baseline_first_different_token": 5743,
+      "optimized_first_different_token": 65,
+      "baseline_ttft_s": 10.54362036997918,
+      "optimized_ttft_s": 2.7382236500270665
+    },
+    {
+      "request_index": 5,
+      "first_different_token_index": 0,
+      "common_prefix_tokens": 0,
+      "unequal_positions": 3075,
+      "baseline_first_different_token": 2808,
+      "optimized_first_different_token": 223,
+      "baseline_ttft_s": 18.139159919985104,
+      "optimized_ttft_s": 13.976781539968215
+    },
+    {
+      "request_index": 6,
+      "first_different_token_index": 3,
+      "common_prefix_tokens": 3,
+      "unequal_positions": 4093,
+      "baseline_first_different_token": 86,
+      "optimized_first_different_token": 75,
+      "baseline_ttft_s": 28.977426870027557,
+      "optimized_ttft_s": 19.192379069980234
+    },
+    {
+      "request_index": 7,
+      "first_different_token_index": 3,
+      "common_prefix_tokens": 3,
+      "unequal_positions": 3949,
+      "baseline_first_different_token": 28986,
+      "optimized_first_different_token": 9854,
+      "baseline_ttft_s": 25.413654970005155,
+      "optimized_ttft_s": 22.266690409975126
+    }
+  ],
+  "accepted_draft_tokens_by_position_delta": {
+    "baseline": {
+      "0": 5729.0,
+      "1": 5484.0,
+      "2": 5241.0,
+      "3": 5117.0,
+      "4": 5009.0
+    },
+    "optimized": {
+      "0": 5857.0,
+      "1": 5522.0,
+      "2": 5091.0,
+      "3": 4991.0,
+      "4": 4935.0
+    }
+  },
+  "limits": [
+    "This random-token/sampled-zero-adapter run does not validate model quality.",
+    "Autoregressive sequences may diverge greatly after a small initial numeric/scheduling difference; no cause attributed without ablation.",
+    "No additional benchmark was launched."
+  ]
+}

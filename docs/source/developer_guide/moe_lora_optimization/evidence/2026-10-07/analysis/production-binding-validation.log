@@ -1,0 +1,9 @@
+INFO 10-06 18:50:37 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-06 18:50:37 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-06 18:50:37 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-06 18:50:37 [__init__.py:237] Platform plugin ascend is activated
+INFO 10-06 18:50:37 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+[W1006 18:50:43.846081290 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+pair rows=48 PASS
+pair rows=288 PASS
+activation288 PASS; all production checks PASS

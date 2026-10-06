@@ -1,0 +1,23 @@
+{
+  "original_script": "{site_launch_script}",
+  "original_sha256": "abaf18ddc21c89669efa08fb606296133e8341b4aae8aa13363e2bfa51368e59",
+  "baseline_launcher": "{experiment_root}/bench/launch_baseline.sh",
+  "baseline_sha256": "467898db813b7d1af93e0c2bd1aad6f891ba120d8494abf7a5e37233e2a1928f",
+  "removed": "sysctl host modifications",
+  "flags": {
+    "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": 0,
+    "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION": 0,
+    "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY": 0,
+    "VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL": 0,
+    "VLLM_ASCEND_DECODE_GRAPH_EVIDENCE": 0
+  },
+  "profiler_config": {
+    "profiler": "torch",
+    "torch_profiler_dir": "{profiles_root}/tp-ep-lora-dspark5-baseline-20261007",
+    "ignore_frontend": true,
+    "torch_profiler_with_stack": false,
+    "torch_profiler_with_memory": false,
+    "torch_profiler_record_shapes": true,
+    "max_iterations": 20
+  }
+}

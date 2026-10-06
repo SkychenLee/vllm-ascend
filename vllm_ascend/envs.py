@@ -89,11 +89,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Unsupported inputs and missing native ops retain the existing path.
     "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_ROUTING"),
     # Fuse SwiGLU (with optional clipping) and quant, retaining floating W2 LoRA
-    # activations. Experimental Decode sizes <=48 rows, width 2048; requires
-    # the native op. Default 0; valid values 0 or 1; not sensitive.
+    # activations. Decode <=288 rows without clipping, <=384 with clipping;
+    # width 2048 and native op required. Default 0; valid 0/1; not sensitive.
     "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION"),
+    # Share X for BF16/FP16 gate/up MoE LoRA A projections in one Vector launch.
+    # Ordinary non-sharded double-A, H4096/r16, <=384 rows and ND/base storage.
+    # Experimental; default 0; valid values 0 or 1; not sensitive.
+    "VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR"),
     # Replace partial MTP hidden-buffer copy with a row-update operator to
-    # avoid full-storage copies after npugraph_ex functionalization.
+    # avoid full-storage copies after npugraph_ex functionalization. Explicit
+    # V1 DSpark also skips its unused ordinary MTP buffer and stash all-gather;
+    # V2 (including automatic runner selection) retains the buffer.
     # Experimental; default 0; valid values 0 or 1; not sensitive.
     "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY": lambda: _strict_binary_env("VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY"),
     # Opt-in measured BF16 W13 Cube prefill path; all unsupported cases fall back.

@@ -16,6 +16,7 @@
 
 #include "kernel_operator.h"
 #include "types.h"
+#include "bgmv_shrink_pair_config.h"
 
 template <typename scalar_t>
 class BGMVShrink {
@@ -247,6 +248,121 @@ BGMV_SHRINK_TYPE_DECLARE(half)
     BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 #endif
 
+// Specialize only the ordinary floating EP Decode shape. Each row keeps the
+// exact legacy Mul/ReduceSum/accumulate order, but shares X between both A
+// projections and distributes rows by stride rather than contiguous chunks.
+template <typename scalar_t>
+class BGMVShrinkPairDecode {
+public:
+    static constexpr uint32_t HIDDEN = vllm_ascend::MOE_LORA_SHRINK_PAIR_HIDDEN;
+    static constexpr uint32_t RANK = vllm_ascend::MOE_LORA_SHRINK_PAIR_RANK;
+
+    __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight0,
+        __gm__ void* weight1, __gm__ void* indices, uint32_t indicesSize,
+        __gm__ void* yPair, uint32_t rows, float scale)
+    {
+        rows_ = rows;
+        scale_ = scale;
+        xGm_.SetGlobalBuffer(reinterpret_cast<__gm__ scalar_t*>(x));
+        weight0Gm_.SetGlobalBuffer(reinterpret_cast<__gm__ scalar_t*>(weight0));
+        weight1Gm_.SetGlobalBuffer(reinterpret_cast<__gm__ scalar_t*>(weight1));
+        indicesGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(indices), indicesSize);
+        yGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(yPair));
+        pipe_.InitBuffer(inQueueX_, 1, HIDDEN * sizeof(scalar_t));
+        pipe_.InitBuffer(inQueueW_, 1, HIDDEN * sizeof(scalar_t));
+        pipe_.InitBuffer(tmpX_, HIDDEN * sizeof(float));
+        pipe_.InitBuffer(tmpW_, HIDDEN * sizeof(float));
+        pipe_.InitBuffer(output_, RANK * sizeof(float));
+        pipe_.InitBuffer(outQueue_, 1, RANK * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        for (uint32_t row = AscendC::GetBlockIdx(); row < rows_; row += AscendC::GetBlockNum()) {
+            const int64_t index = indicesGm_.GetValue(row);
+            // Match both old launches: every negative sentinel leaves the
+            // caller's output unchanged. Production passes one zeroed pair.
+            if (index < 0) {
+                continue;
+            }
+            const uint64_t weightOffset = static_cast<uint64_t>(index) * RANK * HIDDEN;
+            auto xLocal = inQueueX_.AllocTensor<scalar_t>();
+            const AscendC::DataCopyExtParams copy{1, HIDDEN * sizeof(scalar_t), 0, 0, 0};
+            const AscendC::DataCopyPadExtParams<scalar_t> padding{false, 0, 0, 0};
+            DataCopyPad(xLocal, xGm_[static_cast<uint64_t>(row) * HIDDEN], copy, padding);
+            inQueueX_.EnQue(xLocal);
+            xLocal = inQueueX_.DeQue<scalar_t>();
+            auto xFloat = tmpX_.Get<float>();
+            Cast(xFloat, xLocal, AscendC::RoundMode::CAST_NONE, HIDDEN);
+            AscendC::PipeBarrier<PIPE_V>();
+            inQueueX_.FreeTensor(xLocal);
+
+            for (uint32_t plane = 0; plane < 2; ++plane) {
+                auto output = output_.Get<float>();
+                for (uint32_t rank = 0; rank < RANK; ++rank) {
+                    auto weightLocal = inQueueW_.AllocTensor<scalar_t>();
+                    const uint64_t offset = weightOffset + static_cast<uint64_t>(rank) * HIDDEN;
+                    if (plane == 0) {
+                        DataCopyPad(weightLocal, weight0Gm_[offset], copy, padding);
+                    } else {
+                        DataCopyPad(weightLocal, weight1Gm_[offset], copy, padding);
+                    }
+                    inQueueW_.EnQue(weightLocal);
+                    weightLocal = inQueueW_.DeQue<scalar_t>();
+                    auto weightFloat = tmpW_.Get<float>();
+                    Cast(weightFloat, weightLocal, AscendC::RoundMode::CAST_NONE, HIDDEN);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    inQueueW_.FreeTensor(weightLocal);
+                    Mul(weightFloat, xFloat, weightFloat, HIDDEN);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    ReduceSum<float>(weightFloat, weightFloat, weightFloat, HIDDEN);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    // Keep the original scalar addition to +0.0 as well.
+                    float acc = 0.0f;
+                    acc += weightFloat.GetValue(0);
+                    output.SetValue(rank, acc);
+                }
+                auto scaled = outQueue_.AllocTensor<float>();
+                Muls(scaled, output, scale_, RANK);
+                AscendC::PipeBarrier<PIPE_V>();
+                outQueue_.EnQue(scaled);
+                scaled = outQueue_.DeQue<float>();
+                const uint64_t offset = (static_cast<uint64_t>(plane) * rows_ + row) * RANK;
+                // Each rank row is exactly 64 bytes; neither plane nor tails
+                // overwrite another core's row or protected output padding.
+                DataCopyPad(yGm_[offset], scaled,
+                    AscendC::DataCopyExtParams{1, RANK * sizeof(float), 0, 0, 0});
+                outQueue_.FreeTensor(scaled);
+            }
+        }
+    }
+
+private:
+    AscendC::TPipe pipe_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> inQueueX_, inQueueW_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> outQueue_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> tmpX_, tmpW_, output_;
+    AscendC::GlobalTensor<scalar_t> xGm_, weight0Gm_, weight1Gm_;
+    AscendC::GlobalTensor<int64_t> indicesGm_;
+    AscendC::GlobalTensor<float> yGm_;
+    uint32_t rows_;
+    float scale_;
+};
+
+#define BGMV_SHRINK_PAIR_DECODE_DECLARE(TYPE) \
+extern "C" __global__ __aicore__ void bgmv_shrink_pair_decode_##TYPE( \
+    __gm__ void* x, __gm__ void* weight0, __gm__ void* weight1, __gm__ void* indices, \
+    uint32_t indicesSize, __gm__ void* yPair, uint32_t rows, float scale) \
+{ \
+    BGMVShrinkPairDecode<TYPE> op; \
+    op.Init(x, weight0, weight1, indices, indicesSize, yPair, rows, scale); \
+    op.Process(); \
+}
+BGMV_SHRINK_PAIR_DECODE_DECLARE(half)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+BGMV_SHRINK_PAIR_DECODE_DECLARE(bfloat16_t)
+#endif
+
 namespace vllm_ascend {
 extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* y, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
@@ -268,8 +384,7 @@ extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
 
 } // namespace vllm_ascend
 
-// Preserve the public pair entry point for existing callers. Its two
-// projections now use the original Vector shrink implementation.
+// Preserve the public pair entry point and its legacy shape domain.
 namespace vllm_ascend {
 extern void bgmv_shrink_pair_impl(AscendType type, void* stream, void* x, void* weight0, void* weight1,
                                   void* indices, uint32_t indicesSize, void* yPair, uint32_t batchSize,
@@ -279,6 +394,20 @@ extern void bgmv_shrink_pair_impl(AscendType type, void* stream, void* x, void* 
         return;
     }
     const uint32_t cores = aivNum > 0 ? aivNum : 1;
+    if (inputHiddenDim == MOE_LORA_SHRINK_PAIR_HIDDEN && maxLoRARank == MOE_LORA_SHRINK_PAIR_RANK &&
+        batchSize <= MOE_LORA_SHRINK_PAIR_MAX_ROWS) {
+        const uint32_t blockDim = batchSize < cores ? batchSize : cores;
+        if (type == AscendType::FP16) {
+            bgmv_shrink_pair_decode_half<<<blockDim, nullptr, stream>>>(x, weight0, weight1,
+                indices, indicesSize, yPair, batchSize, scale);
+        } else if (type == AscendType::BF16) {
+            #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+            bgmv_shrink_pair_decode_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight0, weight1,
+                indices, indicesSize, yPair, batchSize, scale);
+            #endif
+        }
+        return;
+    }
     const uint32_t numTokensPerCore = (static_cast<uint64_t>(batchSize) + cores - 1) / cores;
     void* ySecond = static_cast<float*>(yPair) + static_cast<uint64_t>(batchSize) * maxLoRARank;
     bgmv_shrink_impl(type, stream, x, weight0, indices, indicesSize, yPair, batchSize, numTokensPerCore,

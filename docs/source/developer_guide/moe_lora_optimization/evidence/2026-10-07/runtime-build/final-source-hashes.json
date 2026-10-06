@@ -1,0 +1,14 @@
+{
+  "csrc/kernels/bgmv_shrink.cpp": {
+    "host": "600974537f5db6f7057fa9cb22a1896cc85b8a8d04c4ad411bfc91487cf5d92f",
+    "snapshot": "600974537f5db6f7057fa9cb22a1896cc85b8a8d04c4ad411bfc91487cf5d92f"
+  },
+  "csrc/kernels/bgmv_shrink_pair_config.h": {
+    "host": "68364907d8b5a7cc7257bdc5bc8684162564839888473bcee5322645d923ce07",
+    "snapshot": "68364907d8b5a7cc7257bdc5bc8684162564839888473bcee5322645d923ce07"
+  },
+  "csrc/torch_binding.cpp": {
+    "host": "454f6be60f64c8da39ea7128f68de9063816a653f3b559f5f657a50a86b402d9",
+    "snapshot": "454f6be60f64c8da39ea7128f68de9063816a653f3b559f5f657a50a86b402d9"
+  }
+}

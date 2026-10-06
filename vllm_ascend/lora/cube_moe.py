@@ -9,11 +9,15 @@ from dataclasses import dataclass
 from itertools import count
 
 import torch
+from vllm import envs as vllm_envs
+from vllm.config import CUDAGraphMode
 
 TILE_ROWS = 64
 WAVE_TILES = 224
 MAX_ROUTED_ROWS = 16384 * 6
 MAX_PLAN_TILES = MAX_ROUTED_ROWS // TILE_ROWS + 31
+DSPARK_SPECULATIVE_TOKENS = 5
+MAX_DSPARK_DECODE_CAPTURE_TOKENS = 48
 
 
 def single_adapter_slot(index_mapping, lora_index_to_id):
@@ -35,15 +39,26 @@ def static_config_supported(config, layer, lora_config):
     additional = config.additional_config or {}
     compilation = getattr(config, "compilation_config", None)
     capture_sizes = getattr(compilation, "cudagraph_capture_sizes", None)
+    speculative = config.speculative_config
+    max_decode_capture_tokens = 8
+    if speculative is not None:
+        if not (
+            vllm_envs.VLLM_USE_V2_MODEL_RUNNER is False
+            and speculative.use_dspark()
+            and speculative.num_speculative_tokens == DSPARK_SPECULATIVE_TOKENS
+        ):
+            return False
+        max_decode_capture_tokens = MAX_DSPARK_DECODE_CAPTURE_TOKENS
     decode_only = (
         getattr(getattr(compilation, "cudagraph_mode", None), "name", None) == "FULL_DECODE_ONLY"
         and bool(capture_sizes)
         and min(capture_sizes) >= 1
-        and max(capture_sizes) <= 8
+        and max(capture_sizes) <= max_decode_capture_tokens
     )
+    if speculative is not None and not decode_only:
+        return False
     return (
         (config.model_config.enforce_eager or decode_only)
-        and config.speculative_config is None
         and parallel.tensor_parallel_size == 8
         and parallel.data_parallel_size == 1
         and parallel.pipeline_parallel_size == 1
@@ -62,6 +77,17 @@ def static_config_supported(config, layer, lora_config):
         and layer.moe_config.experts_per_token == 6
         and lora_config.max_lora_rank == 16
         and lora_config.lora_dtype == torch.bfloat16
+    )
+
+
+def supports_cube_target_prefill_context(context):
+    """Permit counts readback only in a real eager target forward context."""
+    return (
+        context is not None
+        and getattr(context, "cudagraph_runtime_mode", None) == CUDAGraphMode.NONE
+        and getattr(context, "in_profile_run", None) is False
+        and getattr(context, "attn_metadata", None) is not None
+        and getattr(context, "is_draft_model", None) is False
     )
 
 
@@ -98,7 +124,10 @@ class CubeScratch:
     def __init__(self, device):
         # Matrix capacity is one fixed wave; only output/metadata scale with R.
         self.gathered = torch.empty((224, 64, 4096), dtype=torch.bfloat16, device=device)
-        self.tiles = torch.empty_like(self.gathered)
+        # Gather and padding-mask kernels are ordered on the same stream.
+        # The elementwise where permits full input/output aliasing, so BMM
+        # can consume this same arena after masking without a second 112 MiB.
+        self.tiles = self.gathered
         self.tile_weights = torch.empty((224, 4096, 32), dtype=torch.bfloat16, device=device)
         self.outputs = tuple(
             torch.empty((MAX_ROUTED_ROWS + 1, 16), dtype=torch.float32, device=device) for _ in range(2)
@@ -197,8 +226,8 @@ class CubeW13State:
         self.loaded.add(slot)
 
     def prepare(self, x, counts, group_list_type, slot):
-        # Top-k=6/max-seqs<=8/no-spec => decode has at most 48 rows. Large R
-        # establishes a prefill-containing batch without Punica.is_prefill.
+        # Top-k=6/max-seqs<=8 and bounded DSpark5 => decode has at most 288
+        # rows. Large R establishes prefill without Punica.is_prefill.
         # The caller must also verify the actual forward context is eager/NONE.
         if (
             slot not in self.loaded

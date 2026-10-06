@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 import torch
+import torch_npu
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -14,6 +15,47 @@ from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
 from vllm_ascend.lora.cube_moe import single_adapter_slot
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+FUSED_FLOAT_MOE_SHRINK_HIDDEN = 4096
+FUSED_FLOAT_MOE_SHRINK_RANK = 16
+MAX_FUSED_FLOAT_MOE_SHRINK_ROWS = 384
+
+
+def _can_fuse_float_moe_shrink_pair(x, weights, indices) -> bool:
+    """Metadata-only fast-shape gate; native dispatch also checks NPU storage."""
+    return (
+        envs_ascend.VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR
+        and get_ascend_device_type() != AscendDeviceType._310P
+        and x.device.type == "npu"
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and x.ndim == 2
+        and 0 < x.shape[0] <= MAX_FUSED_FLOAT_MOE_SHRINK_ROWS
+        and x.shape[1] == FUSED_FLOAT_MOE_SHRINK_HIDDEN
+        and x.is_contiguous()
+        and len(weights) == 2
+        and weights[0].shape == weights[1].shape
+        and all(
+            a.ndim == 4
+            and a.shape[-2:] == (FUSED_FLOAT_MOE_SHRINK_RANK, FUSED_FLOAT_MOE_SHRINK_HIDDEN)
+            and a.shape[0] > 0
+            and a.shape[1] > 0
+            and a.dtype == x.dtype
+            and a.device == x.device
+            and a.is_contiguous()
+            for a in weights
+        )
+        and indices.ndim == 1
+        and indices.shape == (x.shape[0],)
+        and indices.dtype == torch.int64
+        and indices.device == x.device
+        and indices.is_contiguous()
+        and hasattr(torch.ops._C_ascend, "bgmv_shrink_pair")
+        # FakeTensor cannot inspect the NPU descriptor. Native runtime guards
+        # still reject blocked storage before launch/capture.
+        and (
+            torch.compiler.is_compiling() or all(torch_npu.get_npu_format(t) in (0, 2) for t in (x, *weights, indices))
+        )
+    )
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -494,7 +536,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 )
             return quantized, scale, combined_idx
 
-        cube_pair = None
+        float_pair = None
         if cube_routing is not None:
             if (
                 cube_state is None
@@ -504,7 +546,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 or len(lora_a_stacked) != 2
             ):
                 raise ValueError("Cube W13 requires ordinary BF16 double-A without TP rank sharding")
-            cube_pair = cube_state.shrink_pair(x, combined_idx, lora_a_stacked, cube_routing, self.bgmv_shrink)
+            float_pair = cube_state.shrink_pair(x, combined_idx, lora_a_stacked, cube_routing, self.bgmv_shrink)
+        elif (
+            input_scale is None
+            and not fully_sharded
+            and not fuse_swiglu
+            and _can_fuse_float_moe_shrink_pair(x2d, lora_a_stacked, combined_idx)
+        ):
+            # A single zero initialization preserves the legacy skipped-row
+            # contract. The two FP32 planes feed the unchanged gate/up B loop.
+            float_pair = torch.zeros(
+                (2, x2d.shape[0], FUSED_FLOAT_MOE_SHRINK_RANK), dtype=torch.float32, device=x2d.device
+            )
+            torch.ops._C_ascend.bgmv_shrink_pair(
+                x2d,
+                lora_a_stacked[0].view(-1, FUSED_FLOAT_MOE_SHRINK_RANK, FUSED_FLOAT_MOE_SHRINK_HIDDEN),
+                lora_a_stacked[1].view(-1, FUSED_FLOAT_MOE_SHRINK_RANK, FUSED_FLOAT_MOE_SHRINK_HIDDEN),
+                combined_idx,
+                float_pair,
+                1.0,
+            )
         projections = []
         expand_weights = []
         for slice_idx in range(len(lora_a_stacked)):
@@ -522,8 +583,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             # (its X_T), so the shrink buffer is fp32.
             # The INT8 kernel writes every row, including inactive adapters.
             # The legacy float kernel skips inactive rows and still needs zeros.
-            if cube_pair is not None:
-                shrink_out = cube_pair[slice_idx]
+            if float_pair is not None:
+                shrink_out = float_pair[slice_idx]
             else:
                 allocate_shrink = torch.empty if input_scale is not None else torch.zeros
                 shrink_out = allocate_shrink((x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)

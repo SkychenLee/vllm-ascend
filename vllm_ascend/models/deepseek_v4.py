@@ -33,6 +33,7 @@ import torch.nn.functional as F
 import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
+from vllm import envs as vllm_envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -1079,18 +1080,31 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-        # Pre-hc_head residual stream buffer for the MTP draft. Stable
-        # address (outside the cudagraph pool) so the write in forward()
-        # refreshes it correctly across captured shapes.
-        self._mtp_hidden_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-            dtype=vllm_config.model_config.dtype,
-            device=self.device,
+        # DSpark consumes auxiliary layer outputs, not the pre-hc_head MTP
+        # residual. Only skip its buffer on explicitly selected V1: upstream
+        # V2 still slices this getter without checking for None. An unset
+        # runner environment can select V2 automatically for DSpark.
+        speculative_config = vllm_config.speculative_config
+        skip_mtp_buffer = (
+            envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY
+            and vllm_envs.VLLM_USE_V2_MODEL_RUNNER is False
+            and speculative_config is not None
+            and speculative_config.use_dspark()
+        )
+        # Keep the ordinary MTP residual address stable outside the graph pool.
+        self._mtp_hidden_buffer = (
+            None
+            if skip_mtp_buffer
+            else torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                hc_dim,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
         )
         self._mtp_buffer_row_indices = (
             torch.arange(self._mtp_hidden_buffer.shape[0], dtype=torch.int64, device=self.device).unsqueeze(-1)
-            if envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY
+            if self._mtp_hidden_buffer is not None and envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY
             else None
         )
 
@@ -1102,6 +1116,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         update remains in place, including under compiled graph replay.
         """
         buffer = self._mtp_hidden_buffer
+        if buffer is None:
+            return
         if hidden_states.ndim != 2 or hidden_states.shape[1] != buffer.shape[1]:
             raise ValueError("MTP residual rows must match the persistent buffer width.")
         num_tokens = hidden_states.shape[0]
@@ -1178,17 +1194,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # MTP layers receive the full token set — otherwise only rank 0's
         # partition is valid and the rest of the buffer holds stale data,
         # leading to NaN values and low acceptance rate.
-        from vllm_ascend.ascend_forward_context import get_forward_context
+        if self._mtp_hidden_buffer is not None:
+            from vllm_ascend.ascend_forward_context import get_forward_context
 
-        forward_ctx = get_forward_context()
-        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
-            h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-            pad_size = forward_ctx.pad_size
-            if pad_size > 0:
-                h_states_flat = h_states_flat[:-pad_size]
-            self._copy_mtp_hidden_states(h_states_flat)
-        else:
-            self._copy_mtp_hidden_states(hidden_states.flatten(1))
+            forward_ctx = get_forward_context()
+            if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+                h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
+                pad_size = forward_ctx.pad_size
+                if pad_size > 0:
+                    h_states_flat = h_states_flat[:-pad_size]
+                self._copy_mtp_hidden_states(h_states_flat)
+            else:
+                self._copy_mtp_hidden_states(hidden_states.flatten(1))
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

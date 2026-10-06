@@ -1,0 +1,333 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Opt-in eager-Prefill W13 double-A Cube path for the measured TP8/EP8 layout.
+
+Counts readback is intentional and must be included in end-to-end timing.
+One cache per layer, one shared scratch per device; never cache batch routing.
+"""
+
+from dataclasses import dataclass
+from itertools import count
+
+import torch
+from vllm import envs as vllm_envs
+from vllm.config import CUDAGraphMode
+
+TILE_ROWS = 64
+WAVE_TILES = 224
+MAX_ROUTED_ROWS = 16384 * 6
+MAX_PLAN_TILES = MAX_ROUTED_ROWS // TILE_ROWS + 31
+DSPARK_SPECULATIVE_TOKENS = 5
+MAX_DSPARK_DECODE_CAPTURE_TOKENS = 48
+
+
+def single_adapter_slot(index_mapping, lora_index_to_id):
+    if not index_mapping:
+        return None
+    adapter = index_mapping[0]
+    if adapter <= 0 or any(value != adapter for value in index_mapping):
+        return None
+    try:
+        return lora_index_to_id.index(adapter)
+    except ValueError:
+        return None
+
+
+def static_config_supported(config, layer, lora_config):
+    """CPU-only configuration gate, before any candidate allocation/readback."""
+    parallel = config.parallel_config
+    scheduler = config.scheduler_config
+    additional = config.additional_config or {}
+    compilation = getattr(config, "compilation_config", None)
+    capture_sizes = getattr(compilation, "cudagraph_capture_sizes", None)
+    speculative = config.speculative_config
+    max_decode_capture_tokens = 8
+    if speculative is not None:
+        if not (
+            vllm_envs.VLLM_USE_V2_MODEL_RUNNER is False
+            and speculative.use_dspark()
+            and speculative.num_speculative_tokens == DSPARK_SPECULATIVE_TOKENS
+        ):
+            return False
+        max_decode_capture_tokens = MAX_DSPARK_DECODE_CAPTURE_TOKENS
+    decode_only = (
+        getattr(getattr(compilation, "cudagraph_mode", None), "name", None) == "FULL_DECODE_ONLY"
+        and bool(capture_sizes)
+        and min(capture_sizes) >= 1
+        and max(capture_sizes) <= max_decode_capture_tokens
+    )
+    if speculative is not None and not decode_only:
+        return False
+    return (
+        (config.model_config.enforce_eager or decode_only)
+        and parallel.tensor_parallel_size == 8
+        and parallel.data_parallel_size == 1
+        and parallel.pipeline_parallel_size == 1
+        and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+        and getattr(parallel, "decode_context_parallel_size", 1) == 1
+        and scheduler.max_num_seqs <= 8
+        and scheduler.max_num_batched_tokens <= 16384
+        and additional.get("moe_lora_ep_backend", "allgather") == "allgather"
+        and not additional.get("multistream_overlap_shared_expert", False)
+        and layer.use_ep
+        and layer.moe_config.moe_parallel_config.ep_size == 8
+        and not layer.fully_sharded
+        and layer._w13_slices == 2
+        and layer.hidden_size == 4096
+        and layer.local_num_experts == 32
+        and layer.moe_config.experts_per_token == 6
+        and lora_config.max_lora_rank == 16
+        and lora_config.lora_dtype == torch.bfloat16
+    )
+
+
+def supports_cube_target_prefill_context(context):
+    """Permit counts readback only in a real eager target forward context."""
+    return (
+        context is not None
+        and getattr(context, "cudagraph_runtime_mode", None) == CUDAGraphMode.NONE
+        and getattr(context, "in_profile_run", None) is False
+        and getattr(context, "attn_metadata", None) is not None
+        and getattr(context, "is_draft_model", None) is False
+    )
+
+
+def tile_plan(counts, rows):
+    """CPU expert-major tiles; each initialized source row appears exactly once."""
+    if len(counts) != 32 or any(count < 0 for count in counts):
+        return None
+    total = sum(counts)
+    if total < 512 or total > rows or rows > MAX_ROUTED_ROWS:
+        return None
+    tiles = []
+    start = 0
+    for expert, count_ in enumerate(counts):
+        for offset in range(0, count_, TILE_ROWS):
+            tiles.append((expert, start + offset, min(TILE_ROWS, count_ - offset)))
+        start += count_
+    # 32 groups: sum(ceil(count / 64)) <= ceil(total / 64) + 31.
+    if len(tiles) > MAX_PLAN_TILES:
+        return None
+    return tiles
+
+
+def _weight_key(a):
+    return (a.untyped_storage().data_ptr(), a.storage_offset(), tuple(a.shape), tuple(a.stride()), a.dtype, a.device)
+
+
+class CubeScratch:
+    """Fixed shared storage allocated before profiling, including index/output.
+
+    Native operator workspace remains allocator/runtime managed. Reuse only
+    on the same stream in the serial eager MoE pipeline.
+    """
+
+    def __init__(self, device):
+        # Matrix capacity is one fixed wave; only output/metadata scale with R.
+        self.gathered = torch.empty((224, 64, 4096), dtype=torch.bfloat16, device=device)
+        self.tiles = torch.empty_like(self.gathered)
+        self.tile_weights = torch.empty((224, 4096, 32), dtype=torch.bfloat16, device=device)
+        self.outputs = tuple(
+            torch.empty((MAX_ROUTED_ROWS + 1, 16), dtype=torch.float32, device=device) for _ in range(2)
+        )
+        self.j = torch.arange(64, dtype=torch.int64, device=device).unsqueeze(0)
+        self.product = torch.empty((224, 64, 32), dtype=torch.float32, device=device)
+        self.values = torch.empty((224 * 64, 16), dtype=torch.float32, device=device)
+        self.metadata = torch.empty((MAX_PLAN_TILES + 1, 3), dtype=torch.int64, device=device)
+        self.source = torch.empty((224, 64), dtype=torch.int64, device=device)
+        self.destination = torch.empty_like(self.source)
+        self.valid = torch.empty((224, 64), dtype=torch.bool, device=device)
+        self.zero = torch.zeros((), dtype=torch.bfloat16, device=device)
+        self.sink = torch.empty((), dtype=torch.int64, device=device)
+        self.stream = None
+
+    def same_stream(self):
+        # CPU is only used by isolated unit tests. Production uses NPU.
+        if self.tiles.device.type == "cpu":
+            return True
+        stream = torch.npu.current_stream(self.tiles.device).npu_stream
+        if self.stream is None:
+            self.stream = stream
+        return self.stream == stream
+
+
+_SCRATCH = {}
+_CACHE_ORDINAL = count()
+
+
+def shared_scratch(device):
+    key = str(device)
+    if key not in _SCRATCH:
+        _SCRATCH[key] = CubeScratch(device)
+    return _SCRATCH[key]
+
+
+@dataclass
+class CubeRouting:
+    x: torch.Tensor
+    counts: torch.Tensor
+    slot: int
+    generation: int
+    metadata: torch.Tensor
+    tile_count: int
+    total: int
+    max_count: int
+
+
+class CubeW13State:
+    def __init__(self, weights, label="", log=None):
+        self.weights = None
+        self.weight_keys = None
+        self.flat = None
+        self.generation = 0
+        self.loaded = set()
+        self.key = None
+        self.pack_count = 0
+        self.label = label
+        self.ordinal = next(_CACHE_ORDINAL)
+        self.log = log
+        self.logged = set()
+        self._refresh_views(weights)
+        self.packed = torch.empty((32, 4096, 32), dtype=torch.bfloat16, device=weights[0].device)
+        self.scratch = shared_scratch(weights[0].device)
+
+    def note(self, reason, **fields):
+        if reason not in self.logged and self.log is not None:
+            self.logged.add(reason)
+            self.log.info(
+                "W13 Cube cache_ordinal=%d prefix=%s decision=%s %s", self.ordinal, self.label, reason, fields
+            )
+
+    def _refresh_views(self, weights):
+        keys = tuple(_weight_key(a) for a in weights)
+        if keys != self.weight_keys:
+            if (
+                len(weights) != 2
+                or weights[0].shape != weights[1].shape
+                or any(
+                    a.ndim != 4 or a.shape[1:] != (32, 16, 4096) or a.dtype != torch.bfloat16 or not a.is_contiguous()
+                    for a in weights
+                )
+            ):
+                raise ValueError("Cube cache requires BF16 [slots,32,16,4096] A weights")
+            self.weights = tuple(weights)
+            self.weight_keys = keys
+            self.flat = tuple(a.view(-1, 16, 4096) for a in weights)
+            self.key = None
+
+    def invalidate(self, slot):
+        self.generation += 1
+        self.key = None
+        self.loaded.discard(slot)
+
+    def mark_loaded(self, slot):
+        self.loaded.add(slot)
+
+    def prepare(self, x, counts, group_list_type, slot):
+        # Top-k=6/max-seqs<=8 and bounded DSpark5 => decode has at most 288
+        # rows. Large R establishes prefill without Punica.is_prefill.
+        # The caller must also verify the actual forward context is eager/NONE.
+        if (
+            slot not in self.loaded
+            or not isinstance(slot, int)
+            or not 0 <= slot < self.weights[0].shape[0]
+            or x.ndim != 2
+            or x.shape[1] != 4096
+            or not 6144 <= x.shape[0] <= MAX_ROUTED_ROWS
+            or x.dtype != torch.bfloat16
+            or not x.is_contiguous()
+            or x.device != self.packed.device
+            or counts is None
+            or counts.shape != (32,)
+            or counts.dtype != torch.int64
+            or counts.device != x.device
+            or group_list_type != 1
+            or not self.scratch.same_stream()
+        ):
+            return None
+        # The actual AllGather EP dispatcher produces count mode (type 1).
+        # Do not infer support for unobserved prefix/type-0 producers.
+        cpu_counts = counts.cpu().tolist()
+        plan = tile_plan(cpu_counts, x.shape[0])
+        if plan is None:
+            self.note("occupancy_fallback", rows=x.shape[0], total=sum(cpu_counts), max_count=max(cpu_counts))
+            return None
+        tiles = len(plan)
+        metadata = self.scratch.metadata[:tiles]
+        # Exactly one small metadata transfer after the existing counts readback.
+        metadata.copy_(torch.tensor(plan, dtype=torch.int64, device="cpu"))
+        total = sum(cpu_counts)
+        self.note(
+            "prepare_accept",
+            rows=x.shape[0],
+            total=total,
+            S=tiles,
+            waves=(tiles + WAVE_TILES - 1) // WAVE_TILES,
+            max_count=max(cpu_counts),
+            slot=slot,
+            generation=self.generation,
+        )
+        return CubeRouting(x, counts, slot, self.generation, metadata, tiles, total, max(cpu_counts))
+
+    def shrink_pair(self, x, combined, weights, routing, bgmv, bmm=None):
+        self._refresh_views(weights)
+        if (
+            routing.x is not x
+            or routing.generation != self.generation
+            or routing.slot not in self.loaded
+            or combined.shape != (x.shape[0],)
+            or combined.dtype != torch.int64
+            or combined.device != x.device
+        ):
+            raise ValueError("Stale Cube routing/weight identity")
+        slot = routing.slot
+        key = (slot, self.generation, self.weight_keys)
+        if key != self.key:
+            self.packed[:, :, :16].copy_(self.weights[0][slot].transpose(1, 2))
+            self.packed[:, :, 16:].copy_(self.weights[1][slot].transpose(1, 2))
+            self.key = key
+            self.pack_count += 1
+        scratch = self.scratch
+        if not scratch.same_stream():
+            raise ValueError("Cube scratch stream changed after prepare")
+        rows, tiles = x.shape[0], routing.tile_count
+        outputs = tuple(out[: rows + 1].zero_() for out in scratch.outputs)
+        scratch.sink.fill_(rows)
+        # No output reset between waves. Same stream orders both scatter planes
+        # before the next wave overwrites the matrix arena.
+        for start in range(0, tiles, WAVE_TILES):
+            stop = min(start + WAVE_TILES, tiles)
+            size = stop - start
+            metadata = routing.metadata[start:stop]
+            source, valid = scratch.source[:size], scratch.valid[:size]
+            torch.add(metadata[:, 1:2], scratch.j, out=source)
+            source.clamp_max_(rows - 1)
+            torch.lt(scratch.j, metadata[:, 2:3], out=valid)
+            gathered, packed_x = scratch.gathered[:size], scratch.tiles[:size]
+            torch.index_select(x, 0, source.flatten(), out=gathered.view(-1, 4096))
+            torch.where(valid.unsqueeze(-1), gathered, scratch.zero, out=packed_x)
+            tile_weights = scratch.tile_weights[:size]
+            torch.index_select(self.packed, 0, metadata[:, 0], out=tile_weights)
+            if bmm is None:
+                product = torch.ops.aten.bmm.dtype_out(
+                    packed_x, tile_weights, torch.float32, out=scratch.product[:size]
+                )
+            else:
+                product = bmm(packed_x, tile_weights)
+            torch.where(valid, source, scratch.sink, out=scratch.destination[:size])
+            destination = scratch.destination[:size].flatten().unsqueeze(1).expand(-1, 16)
+            values = scratch.values[: size * TILE_ROWS]
+            for i, out in enumerate(outputs):
+                values.copy_(product[:, :, i * 16 : (i + 1) * 16].reshape(-1, 16))
+                out.scatter_(0, destination, values)
+        # All wave BMM/scatter APIs returned; no synchronization/device completion.
+        self.note(
+            "pair_submitted",
+            total=routing.total,
+            S=tiles,
+            max_count=routing.max_count,
+            waves=(tiles + WAVE_TILES - 1) // WAVE_TILES,
+            slot=slot,
+            generation=self.generation,
+            pack_count=self.pack_count,
+        )
+        return tuple(out[:rows] for out in outputs)

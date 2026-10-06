@@ -1,0 +1,200 @@
+import hashlib
+import importlib.util
+import json
+import sys
+import time
+from pathlib import Path
+
+import torch
+import torch_npu
+import vllm_ascend.ops
+
+ANALYSIS = Path(__file__).parent
+HOST = Path('{repo_root}')
+torch.set_num_threads(4)
+torch.npu.set_device(0)
+device = torch.device('npu:0')
+torch.ops.load_library('{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so')
+
+
+def module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules[name] = loaded
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+old = module('cube_before_scratch_reuse', ANALYSIS / 'cube_moe.before-scratch-reuse.py')
+new = module('cube_after_scratch_reuse', HOST / 'vllm_ascend/lora/cube_moe.py')
+
+
+def allocation_bytes(scratch):
+    storages = {}
+    for value in vars(scratch).values():
+        for tensor in value if isinstance(value, tuple) else (value,):
+            if isinstance(tensor, torch.Tensor):
+                storages[tensor.untyped_storage().data_ptr()] = tensor.untyped_storage().nbytes()
+    return sum(storages.values())
+
+
+def weights(seed):
+    torch.manual_seed(seed)
+    return tuple((torch.randn(2, 32, 16, 4096, device=device) * .02).to(torch.bfloat16) for _ in range(2))
+
+
+wa = weights(7101)
+wb = weights(7102)
+states = {
+    'old_a': old.CubeW13State(wa),
+    'new_a': new.CubeW13State(wa),
+    'old_b': old.CubeW13State(wb),
+    'new_b': new.CubeW13State(wb),
+}
+for state in states.values():
+    state.mark_loaded(0)
+    state.mark_loaded(1)
+assert states['old_a'].scratch is states['old_b'].scratch
+assert states['new_a'].scratch is states['new_b'].scratch
+assert states['new_a'].packed.data_ptr() != states['new_b'].packed.data_ptr()
+
+result = {
+    'timestamp_unix': time.time(),
+    'scope': 'Host source-only Cube arena reuse; old/new Cube same BMM, eager NPU, no model throughput',
+    'physical_device': 12,
+    'task_queue_enable': 1,
+    'source_sha256': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in [
+        HOST / 'vllm_ascend/lora/cube_moe.py', ANALYSIS / 'cube_moe.before-scratch-reuse.py',
+        HOST / 'tests/ut/lora/test_cube_scratch_reuse.py']},
+    'torch_version': torch.__version__,
+    'torch_npu_version': torch_npu.__version__,
+    'scratch_bytes': {'old': allocation_bytes(states['old_a'].scratch), 'new': allocation_bytes(states['new_a'].scratch)},
+    'same_shared_scratch_two_layers': True,
+    'cases': [],
+}
+assert result['scratch_bytes']['old'] - result['scratch_bytes']['new'] == 112 * 1024**2
+assert states['new_a'].scratch.gathered.data_ptr() == states['new_a'].scratch.tiles.data_ptr()
+
+# Measure the exact production full-wave where with complete input/output
+# aliasing after warmup. No input clone is included in this measurement.
+scratch = states['new_a'].scratch
+scratch.gathered.fill_(.25)
+scratch.valid.fill_(True)
+scratch.valid[:, -1] = False
+scratch.gathered[:, -1].fill_(float('nan'))
+mask = scratch.valid.unsqueeze(-1)
+torch.where(mask, scratch.gathered, scratch.zero, out=scratch.tiles)
+torch.npu.synchronize()
+scratch.gathered[:, -1].fill_(float('nan'))
+torch.npu.synchronize()
+start_ptr = scratch.gathered.data_ptr()
+torch.npu.reset_peak_memory_stats()
+start_allocated = torch.npu.memory_allocated()
+with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True, profile_memory=True) as prof:
+    torch.where(mask, scratch.gathered, scratch.zero, out=scratch.tiles)
+    torch.npu.synchronize()
+peak = torch.npu.max_memory_allocated()
+end_allocated = torch.npu.memory_allocated()
+events = [{ 'key': event.key, 'count': event.count, 'cpu_memory_usage': event.cpu_memory_usage,
+           'input_shapes': event.input_shapes } for event in prof.key_averages(group_by_input_shape=True)]
+result['where_alias'] = {
+    'shape': list(scratch.gathered.shape), 'input_output_same_pointer': scratch.tiles.data_ptr() == start_ptr,
+    'allocated_before': start_allocated, 'allocated_after': end_allocated,
+    'peak_increment_bytes': peak - start_allocated,
+    'aten_clone_calls': sum(e['count'] for e in events if e['key'] == 'aten::clone'),
+    'cpu_profile_events': events,
+    'padding_zero': bool((scratch.gathered[:, -1] == 0).all().item()),
+    'unmasked_preserved': bool((scratch.gathered[:, 0] == .25).all().item()),
+}
+assert result['where_alias']['input_output_same_pointer']
+assert result['where_alias']['padding_zero'] and result['where_alias']['unmasked_preserved']
+assert result['where_alias']['aten_clone_calls'] == 0
+assert any(e['key'] == 'aten::where' and e['count'] for e in events)
+# A hidden full-arena clone would cost at least 112 MiB. Record even smaller
+# backend workspace, rather than claiming the caching allocator sees all CANN.
+assert result['where_alias']['peak_increment_bytes'] < 112 * 1024**2
+
+
+def raw_diff(a, b):
+    return int((a.view(torch.int32) != b.view(torch.int32)).sum().item())
+
+
+def error(a, b):
+    delta = (a - b).abs()
+    return {'max_abs': float(delta.max()), 'max_rel': float((delta / b.abs().clamp_min(1.e-7)).max())}
+
+
+def run(name, layer, rows, count_list, slot, seed):
+    total = sum(count_list)
+    torch.manual_seed(seed)
+    x = (torch.randn(rows, 4096, device=device) * .03).to(torch.bfloat16)
+    x[total:].fill_(float('nan'))
+    counts = torch.tensor(count_list, dtype=torch.int64, device=device)
+    combined = torch.full((rows,), -(2**63), dtype=torch.int64, device=device)
+    combined[:total] = torch.repeat_interleave(torch.arange(32, device=device), counts) + slot * 32
+    current_weights = wa if layer == 'a' else wb
+    values = {}
+    details = {'name': name, 'rows': rows, 'total_valid': total, 'slot': slot, 'counts': count_list}
+    for version in ['old', 'new']:
+        state = states[version + '_' + layer]
+        route = state.prepare(x, counts, 1, slot)
+        assert route is not None
+        for out in state.scratch.outputs:
+            out[rows + 1:rows + 5].fill_(123)
+        output = state.shrink_pair(x, combined, current_weights, route, None)
+        torch.npu.synchronize()
+        values[version] = tuple(y.cpu() for y in output)
+        details[version + '_waves'] = (route.tile_count + 223) // 224
+        details[version + '_tiles'] = route.tile_count
+        details[version + '_canary'] = [bool((out[rows + 1:rows + 5] == 123).all().item()) for out in state.scratch.outputs]
+        details[version + '_tail_zero'] = [bool((y[total:] == 0).all()) for y in values[version]]
+        assert all(details[version + '_canary']) and all(details[version + '_tail_zero'])
+    details['old_new_raw_bits_unequal'] = [raw_diff(a, b) for a, b in zip(values['old'], values['new'])]
+    assert details['old_new_raw_bits_unequal'] == [0, 0]
+
+    legacy = []
+    for weight in current_weights:
+        y = torch.zeros(rows, 16, dtype=torch.float32, device=device)
+        torch.ops._C_ascend.bgmv_shrink(x, weight.view(-1, 16, 4096), combined, y, 1.)
+        legacy.append(y)
+    torch.npu.synchronize()
+    legacy = [y.cpu() for y in legacy]
+    details['legacy_bgmv_error'] = [error(a, b) for a, b in zip(values['new'], legacy)]
+    for a, b in zip(values['new'], legacy):
+        torch.testing.assert_close(a, b, rtol=1.e-4, atol=1.e-5)
+    # Independent FP64 reference samples across the entire expert-major prefix.
+    samples_cpu = torch.linspace(0, total - 1, 16).round().long()
+    samples = samples_cpu.to(device)
+    sample_x = x.index_select(0, samples).cpu().double()
+    groups = combined.index_select(0, samples)
+    cpu_errors = []
+    for output, weight in zip(values['new'], current_weights):
+        selected = weight.view(-1, 16, 4096).index_select(0, groups).cpu().double()
+        reference = torch.bmm(selected, sample_x.unsqueeze(-1)).squeeze(-1).float()
+        observed = output.index_select(0, samples_cpu)
+        cpu_errors.append(error(observed, reference))
+        torch.testing.assert_close(observed, reference, rtol=1.e-4, atol=1.e-5)
+    details['cpu_fp64_sample_error'] = cpu_errors
+    details['cpu_sample_rows'] = 16
+    details['pass'] = True
+    result['cases'].append(details)
+    print(name, 'tiles', details['new_tiles'], 'old/new bits', details['old_new_raw_bits_unequal'], flush=True)
+
+
+run('partial_tiles_a', 'a', 6144, [65,31,0,2,64,127,223] + [0]*25, 0, 7103)
+run('two_waves_a', 'a', 16384, [901]*16 + [0]*16, 0, 7104)
+run('two_layers_shared_arena_b', 'b', 16384, [0]*16 + [903]*16, 0, 7105)
+run('changed_counts_back_a', 'a', 16384, [0]*16 + [903]*16, 0, 7106)
+for state in [states['old_a'], states['new_a']]:
+    state.invalidate(1)
+for weight in wa:
+    weight[1].mul_(-.5)
+for state in [states['old_a'], states['new_a']]:
+    state.mark_loaded(1)
+run('reload_slot1_small_after_large', 'a', 6144, [512] + [0]*31, 1, 7107)
+result['pack_count'] = {key: state.pack_count for key, state in states.items()}
+result['pass'] = True
+path = ANALYSIS / 'cube-scratch-reuse-validation.json'
+path.write_text(json.dumps(result, indent=2))
+print(json.dumps({'pass': True, 'result': str(path), 'scratch_bytes': result['scratch_bytes'],
+                  'where_peak_increment': result['where_alias']['peak_increment_bytes']}), flush=True)

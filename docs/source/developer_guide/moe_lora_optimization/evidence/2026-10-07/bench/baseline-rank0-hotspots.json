@@ -1,0 +1,595 @@
+{
+  "analysis_date": "2026-10-07",
+  "source": "{profiles_root}/tp-ep-lora-dspark5-baseline-20261007/dp0_pp0_tp0_dcp0_ep0_rank0_83371_20261006182459752_ascend_pt/ASCEND_PROFILER_OUTPUT",
+  "rank": 0,
+  "physical_device": 8,
+  "model_id": 49,
+  "model_table": [
+    [
+      4294967295,
+      275937,
+      268417,
+      1791311099841752275,
+      1791311130785232596
+    ],
+    [
+      49,
+      95205,
+      8655,
+      1791311129450477552,
+      1791311130750624072
+    ],
+    [
+      37,
+      8655,
+      8655,
+      1791311103593864285,
+      1791311103641427346
+    ]
+  ],
+  "total_steady_replays": 11,
+  "selected_replays": [
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "method": "TASK.modelId is authoritative. Every globalTaskId of model49 repeats exactly11 times. Assign chronological occurrence to replay; summarize last5 homogeneous main graph replays6–10. CANN kernel input shapes remain available although PyTorch record_shapes is false. All duration sums are arithmetic work, not critical-path savings; streams and category scopes may overlap. hcom_allReduce and AivKernel identify the same communication task and must not be added. Inter-main gaps include eager draft, sampler, metadata and host dispatch; untracked-device time is not a pure CPU-idle metric.",
+  "shape_evidence": {
+    "requests": 8,
+    "num_speculative_tokens": 5,
+    "main_target_tokens": 48,
+    "main_routed_rows": 288,
+    "draft_query_tokens": 40,
+    "draft_routed_rows": 240,
+    "topk": 6,
+    "hidden_size": 4096,
+    "intermediate_size": 2048,
+    "local_experts": 32,
+    "lora_rank": 16,
+    "target_layers": 43,
+    "draft_layers_seen_per_gap": 3
+  },
+  "activation_semantics": "Main routed kernel is ordinary SwiGlu(288x4096), attr_0:-1; no routed activation clamp. Limit10 clamps have shape48x256 and belong to TP-sharded shared activation. Gap draft has fused GroupedMatmulSwigluQuant(240x4096) and no LoRA BGMV/SGMV primitives.",
+  "main_device_span_ms": {
+    "count": 5,
+    "mean": 81.614707,
+    "median": 81.608243,
+    "min": 81.222948,
+    "max": 82.021139
+  },
+  "main_noncomm_compute_union_ms": {
+    "count": 5,
+    "mean": 72.8182898,
+    "median": 72.844142,
+    "min": 72.491937,
+    "max": 73.102559
+  },
+  "main_compute_and_aiv_union_ms": {
+    "count": 5,
+    "mean": 79.61170560000001,
+    "median": 79.59793,
+    "min": 79.221827,
+    "max": 80.014222
+  },
+  "main_summed_compute_and_aiv_ms": {
+    "count": 5,
+    "mean": 81.8090018,
+    "median": 81.789803,
+    "min": 81.41764,
+    "max": 82.220947
+  },
+  "groups": {
+    "routed_lora_bgmv": {
+      "calls_per_replay": 258,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 13.9420808,
+        "median": 13.980377,
+        "min": 13.766096,
+        "max": 14.018176
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 13.9420808,
+        "median": 13.980377,
+        "min": 13.766096,
+        "max": 14.018176
+      }
+    },
+    "shared_lora_sgmv": {
+      "calls_per_replay": 258,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.4274268,
+        "median": 4.426395,
+        "min": 4.425155,
+        "max": 4.430873
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.4274268,
+        "median": 4.426395,
+        "min": 4.425155,
+        "max": 4.430873
+      }
+    },
+    "ep_inverse_routing_recovery": {
+      "calls_per_replay": 1462,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 5.9135366,
+        "median": 5.915641,
+        "min": 5.903608,
+        "max": 5.925916
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 5.9135366,
+        "median": 5.915641,
+        "min": 5.903608,
+        "max": 5.925916
+      }
+    },
+    "combined_lora_slot_metadata": {
+      "calls_per_replay": 430,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.7822224,
+        "median": 1.782176,
+        "min": 1.78063,
+        "max": 1.783411
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.7822224,
+        "median": 1.782176,
+        "min": 1.78063,
+        "max": 1.783411
+      }
+    },
+    "routed_lora_zero_intermediates": {
+      "calls_per_replay": 129,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.2370088,
+        "median": 0.236868,
+        "min": 0.236627,
+        "max": 0.237793
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.2370088,
+        "median": 0.236868,
+        "min": 0.236627,
+        "max": 0.237793
+      }
+    },
+    "routed_mask_and_buffer_copy": {
+      "calls_per_replay": 258,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 3.817205,
+        "median": 3.817891,
+        "min": 3.81421,
+        "max": 3.820948
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 3.817205,
+        "median": 3.817891,
+        "min": 3.81421,
+        "max": 3.820948
+      }
+    },
+    "routed_swiglu_and_output_quant": {
+      "calls_per_replay": 86,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.263201,
+        "median": 1.262149,
+        "min": 1.260428,
+        "max": 1.26685
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.263201,
+        "median": 1.262149,
+        "min": 1.260428,
+        "max": 1.26685
+      }
+    },
+    "routed_input_quant": {
+      "calls_per_replay": 43,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.559294,
+        "median": 0.559347,
+        "min": 0.558121,
+        "max": 0.560218
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 0.559294,
+        "median": 0.559347,
+        "min": 0.558121,
+        "max": 0.560218
+      }
+    },
+    "mtp_full_buffer_moves": {
+      "calls_per_replay": 2,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.7141364000000001,
+        "median": 1.715168,
+        "min": 1.711648,
+        "max": 1.716069
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 1.7141364000000001,
+        "median": 1.715168,
+        "min": 1.711648,
+        "max": 1.716069
+      }
+    },
+    "base_expert_grouped_matmuls": {
+      "calls_per_replay": 86,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 8.312155,
+        "median": 8.320532,
+        "min": 8.132884,
+        "max": 8.514187
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 8.312155,
+        "median": 8.320532,
+        "min": 8.132884,
+        "max": 8.514187
+      }
+    },
+    "hc_pre_post": {
+      "calls_per_replay": 172,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.9423604,
+        "median": 4.940663,
+        "min": 4.93476,
+        "max": 4.95017
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 4.9423604,
+        "median": 4.940663,
+        "min": 4.93476,
+        "max": 4.95017
+      }
+    },
+    "attention_indexer_compression": {
+      "calls_per_replay": 188,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 7.0377792,
+        "median": 7.045439,
+        "min": 6.983033,
+        "max": 7.070821
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 7.0377792,
+        "median": 7.045439,
+        "min": 6.983033,
+        "max": 7.070821
+      }
+    },
+    "allreduce_aiv": {
+      "calls_per_replay": 87,
+      "summed_device_ms_per_replay": {
+        "count": 5,
+        "mean": 6.7934158,
+        "median": 6.753788,
+        "min": 6.392794,
+        "max": 7.084765
+      },
+      "union_device_ms_per_replay": {
+        "count": 5,
+        "mean": 6.7934158,
+        "median": 6.753788,
+        "min": 6.392794,
+        "max": 7.084765
+      }
+    }
+  },
+  "routing_recovery_pattern": {
+    "layers": 43,
+    "kernels_per_layer": 34,
+    "pattern": [
+      [
+        "aclnnInplaceCopy_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnGeScalar_GreaterEqual_GreaterEqual",
+        "\"288;\""
+      ],
+      [
+        "aclnnLtScalar_LessAiCore_Less",
+        "\"288;\""
+      ],
+      [
+        "aclnnBitwiseAndTensor_LogicalAndAiCore_LogicalAnd",
+        "\"288;288\""
+      ],
+      [
+        "aclnnInplaceFillScalar_FillAiCore_Fill",
+        "\"1;\""
+      ],
+      [
+        "aclnnSWhere_SelectV2AiCore_SelectV2",
+        "\"288;288;\""
+      ],
+      [
+        "aclnnInplaceCopy_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnSort_SortAiCore_Sort",
+        "\"288\""
+      ],
+      [
+        "aclnnSort_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnArange_ArangeAiCore_Range",
+        "\";;\""
+      ],
+      [
+        "aclnnIndex_IndexCheck_IndexCheck",
+        "\"1;288\""
+      ],
+      [
+        "aclnnIndex_IndexAiCore_Index",
+        "\"288;1;1;288\""
+      ],
+      [
+        "aclnnEqTensor_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnEqTensor_EqualAiCore_Equal",
+        "\"288;288\""
+      ],
+      [
+        "aclnnIndex_IndexCheck_IndexCheck",
+        "\"1;288\""
+      ],
+      [
+        "aclnnIndex_IndexAiCore_Index",
+        "\"288;1;1;288\""
+      ],
+      [
+        "aclnnInplaceCopy_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnGeScalar_GreaterEqual_GreaterEqual",
+        "\"288;\""
+      ],
+      [
+        "aclnnLtScalar_LessAiCore_Less",
+        "\"288;\""
+      ],
+      [
+        "aclnnBitwiseAndTensor_LogicalAndAiCore_LogicalAnd",
+        "\"288;288\""
+      ],
+      [
+        "aclnnClamp_ClipByValueV2AiCore_ClipByValueV2",
+        "\"288;;\""
+      ],
+      [
+        "aclnnIndex_IndexCheck_IndexCheck",
+        "\"1;288\""
+      ],
+      [
+        "aclnnIndex_IndexAiCore_Index",
+        "\"256;1;1;288\""
+      ],
+      [
+        "aclnnInplaceCopy_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnBitwiseAndTensor_LogicalAndAiCore_LogicalAnd",
+        "\"288;288\""
+      ],
+      [
+        "aclnnGeScalar_GreaterEqual_GreaterEqual",
+        "\"288;\""
+      ],
+      [
+        "aclnnBitwiseAndTensor_LogicalAndAiCore_LogicalAnd",
+        "\"288;288\""
+      ],
+      [
+        "aclnnFloorDivides_FloorDivAiCore_FloorDiv",
+        "\"288;\""
+      ],
+      [
+        "aclnnIndex_IndexCheck_IndexCheck",
+        "\"1;288\""
+      ],
+      [
+        "aclnnIndex_IndexAiCore_Index",
+        "\"48;1;1;288\""
+      ],
+      [
+        "aclnnInplaceFillScalar_FillAiCore_Fill",
+        "\"1;\""
+      ],
+      [
+        "aclnnSWhere_SelectV2AiCore_SelectV2",
+        "\"288;288;\""
+      ],
+      [
+        "aclnnInplaceFillScalar_FillAiCore_Fill",
+        "\"1;\""
+      ],
+      [
+        "aclnnSWhere_SelectV2AiCore_SelectV2",
+        "\"288;288;\""
+      ]
+    ]
+  },
+  "combined_metadata_pattern": {
+    "layers": 43,
+    "kernels_per_layer": 10,
+    "pattern": [
+      [
+        "aclnnClamp_ClipByValueV2AiCore_ClipByValueV2",
+        "\"288;;\""
+      ],
+      [
+        "aclnnGeScalar_GreaterEqual_GreaterEqual",
+        "\"288;\""
+      ],
+      [
+        "aclnnIndex_IndexCheck_IndexCheck",
+        "\"1;288\""
+      ],
+      [
+        "aclnnIndex_IndexAiCore_Index",
+        "\"4;1;1;288\""
+      ],
+      [
+        "aclnnInplaceCopy_CastAiCore_Cast",
+        "\"288\""
+      ],
+      [
+        "aclnnBitwiseAndTensor_LogicalAndAiCore_LogicalAnd",
+        "\"288;288\""
+      ],
+      [
+        "aclnnMuls_MulAiCore_Mul",
+        "\"288;\""
+      ],
+      [
+        "aclnnAdd_AddAiCore_Add",
+        "\"288;288\""
+      ],
+      [
+        "aclnnInplaceFillScalar_FillAiCore_Fill",
+        "\"1;\""
+      ],
+      [
+        "aclnnSWhere_SelectV2AiCore_SelectV2",
+        "\"288;288;288\""
+      ]
+    ]
+  },
+  "last_steady_gap_span_ms": {
+    "count": 4,
+    "mean": 40.76937975,
+    "median": 40.821632,
+    "min": 40.358533,
+    "max": 41.075722
+  },
+  "communication_kernel_details_all11": {
+    "hcom_allReduce": {
+      "calls_per_replay": 87.0,
+      "summed_device_ms_per_replay": 6.25039227272728
+    }
+  },
+  "graph_execute_host_calls": [
+    [
+      1791311103586165690,
+      1791311103593682470,
+      306729
+    ],
+    [
+      1791311129441124420,
+      1791311129449179680,
+      633186
+    ],
+    [
+      1791311129569763450,
+      1791311129569778530,
+      637036
+    ],
+    [
+      1791311129691465580,
+      1791311129691481180,
+      640886
+    ],
+    [
+      1791311129812816320,
+      1791311129812830820,
+      644736
+    ],
+    [
+      1791311129934243800,
+      1791311129934258210,
+      648763
+    ],
+    [
+      1791311130055854930,
+      1791311130055869730,
+      652613
+    ],
+    [
+      1791311130178123530,
+      1791311130178138360,
+      656463
+    ],
+    [
+      1791311130300495200,
+      1791311130300510030,
+      660316
+    ],
+    [
+      1791311130422395200,
+      1791311130422410240,
+      664162
+    ],
+    [
+      1791311130544838360,
+      1791311130544860970,
+      668012
+    ],
+    [
+      1791311130667657250,
+      1791311130667696940,
+      671864
+    ]
+  ],
+  "swiglu_host_api_counts": {
+    "npu::npu_swiglu": 344,
+    "aclnnSwiGlu": 344,
+    "_C_ascend::grouped_matmul_swiglu_quant_weight_nz": 60,
+    "aclnnGroupedMatmulSwigluQuantWeightNZ": 60,
+    "_C_ascend::npu_dequant_swiglu_quant": 60,
+    "aclnnDequantSwigluQuantV2": 60
+  },
+  "limitations": [
+    "Profile is8K-input/128-output/C8 and is excluded from formal8192/4096 performance.",
+    "Only rank0/device8 was parsed; other ranks may contain different waiting time.",
+    "No full43-layer CPU/device trace attribution or cross-rank critical-path calculation.",
+    "Adapter sampled A/B values were zero; adapter quality and complete nonzero status are unverified.",
+    "Nested host API/scope durations overlap; their summed columns must not be added together.",
+    "Gap AIV union is a tracked communication subset; some collectives use other device tasks."
+  ],
+  "portable_evidence": {
+    "original_artifact_sha256": "3cc5ce807effcba2e3d5ebd040388cc551d12f596cff106eb876b20e79732cd1",
+    "omitted_fields": [
+      "steps",
+      "operations",
+      "inter_main_gaps"
+    ],
+    "measurement_values_preserved": true,
+    "raw_profiler_included": false
+  }
+}

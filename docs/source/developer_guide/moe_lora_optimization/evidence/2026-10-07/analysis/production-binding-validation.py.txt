@@ -1,0 +1,216 @@
+"""Fresh installed binding, production compiler options, physical device12 only."""
+import hashlib
+import json
+import os
+import sys
+import traceback
+from pathlib import Path
+from types import SimpleNamespace
+
+assert os.environ.get("ASCEND_RT_VISIBLE_DEVICES") == "12"
+assert os.environ.get("TASK_QUEUE_ENABLE") == "1"
+os.environ["VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR"] = "1"
+os.environ["VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION"] = "1"
+sys.path.insert(0, "{installed_repo}")
+
+import torch
+import torch_npu
+import npugraph_ex as nge
+from npugraph_ex.configs.compiler_config import _process_kwargs_options
+
+
+DIRECTORY = Path(__file__).parent
+OUTPUT = DIRECTORY / "production-binding-validation.json"
+LIBRARY = Path("{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so")
+KERNEL = LIBRARY.parent / "libvllm_ascend_kernels.so"
+OPTIONS = {"force_eager": True, "inplace_pass": False, "clone_input": False, "clone_output": False}
+
+
+def bits(expected, actual):
+    if isinstance(expected, torch.Tensor):
+        expected, actual = (expected,), (actual,)
+    metrics = []
+    for ref, out in zip(expected, actual, strict=True):
+        ref, out = ref.cpu(), out.cpu()
+        typ = {torch.bfloat16: torch.int16, torch.float16: torch.int16,
+               torch.float32: torch.int32, torch.int8: torch.int8}[ref.dtype]
+        metrics.append(int((ref.view(typ) != out.view(typ)).sum()))
+    assert not any(metrics), metrics
+    return metrics
+
+
+def compile_fn(fn):
+    config = nge.CompilerConfig()
+    _process_kwargs_options(config, {"options": OPTIONS})
+    return torch.compile(fn, backend=nge.get_npu_backend(compiler_config=config), fullgraph=True, dynamic=False)
+
+
+def main():
+    torch.set_num_threads(4)
+    torch.npu.set_device(0)
+    torch.npu.config.allow_internal_format = True
+    torch.npu.set_compile_mode(jit_compile=False)
+    torch.ops.load_library(str(LIBRARY))
+    from vllm_ascend.utils import adapt_patch, register_ascend_customop
+    adapt_patch()
+    adapt_patch(True)
+    register_ascend_customop()
+    from vllm_ascend.lora.punica_npu import _can_fuse_float_moe_shrink_pair
+    from vllm_ascend.lora.activation import can_fuse_moe_lora_activation
+    from vllm_ascend.ascend_forward_context import MoECommType
+
+    pair = torch.ops._C_ascend.bgmv_shrink_pair
+    single = torch.ops._C_ascend.bgmv_shrink
+    activate = torch.ops._C_ascend.moe_lora_activation_quant
+    report = {"physical_device": 12, "task_queue_enable": 1,
+              "scope": "Installed native/production guards, npugraph_ex FX plus outer NPUGraph; no model throughput",
+              "options": OPTIONS, "fullgraph": True, "dynamic": False,
+              "sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in (LIBRARY, KERNEL)},
+              "checks": [], "pair": [], "activation": [], "pass": False}
+
+    def save():
+        OUTPUT.write_text(json.dumps(report, indent=2) + "\n")
+
+    def rejected(name, fn):
+        try:
+            fn()
+            torch.npu.synchronize()
+        except (RuntimeError, ValueError) as error:
+            report["checks"].append({"name": name, "rejected": True, "error": str(error)})
+            save()
+            return
+        raise AssertionError(f"{name} accepted invalid input")
+
+    def baseline(x, a0, a1, ids):
+        outputs = tuple(torch.zeros((x.shape[0], 16), dtype=torch.float32, device=x.device) for _ in range(2))
+        single(x, a0.reshape(-1, 16, 4096), ids, outputs[0], 1.)
+        single(x, a1.reshape(-1, 16, 4096), ids, outputs[1], 1.)
+        return outputs
+
+    def fused(x, a0, a1, ids):
+        if not _can_fuse_float_moe_shrink_pair(x, (a0, a1), ids):
+            raise RuntimeError("Production pair guard did not hit")
+        output = torch.zeros((2, x.shape[0], 16), dtype=torch.float32, device=x.device)
+        pair(x, a0.reshape(-1, 16, 4096), a1.reshape(-1, 16, 4096), ids, output, 1.)
+        return output
+
+    save()
+    try:
+        for rows in (0, 48, 288):
+            mx = torch.empty((rows, 4096), dtype=torch.bfloat16, device="meta")
+            ma = torch.empty((96, 16, 4096), dtype=torch.bfloat16, device="meta")
+            mi = torch.empty((rows,), dtype=torch.int64, device="meta")
+            my = torch.empty((2, rows, 16), dtype=torch.float32, device="meta")
+            assert pair(mx, ma, ma, mi, my, 1.) is None
+            report["checks"].append({"name": f"pair_meta_{rows}", "pass": True})
+        rejected("meta_bad_output_dtype", lambda: pair(mx, ma, ma, mi, my.to(torch.bfloat16), 1.))
+
+        for rows in (48, 288):
+            torch.manual_seed(20261007 + rows)
+            x = (torch.randn(rows, 4096) * .5).to(torch.bfloat16).npu()
+            weights = tuple((torch.randn(3, 32, 16, 4096) * .03125).to(torch.bfloat16).npu() for _ in range(2))
+            ids = torch.randint(96, (rows,), dtype=torch.int64).npu()
+            ids[rows // 8:] = -1
+            assert _can_fuse_float_moe_shrink_pair(x, weights, ids)
+            formats = [int(torch_npu.get_npu_format(t)) for t in (x, *weights, ids)]
+            row = {"rows": rows, "dtype": "torch.bfloat16", "formats": formats, "guard_hit": True,
+                   "eager_bits_unequal": bits(baseline(x, *weights, ids), fused(x, *weights, ids)), "replays": []}
+            compiled = compile_fn(fused)
+            for _ in range(3):
+                output = compiled(x, *weights, ids)
+            row["compiled_bits_unequal"] = bits(baseline(x, *weights, ids), output)
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                captured = compiled(x, *weights, ids)
+            for replay in range(3):
+                x.copy_((torch.randn_like(x) * .3))
+                for w in weights:
+                    w.copy_(torch.randn_like(w) * .02)
+                ids.copy_(torch.randint(96, (rows,), dtype=torch.int64, device="npu"))
+                if replay == 0:
+                    ids[rows // 8:] = -(2**63)
+                elif replay == 1:
+                    ids.fill_(-1)
+                graph.replay()
+                reference = baseline(x, *weights, ids)
+                row["replays"].append({"replay": replay, "all_inactive": replay == 1,
+                                       "bits_unequal": bits(reference, captured)})
+            # Full binding checks execute before device launch; never invoke a
+            # legacy single on blocked storage just to make a negative reference.
+            blocked = torch_npu.npu_format_cast(x.clone(), 29)
+            assert blocked.is_contiguous() and int(torch_npu.get_npu_format(blocked)) == 29
+            flat = tuple(w.reshape(-1, 16, 4096) for w in weights)
+            y = torch.zeros((2, rows, 16), dtype=torch.float32, device="npu")
+            rejected(f"pair_blocked_x_{rows}", lambda: pair(blocked, *flat, ids, y, 1.))
+            rejected(f"compiled_cached_nd_then_blocked_{rows}", lambda: compiled(blocked, *weights, ids))
+            ncx = x.transpose(0, 1).contiguous().transpose(0, 1)
+            rejected(f"pair_noncontiguous_x_{rows}", lambda: pair(ncx, *flat, ids, y, 1.))
+            if rows == 48:
+                nwa = flat[0].transpose(1, 2).contiguous().transpose(1, 2)
+                rejected("pair_noncontiguous_weight", lambda: pair(x, nwa, flat[1], ids, y, 1.))
+                blocked_weight = torch_npu.npu_format_cast(flat[0], 29)
+                rejected("pair_blocked_weight", lambda: pair(x, blocked_weight, flat[1], ids, y, 1.))
+                alias = x.view(torch.float32).reshape(-1)[:2 * rows * 16].view(2, rows, 16)
+                rejected("pair_output_alias_input", lambda: pair(x, *flat, ids, alias, 1.))
+                backing = torch.full((y.numel() + 2,), 123., dtype=torch.float32, device="npu")
+                protected_y = backing[1:-1].view_as(y)
+                initial = torch.randn_like(y)
+                ids[1::2] = -1
+                initial[:, 1::2] = -0.
+                protected_y.copy_(initial)
+                expected = initial.clone()
+                for plane in range(2):
+                    single(x, flat[plane], ids, expected[plane], .5)
+                pair(x, *flat, ids, protected_y, .5)
+                row["preserved_inactive_bits_unequal"] = bits(expected, protected_y)
+                assert backing.cpu()[[0, -1]].tolist() == [123., 123.]
+                row["protected_padding"] = [123., 123.]
+            row["pass"] = True
+            report["pair"].append(row)
+            save()
+            print(f"pair rows={rows} PASS", flush=True)
+            del graph, captured
+            torch._dynamo.reset()
+
+        payload = SimpleNamespace(lora_context=SimpleNamespace(use_ep=True, fully_sharded=False),
+                                  activation="silu", topk_scales=None, swiglu_limit=0.)
+        def activation_fn(x):
+            if not can_fuse_moe_lora_activation(x, payload, MoECommType.ALLGATHER):
+                raise RuntimeError("Production activation guard did not hit")
+            return activate(x, 0.)
+        def activation_reference(x):
+            floating = torch_npu.npu_swiglu(x)
+            quantized, scale = torch_npu.npu_dynamic_quant(floating)
+            return floating, quantized, scale
+        x = (torch.randn(288, 4096) * 4).to(torch.bfloat16).npu()
+        assert can_fuse_moe_lora_activation(x, payload, MoECommType.ALLGATHER)
+        row = {"rows": 288, "limit": 0., "guard_hit": True,
+               "eager_bits_unequal": bits(activation_reference(x), activation_fn(x)), "replays": []}
+        compiled = compile_fn(activation_fn)
+        for _ in range(3):
+            output = compiled(x)
+        row["compiled_bits_unequal"] = bits(activation_reference(x), output)
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            captured = compiled(x)
+        for replay in range(3):
+            x.copy_(torch.randn_like(x) * (2 + replay))
+            if replay == 1:
+                x.zero_()
+            graph.replay()
+            row["replays"].append({"replay": replay, "bits_unequal": bits(activation_reference(x), captured)})
+        row["pass"] = True
+        report["activation"].append(row)
+        report["pass"] = True
+        save()
+        print("activation288 PASS; all production checks PASS", flush=True)
+    except Exception:
+        report["error"] = traceback.format_exc()
+        save()
+        raise
+
+
+if __name__ == "__main__":
+    main()

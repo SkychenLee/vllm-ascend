@@ -1,0 +1,17 @@
+{
+  "action": "install",
+  "libraries": {
+    "{installed_repo}/vllm_ascend/libvllm_ascend_kernels.so": {
+      "sha256": "ff5266af525ae36ea604856c9ddc81fd9bda7bbffc50560a9b441a1f2a9c6894",
+      "expected_sha256": "ff5266af525ae36ea604856c9ddc81fd9bda7bbffc50560a9b441a1f2a9c6894"
+    },
+    "{installed_repo}/vllm_ascend/lib/libvllm_ascend_kernels.so": {
+      "sha256": "ff5266af525ae36ea604856c9ddc81fd9bda7bbffc50560a9b441a1f2a9c6894",
+      "expected_sha256": "ff5266af525ae36ea604856c9ddc81fd9bda7bbffc50560a9b441a1f2a9c6894"
+    },
+    "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": {
+      "sha256": "f7355731daa346a7fd7ff87bdaaddbceaea402fb391bcd7339644e8a45c7a674",
+      "expected_sha256": "f7355731daa346a7fd7ff87bdaaddbceaea402fb391bcd7339644e8a45c7a674"
+    }
+  }
+}

@@ -1,0 +1,227 @@
+{
+  "physical_device": 12,
+  "task_queue_enable": 1,
+  "scope": "Installed native/production guards, npugraph_ex FX plus outer NPUGraph; no model throughput",
+  "options": {
+    "force_eager": true,
+    "inplace_pass": false,
+    "clone_input": false,
+    "clone_output": false
+  },
+  "fullgraph": true,
+  "dynamic": false,
+  "sha256": {
+    "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": "f7355731daa346a7fd7ff87bdaaddbceaea402fb391bcd7339644e8a45c7a674",
+    "{installed_repo}/vllm_ascend/libvllm_ascend_kernels.so": "ff5266af525ae36ea604856c9ddc81fd9bda7bbffc50560a9b441a1f2a9c6894"
+  },
+  "checks": [
+    {
+      "name": "pair_meta_0",
+      "pass": true
+    },
+    {
+      "name": "pair_meta_48",
+      "pass": true
+    },
+    {
+      "name": "pair_meta_288",
+      "pass": true
+    },
+    {
+      "name": "meta_bad_output_dtype",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: output must be FP32 and indices int64"
+    },
+    {
+      "name": "pair_blocked_x_48",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: Decode fusion requires ND/base storage (format 0 or 2)"
+    },
+    {
+      "name": "compiled_cached_nd_then_blocked_48",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: Decode fusion requires ND/base storage (format 0 or 2)"
+    },
+    {
+      "name": "pair_noncontiguous_x_48",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: all tensors must be contiguous"
+    },
+    {
+      "name": "pair_noncontiguous_weight",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: all tensors must be contiguous"
+    },
+    {
+      "name": "pair_blocked_weight",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: Decode fusion requires ND/base storage (format 0 or 2)"
+    },
+    {
+      "name": "pair_output_alias_input",
+      "rejected": true,
+      "error": "unsupported operation: some elements of the input tensor and the written-to tensor refer to a single memory location. Please clone() the tensor before performing the operation."
+    },
+    {
+      "name": "pair_blocked_x_288",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: Decode fusion requires ND/base storage (format 0 or 2)"
+    },
+    {
+      "name": "compiled_cached_nd_then_blocked_288",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: Decode fusion requires ND/base storage (format 0 or 2)"
+    },
+    {
+      "name": "pair_noncontiguous_x_288",
+      "rejected": true,
+      "error": "bgmv_shrink_pair: all tensors must be contiguous"
+    }
+  ],
+  "pair": [
+    {
+      "rows": 48,
+      "dtype": "torch.bfloat16",
+      "formats": [
+        2,
+        0,
+        0,
+        2
+      ],
+      "guard_hit": true,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "replays": [
+        {
+          "replay": 0,
+          "all_inactive": false,
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "all_inactive": true,
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "all_inactive": false,
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "compiled_bits_unequal": [
+        0,
+        0
+      ],
+      "preserved_inactive_bits_unequal": [
+        0
+      ],
+      "protected_padding": [
+        123.0,
+        123.0
+      ],
+      "pass": true
+    },
+    {
+      "rows": 288,
+      "dtype": "torch.bfloat16",
+      "formats": [
+        2,
+        0,
+        0,
+        2
+      ],
+      "guard_hit": true,
+      "eager_bits_unequal": [
+        0,
+        0
+      ],
+      "replays": [
+        {
+          "replay": 0,
+          "all_inactive": false,
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "all_inactive": true,
+          "bits_unequal": [
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "all_inactive": false,
+          "bits_unequal": [
+            0,
+            0
+          ]
+        }
+      ],
+      "compiled_bits_unequal": [
+        0,
+        0
+      ],
+      "pass": true
+    }
+  ],
+  "activation": [
+    {
+      "rows": 288,
+      "limit": 0.0,
+      "guard_hit": true,
+      "eager_bits_unequal": [
+        0,
+        0,
+        0
+      ],
+      "replays": [
+        {
+          "replay": 0,
+          "bits_unequal": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 1,
+          "bits_unequal": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "replay": 2,
+          "bits_unequal": [
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "compiled_bits_unequal": [
+        0,
+        0,
+        0
+      ],
+      "pass": true
+    }
+  ],
+  "pass": true
+}

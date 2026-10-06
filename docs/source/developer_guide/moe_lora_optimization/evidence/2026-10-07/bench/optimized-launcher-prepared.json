@@ -1,0 +1,29 @@
+{
+  "status": "prepared_not_started",
+  "baseline_launcher_sha256": "467898db813b7d1af93e0c2bd1aad6f891ba120d8494abf7a5e37233e2a1928f",
+  "optimized_launcher_sha256": "9ab45c1e5964b69572de9bb89c90a73d2d866da3ac70e341702d5cbc541042cd",
+  "changes": [
+    "routing=1",
+    "activation=1",
+    "fused_shrink_pair=1",
+    "MTP_copy/DSpark_stash_skip=1",
+    "Cube_prefill=1",
+    "new profiler directory"
+  ],
+  "fixed_parameters": {
+    "max_model_len": 128000,
+    "gpu_memory_utilization": 0.93,
+    "max_num_batched_tokens": 16384,
+    "TP": 8,
+    "EP": 8,
+    "DSpark_tokens": 5,
+    "max_loras": 3,
+    "visible_devices": "8,9,10,11,12,13,14,15"
+  },
+  "seeds": {
+    "smoke": 2026100701,
+    "full": 2026100702,
+    "profile": 2026100703
+  },
+  "memory_failure_policy": "Stop and inform root if KV capacity<128000. No automatic parameter relaxation."
+}
