@@ -1,0 +1,61 @@
+{
+  "physical_device": 14,
+  "scope": "Installed production guard/native compile micro only; no weights",
+  "backend": "npugraph_ex",
+  "fullgraph": true,
+  "dynamic": false,
+  "options": {
+    "force_eager": true,
+    "inplace_pass": false,
+    "clone_input": false,
+    "clone_output": false
+  },
+  "activation_source_sha256": "e8ba4d3103cd1b204abf11009d550009294a1373d92c7170af9225b0cb6c8296",
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "limit": 0.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 0,
+      "pass": false,
+      "error": "AssertionError()",
+      "traceback": "Traceback (most recent call last):\n  File \"{repo_root}/work-dir/decode-optimization-20261006/activation-native/verify_compiled_guard.py\", line 78, in main\n    assert row[\"fused_branch_marker\"] == 1\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "limit": 10.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 0,
+      "pass": false,
+      "error": "AssertionError()",
+      "traceback": "Traceback (most recent call last):\n  File \"{repo_root}/work-dir/decode-optimization-20261006/activation-native/verify_compiled_guard.py\", line 78, in main\n    assert row[\"fused_branch_marker\"] == 1\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "dtype": "torch.float16",
+      "limit": 0.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 0,
+      "pass": false,
+      "error": "AssertionError()",
+      "traceback": "Traceback (most recent call last):\n  File \"{repo_root}/work-dir/decode-optimization-20261006/activation-native/verify_compiled_guard.py\", line 78, in main\n    assert row[\"fused_branch_marker\"] == 1\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "dtype": "torch.float16",
+      "limit": 10.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 0,
+      "pass": false,
+      "error": "AssertionError()",
+      "traceback": "Traceback (most recent call last):\n  File \"{repo_root}/work-dir/decode-optimization-20261006/activation-native/verify_compiled_guard.py\", line 78, in main\n    assert row[\"fused_branch_marker\"] == 1\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    }
+  ],
+  "pass": false
+}

@@ -28,7 +28,7 @@ from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_runtime_args import MoELoRARouting, MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
@@ -481,7 +481,10 @@ def unquant_apply_mlp(
     lora_context=None,
     expanded_row_idx: torch.Tensor | None = None,
     topk_ids: torch.Tensor | None = None,
+    lora_routing: MoELoRARouting | None = None,
 ) -> torch.Tensor:
+    if hidden_states.shape[0] == 0:
+        return hidden_states, None
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
@@ -496,12 +499,14 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
+    if lora_routing is not None:
+        gate_up_out = gate_up_out.masked_fill((lora_routing.expert_ids < 0).unsqueeze(-1), 0)
+
     # MoE LoRA: only attempt injection when an adapter wraps this layer and
     # the comm method provided routing metadata in lora_context.
     # Two paths are supported:
     #   - AllGather: expanded_row_idx + topk_ids from npu_moe_init_routing
     #   - AlltoAll:  lora_context.exchanged_lora_indices + group_list after all_to_all
-    lora_routing = None
     if lora_context is not None:  # LoRA applied
         from vllm_ascend.lora.fused_moe import (
             _recover_moe_lora_routing_all2all,
@@ -510,7 +515,9 @@ def unquant_apply_mlp(
             moe_lora_apply_w13,
         )
 
-        if expanded_row_idx is not None and topk_ids is not None:
+        if lora_routing is not None:
+            pass  # Explicit local IDs/slots already recovered by the dispatcher.
+        elif expanded_row_idx is not None and topk_ids is not None:
             # AllGather path: use npu_moe_init_routing's expanded_row_idx.
             lora_routing = _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids)
         elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
@@ -576,7 +583,7 @@ def unquant_apply_mlp(
 
     # LoRA w2 delta: applied to the down-proj output, with the activation output
     # as the lora_a input. Reuses the per-row routing computed for w13.
-    if lora_routing is not None:
+    if lora_routing is not None and lora_context is not None:
         moe_lora_apply_w2(
             lora_context,
             down_out=hidden_states,
@@ -592,6 +599,8 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
     """
     hidden_states = mlp_compute_input.hidden_states
+    if mlp_compute_input.lora_routing is not None and hidden_states.shape[0] == 0:
+        return hidden_states, None
     group_list = mlp_compute_input.group_list
     group_list_type = mlp_compute_input.group_list_type
     dynamic_scale = mlp_compute_input.dynamic_scale
@@ -632,6 +641,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             lora_context=mlp_compute_input.lora_context,
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
+            lora_routing=mlp_compute_input.lora_routing,
         )
 
     from vllm_ascend.lora.fused_moe import has_lora

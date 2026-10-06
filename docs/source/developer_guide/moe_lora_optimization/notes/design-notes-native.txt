@@ -1,0 +1,260 @@
+公开发布说明：本稿为2026-10-06只读审计快照；源码路径均相对仓库根目录。
+对应证据副本位于 ../evidence/2026-10-06/；个人机器路径使用占位符。
+专项 probe/benchmark 脚本（除仓库 benchmarks/benchmark_moe_lora_decode.py 及随附两份baseline）、
+standalone build、二进制、raw profiler/SQLite/trace、eightrow-v1/onerow-v2早期目录仅保留在原本地实验目录，未随提交发布。
+原始历史整网记录未挂载，其路径只说明来源，不是公开可下载链接；本稿不宣称可从公开包重跑全部历史实验。
+
+原生 MoE LoRA 融合算子设计审计（供完整设计文档合并）
+审计日期：2026-10-06，Asia/Shanghai
+审计方式：仅只读当前生产源码及现有测试结果；本次没有启动 NPU、修改生产代码或增加验证。
+仓库：{repo_root}
+容器安装目录：ds-ltc-v25-ep:{installed_repo}
+本稿范围：moe_lora_recover 的 small/sort/large 与框架回退、moe_lora_combined_indices、moe_lora_ep_routing、moe_lora_activation_quant；MoE INT8 BGMV/Cube 算子由另一设计审计覆盖。
+
+一、共用定义、构建及执行环境
+
+T=原始 token 数；K=路由 top-k；M=T*K=原始 token/expert pair 数；R=InitRouting 的 dispatched capacity（含未写入的 capacity tail），不等于实际本地 active row 数；E=全局专家映射长度；A=adapter_enabled 长度；I=中间维度。
+recover 的 row 数指 M；activation 的 row 数指 R。EP kernel 的 pairs 指 M，capacity 指 R。不能将这些数量混为本地有效 token 数。
+
+这四个公开接口均注册在 torch.ops._C_ascend，提供 PrivateUse1(NPU) 与 Meta 实现；没有 CPU implementation。Python helper 可以走 CPU/旧框架回退，但直接调用 native op 的 CPU 输入没有原生 CPU 内核。
+这些 binding 均受 VLLM_ENABLE_ATB_AND_DIRECT_KERNELS 编译宏控制。当前顶层 CMake 对 ascend310p.* 和 ascend950 分支不编译/链接该 direct-kernel 路径，也不注册这些 guarded binding。源码 glob 自动纳入 csrc/*.cpp、csrc/kernels/*.cpp。
+当前 full build CMakeCache 的 SOC_VERSION=Ascend910_9391，RUN_MODE=npu，CMAKE_BUILD_TYPE=Release；Torch 要求2.10.0。现有微测试使用 torch2.10.0+cpu 和 torch_npu2.10.0.post4。这里的 +cpu 是 host Torch wheel 标记，NPU 执行来自 torch_npu。
+硬件证据限于当前 A3/Ascend910_9391 环境，不声明其他芯片都已测量。Sort 注释依赖 DAV2201 Sort API 255个32元素组。BF16 activation kernel 编译条件 __CCE_AICORE__>=220。
+recover 的 SDK platform probe 通过 POD extern C(uint64_t) 接口查询当前 NPUGuard 设备的 UB 和 vector core 数。SDK-only moe_lora_recover_platform.cpp 单独使用 _GLIBCXX_USE_CXX11_ABI=0，Torch binding 保留自身 ABI，避免混用 SDK std::string ABI。
+所有内核使用当前 NPU stream + OpCommand::SetCustomHandler；形状/静态参数/设备资源查询在 host，tensor 值留在设备，没有 .item()/D2H 决策。Meta 只检查静态元数据并产生固定形状输出，不读取 NPU storage descriptor。
+路由及 activation 使用 UB/vector/scalar/DMA 处理；这四类本身没有 Cube 矩阵乘。应将它们的收益描述为融合、减少 kernel launch、减少通用 indexing/check/sort 与 GM 往返，不写成 Decode 新增 Cube 加速。
+
+物理格式关键区别：
+- activation_quant 和 EP routing 的 runtime binding 显式调用公开 at_npu::native::get_npu_format，只接受 ACL_FORMAT_NCHW(0) / ACL_FORMAT_ND(2)，blocked 格式报错；逻辑 contiguous 不足以证明 raw row-major storage。
+- Python eager 对这两者先检查 torch_npu.get_npu_format in(0,2)，不匹配则回退原路径。FakeTensor 不支持 get_npu_format，因此 torch.compiler.is_compiling() 时跳过 Python descriptor 查询，仍保留 C++ runtime guard。
+- recover 和 combined_indices 当前只有 is_contiguous 检查，没有显式 physical-format getter guard。其 raw-pointer 原生内核依赖调用方提供普通整数 base storage；不能宣称已对任意 logically-contiguous blocked metadata 安全支持或自动拒绝。
+- format0 在 activation storage fixture 中被运行时 canonicalize 成2，实际 format0 未被验证；允许0是代码合约，不是实验事实。
+
+二、非 EP 完整排列恢复 moe_lora_recover
+
+Schema：
+  moe_lora_recover(Tensor expanded_row_idx, Tensor topk_ids, Tensor token_lora_indices, int top_k) -> (Tensor, Tensor)
+对应源文件：csrc/moe_lora_recover.cpp；validation.h；platform.cpp；kernels/moe_lora_recover_{small,sort,large}.{cpp,h}。
+输入：expanded[M]，int32/int64；topk[T,K]，int32/int64，K=top_k>0 且 topk.numel()==M；slots[L]，int64。三者同设备、contiguous；M>0 时 L>0。
+输出：expert_per_row[M]、lora_per_row[M]，均 int64，同设备、独立新输出。M=0 返回两个空 tensor、不 launch。
+Native metadata/dtype/dim/device/contiguity 不符合要求会 TORCH_CHECK 报错，不自动转换；Meta 也检查这些元数据条件。
+
+数据前提（host guard 不读取 tensor 值，无法在此核实）：
+  abs(expanded) 是 [0,M) 完整、唯一的排列。
+  expanded 中的负数是带符号的合法目的行，包括 -1 可表示目的行1；它不是 EP 的 exclusion sentinel。
+  expert/slot 是完整 int32/int64 payload，可含负数、INT64_MIN/MAX、大于2**53的值；payload 不经过 FP32 转换。
+数学语义：对于原始 source p，destination d=abs(expanded[p])：
+  expert_out[d] = int64(topk.flatten()[p])
+  slot_out[d] = slots[min(p//K, L-1)]
+在完整排列域上，等价于 inverse=argsort(abs(expanded).float())，再 gather expert 和 clamped source-token slots。
+这一完整排列接口绝不能用于 EP InitRouting 含重复 -1 / 任意 exclusion sentinel 的结果。
+
+Python 真正分派条件（fused_moe.py:_recover_moe_lora_routing_allgather）：
+- supports_tp_fully_sharded_lora(context)：context 非空、fully_sharded is True、use_ep is False（严格身份，不把0/None当 False）。
+- top_k 是 Python int 且>0，expanded1D/topk2D、K一致、M一致；M<=2**24。
+- slots1D/int64，M=0 或 slots非空；expanded/topk int32/int64；同一个 NPU device；native schema存在。
+- 分派前对三个输入 .contiguous()，因此 strided 逻辑输入由 Python materialize。
+- 此 recover 分派不受 VLLM_ASCEND_MOE_LORA_FUSED_ROUTING 控制；这是既有 TP fully-sharded 优化路径。EP/非 fully-sharded/CPU/旧二进制/超2**24 等条件保留 Python 原路由恢复。
+- Python 不核实排列的 tensor 值；安全性来自当前非 EP producer 的完整专家范围、active_num=T*K、expert_map=None 合约。
+- Python helper 原回退使用 argsort(abs(expanded))、高级索引、整数 floor divide 和 clamp；native 内部 resource 回退显式保留 FP32 sort-key 旧优化链并将合法 gather 改为 index_select。
+
+Native 选择顺序（输入先统一 metadata validation，count0 提前返回）：
+1. Large 优先：8161<=M<=262144，并满足 UB>=114720 bytes、vector cores query>0。
+2. 否则设 scalar_work=(M+T<=1024)。若 M>2**24，或 (!scalar_work && M>8160)，直接框架 recover_original 回退。
+3. scalar_work 且 small_supported -> Small。
+4. 否则 sort_supported -> Sort。
+5. 资源不满足 -> recover_original。
+需要区别：公开 native binding 没有“小于某行数才接受”的统一硬上限；超过资源预算仍执行框架回退。Python 的2**24上限是 dispatch边界，large内核的262144是scratch预算上限，Sort的8160是API上限。
+
+Small 算法/资源：
+- 1个 AIV core，1次 kernel launch；把完整 expanded/topk、读取到的 slots、两个输出搬进 UB。
+- readSlots=min(L,ceil(M/K))，按连续 source token 分组，每组 K 个 source 共用一次 slot 读取，保留整数 floor/clamp，不对每行做除法。
+- UB inverse scatter：通过 GetValue/SetValue 写目的位置，DMA 一次写两个 contiguous int64 输出；不做 argsort，不使用 GM scalar accesses。
+- small_supported 要求 index/expert element_bytes各4或8、K>0；非空时 L>0、M<=2**24+1、UB>4096。
+- 需要 UB = align32(M*index_bytes)+align32(M*expert_bytes)+align32(readSlots*8)+2*align32(M*8)；该值<=UB-4096。
+- binding 还有独立 scalar cost budget M+T<=1024。例 K8/T113/M904，总成本1017走Small；T114/M912，总成本1026改走Sort；不能简写“小于1024行全部Small”。
+- 输出先置0，越界 magnitude跳过，unsigned abs避免 INT64_MIN signed overflow。但重复/缺洞输入仍不满足排列合约，Small 的零洞/最后写入结果不是 argsort重复键语义保证。
+
+Sort 算法/资源：
+- 1个 AIV core，1次 launch。3个8*align32(M) byte bank，UB用量24*align32(M)+4096。
+- sort_supported：M>=160，M<=32*255=8160；K>0且K<=M，M%K==0，L>0，index/expert element_bytes各4或8，UB预算满足。
+- keys 是 -abs(expanded) FP32；padding最多31个键填为 -alignedRows；AscendC Sort<float,true> descending 后等于原 abs ascending。
+- expanded int64 路由位置可以取低32位，是基于 magnitude<M<=8160 的严格合约；topk/slot payload通过两个 uint32 word Gather，int32 expert显式生成符号扩展高word，完整保留所有 int64 bits。
+- token indices 使用 host nextafter(float(1/K),+infinity)，vector multiply、clamp再 CAST_FLOOR。精确性论证仅限该有界 domain：p<8160、向上 reciprocal误差小于相邻商边界，不能下穿整数商或越过下一整数。它不是任意大输入的近似除法。
+- 当前若 UB=192KiB，则资源允许对齐M最多8000，8001..8160无法满足UB，会回退；8160是Sort API上限，8000是该UB下的实际容量，二者必须分别写。
+- readSlots=min(L,M/K)；payload gather scratch按 aligned/5 对齐到32处理小tile。
+
+Large 算法/资源：
+- 8161<=M<=262144(2**18)，tile512；cores=min(available_vector_cores,ceil(M/512))。
+- 每forward创建 int64[M,8] scratch，即64 bytes/目的行；最多16MiB。每个目的行只有前16B有效payload(expert int64+slot int64)。
+- 两次 kernel launch：source-partitioned scatter -> destination-contiguous pack。在同一个stream launch顺序保证stage依赖。
+- Scatter的vector Gather构建bit-preserving expert/slot pair；每行UB record32B对齐，对目标64B scratch record执行独立16B DataCopyPad，防止不同core写相邻int64目的行造成共享cacheline竞争。
+- Pack读取64B记录，Gather其前两个int64值并compact为两个int64[M]输出；不把payload转换为FP32。
+- first/last token和clamped slot range由整数host/device scalar arithmetic计算；tile内部以 nextafter-up reciprocal计算有界局部 source-token offset，保留 K6 等非整除512的边界及短slots表clamp。
+- UB worst scatter =512*(8+16+32+160)+32=110624 bytes，另保留4096，故114720 bytes；pack使用512*(64+24+16)=53248 bytes，不是最大需求。
+- vector core查不到或UB不够则走框架回退；scratch预算上限以外也回退，避免无限分配。
+- 假定每个目的行写入恰好一次；out-of-contract越界source会跳过，缺失目的行的scratch没有初始化，重复目的行也不定义排序语义，因此不能把它宣传成支持malformed/重复/稀疏排列。
+
+Recover fallback/error/weights：
+- Native接口内部的合法大shape/资源不足是 fallback，而维度/dtype/contiguity/device违反是 error。
+- 完整排列数据合约违反没有运行时data validation，也没有稳定语义。
+- 不接受也不计算 topk_weights/topk_scales：这只是索引/payload恢复，router权重仍由MoE主链应用。
+- recover_original 使用 inverse=argsort(abs(expanded).float())；experts=index_select(flat_topk,inverse).long()；token=floor_divide(inverse,K).clamp_max(L-1)；slots=index_select(slots,token)。合法整数payload与原高级索引逐bit相同，并省通用索引check内核。
+
+Recover 现有测试（“测试源码”与“已执行证据”分开）：
+- tests/e2e/nightly/single_node/ops/singlecard_ops/test_moe_lora_recover.py：四种index/expert dtype组合、空/Decode/奇数topk/短slot/tail/Sort阈值/资源回退、graph changed-input、strided helper materialize、Meta invalid。
+- tests/e2e/nightly/single_node/ops/singlecard_ops/test_moe_lora_recover_large.py：49152/98304/65536/262144目标shape、8160/8161/262145边界、K6/8/3/7/257/512/1024/262144、cross-core interleaving竞争、changed permutation/expert/slot graph、输入输出不alias。
+- tests/ut/lora/test_moe_lora_recover_dispatch.py 与 test_moe_lora_recover_large.py：CPU不误dispatch、严格use_ep身份、完整signed-permutation/clamp语义。
+- 本轮decode artifact目录没有找到旧recover专项micro结果；不能把上列测试文件存在当成全部已经执行，也不能从EP metadata微基准推断non-EP recover收益。若根任务已有旧报告，应另行补其实际路径/数字。
+
+三、adapter/expert 索引融合 moe_lora_combined_indices
+
+Schema：
+  moe_lora_combined_indices(Tensor experts, Tensor slots, Tensor enabled, int num_experts) -> Tensor
+输入：experts[R] int32/int64，slots[R] int64，enabled[A] int32；三者1D、contiguous、同设备；num_experts>0，1<=A<=64。
+输出：combined[R] int64；R0输出空、不launch。公开native检查没有R上限，实际Python只dispatch R<=98304（16384*topk6目标）。native依靠分tile处理任意合法可分配R；这不等于已测所有R/所有hardware。
+数学：对slot s、expert e：
+  若0<=s<A且 enabled[s]!=0，result = int64_twos_complement(s*num_experts+e)；否则 -1。
+expert payload不作范围检查、也不作FP32转换；INT64乘加使用unsigned运算定义wrap，兼容Tensor INT64二补码溢出。enabled非0（包括负数）均视为True。
+原kernel前提之外的过大正slot在native安全返回-1，不UB越界；旧Pythonfallback会对adapter_enabled[safe_slots]索引，过大正slot可能报index错误。这是invalid-slot域的行为差异；正常producer必须保证slot为-1/有效adapter编号。
+Launch：cores=min(available_vector_cores,ceil(R/8))；每core划分8行对齐区间（8个int64=64B line），每tile128行；只有最终partial line按精确byte count DataCopyPad。
+每core先加载enabled到UB；experts/slots分tile加载；scalar INT64算术生成result；无sort、无host sync。UB worst3328B(index64)或2816B(index32)，没有runtime UB resource predicate。
+Native vector core query失败会报错。metadata错误会报错；没有native框架回退；physical storage仅logicalcontiguous，未额外descriptor验证。
+
+Python combined_moe_lora_indices 分派限制：
+- VLLM_ASCEND_MOE_LORA_FUSED_ROUTING=1，slots device.type npu、三者same device，1D、R一致且R<=98304、A1..64，正确dtype/contiguous、num_experts>0，native schema存在。
+- flag默认为0，严格只允许0/1；invalid env ValueError。
+- 不满足guard回到原计算：expert_idx=experts.view(-1).long(); safe_slots=slots.clamp(min=0); active=(slots>=0)&adapter_enabled[safe_slots].bool(); where(active,safe_slots*num_experts+expert_idx,-1).contiguous()。
+- helper本身没有EP/fully_sharded条件；业务调用方决定是否复用或融合，故不能写成“这个helper只服务EP”。
+
+Python forward内复用（独立于是否启用nativefusion）：
+- quant_moe.py 对ALLGATHER、use_ep=True、fully_sharded=False、W13/W2的LoRA A stack都存在且前2维adapter/expert layout相同时，创建一次combined_lora_indices，传给W13与W2。
+- punica_npu.add_lora_fused_moe 若combined_indices已提供直接复用，否则调用helper自行生成。
+- tensor只保存在一次forward的局部变量，不能跨step缓存，因为graph replay需要读取当前slot/mask，hot-load adapter也可能改变enabled。
+- _C schema不存在或flag0时仍可复用Python生成的combined tensor；nativefusion和“少做一次索引生成”是两项不同优化。
+- 该op只产生metadata，完全不应用topk_scales/weights。
+
+证据：
+- ../evidence/2026-10-06/combined-indices-native.json：35正确性cases，int32/int64 experts、0/1/7/8/9/36/288/511/512/513/49152/98304行，all-disabled/all-negative/all-active、INT64 bits和wrap；3 graph shapes各4次changed-input replay。
+- 单operator graph median(us)：R36 33.4164->8.3858；R288 38.7114->11.7270；R512 41.4082->11.9864；R49152 155.9102->60.4120；R98304 226.7504->107.7772。单小op graph replay保留host enqueue floor，不等于独立device kernel duration。
+- ../evidence/2026-10-06/indices-reuse-layer.json：单合成MoE层T8/R48，仅一次索引复用 graph522.0320->514.0840us，约1.0155x，strict max_abs0与3次changed-input。不是整网吞吐。
+- tests/ut/lora/test_combined_indices.py：flag/oldbinary/R98305guard/CPU/INT64fallback/Meta输出及metadataerror。不要把unitfake设备shim写成真正NPU运行。
+
+四、AllGather EP 路由恢复 moe_lora_ep_routing
+
+Schema：
+  moe_lora_ep_routing(Tensor expanded_row_idx, Tensor topk_ids, Tensor prepared_lora_indices, Tensor expert_map, int num_dispatched_rows) -> (Tensor, Tensor)
+输入：expanded[M] int32/int64；topk[T,K] int32/int64，K>0；prepared_slots[T] int64；expert_map[E] int32/int64。
+Native边界：M<=384；1<=E<=512；0<=R<=M；四个tensorcontiguous、同NPUdevice，shape关联严格匹配。
+输出：local_expert_ids[R]、adapter_slots[R]，均int64。R0无launch，但native仍检查K/E和storage；Python R0在非空K/map检查前直接返回两个empty int64，因此zero-capacity helper比native调用接受更宽松的元数据。
+Native PrivateUse1入口guard检查四个输入的actual storage format0/2；blocked格式清晰TORCH_CHECK报错。Meta不查询物理格式。
+
+生产数据前提：expanded 的非负目的索引唯一；producer可以给负数exclusion sentinels，不能abs；有效目的行应构成contiguous prefix，未写capacity tails不贡献LoRA。
+数学：初始化两个输出为-1；对source p与token t=p//K，d=expanded[p]：
+- d<0或d>=R：跳过（包括INT32_MIN/INT64_MIN），永不把sentinel变成正数。
+- 先标seen[d]=1；g=int64(topk.flatten()[p])。
+- g不在[0,E)：保持该行-1；否则 l=int64(expert_map[g])；l<0同样保持-1。
+- 有效local l则 expert_out[d]=l，slot_out[d]=prepared_slots[t]，slot payload可为任意int64并完整保留。
+- 最后按目的row扫描seen。一旦出现未seen内部hole，则该row及后续全部置-1，以复现原argsort结果的sorted ordinal==destination判定；如果seen但expert非法，仅该行invalid，不把后续valid行全废弃。
+- duplicate nonnegative destinations不支持，没有host或device duplicate error检查；不能宣称duplicate对应原argsort稳定行为。
+
+融合前等价框架链：valid_pair=(expanded>=0)&(expanded<R)；keys=where(valid_pair,expanded,R).float(); inverse=argsort(keys)[:R]；valid=(keys[inverse]==arange(R))；global=flat_topk[inverse]；安全clamp global后查expert_map；valid &= global_in_range & local>=0；prepared_slots[inverse//K]；where(valid,payload,-1)。
+FP32 keys是为了避免A3 integer argsort AiCPU路径，Python要求R<=2**24保证[0,R]精确。Native小范围直接UB inverse scatter消除整条sort/mask/gather/arange/indexcheck链。
+Launch：单AIV core、单kernel；四个输入、两输出、seen数组全部放UB；分token读取slot并对K lane做scalar逆scatter；DataCopyPad输出精确bytes。八个index/topk/map width组合均有对应内核。
+按native最大shape计算UB worst：K1/T384、index/topk/map64 =>3*3072+4096+2*3072+1536=20992 bytes（32B对齐）；代码没有runtime UB predicate，依靠固定384/512边界的已测A3资源。
+Native超边界/错误dtype/shape/contiguity/samedevice/K/E/physicalfmt均error，没有fallback；不读取topk_weights，不修改router scales。
+
+Python recover_allgather_ep_lora_routing 分派/回退：
+- 先验证topk2D、M一致、slots1D/T一致/int64、0<=R<=M、R<=2**24；非法shape/capacity ValueError。
+- R0直接返回空；R>0时K和map必须非空。
+- nativeguard：flagVLLM_ASCEND_MOE_LORA_FUSED_ROUTING、M<=384、E<=512、expanded/map1D、int32/int64 indices/map、NPU/samedevice/全部contiguous、schema存在，以及eager四tensorfmt0/2。
+- compile时跳过Pythonfmtquery，native guard仍在。旧schema不存在、flag0、M>384、E>512、stride、CPU、dtype/physicalfmt不支持则框架fallback。Fallback本身不承诺所有unsupported CANN dtype/storage都可执行。
+- 特别是当前CANN blocked integer Cast/Identity/TransData可能本身不支持；eagerguard选择旧fallback和“fallback成功执行”是不同结论。
+- 被dispatcher调用时必须明确global-to-local expert_map；metadata返回capacity尺寸，dispatcher将expert_ids<0的sorted_hidden_states用masked_fill置0，避免capacity tail的未初始化/NaN值进入LoRA/base运算。quant_moe也在GMM1后把这些invalid gate_up row置0。
+
+验证/性能路径：
+- ../evidence/2026-10-06/ep-routing-native/result.json：456 cases全部integer exact，8个dtype组合、T0/1/7/8/64、K1/6/64，normal/invalid/holes，不宣称duplicate已支持；T1/8/64，R6/48/384 graph changed-input exact。
+- 单operator graph median(us)：R6 88.7918->8.2048(10.82x)；R48 131.6510->8.2014(16.05x)；R384 135.5934->31.5662(4.30x)。这是单算子replay测量，包含host enqueue floor，不等于整网减时。
+- ../evidence/2026-10-06/ep-routing-native/storage-guard-blocked-result.json：4 metadata类型×T8/64，实际fmt3/4及实际topk NZ29明确native拒绝；1Drequested29 canonicalize2的fixture不计blocked29测试成功。旧fallback integer blocked支持不足有记录。
+- ../evidence/2026-10-06/ep-routing-native/storage-guard-compile-result.json：T8/64 ND original/changed exact，ND compiled callable后传blocked均native明确拒绝。
+- ../evidence/2026-10-06/installed-ep-format-smoke.json：正式installed库smoke。
+- tests/ut/lora/test_ep_routing_fusion.py：shapeguard、flag/oldbinary、每metadatafmt3/4/29 eagerfallbackdispatch、FakeTensorcompile不查fmt、sentinel/internalhole等价。仅unitfake测试不代表对应真实blockedfallback运行成功。
+
+五、保留 floating W2 LoRA 的 SwiGLU+动态量化 moe_lora_activation_quant
+
+Schema：
+  moe_lora_activation_quant(Tensor input, float limit=0., int core_limit=0) -> (Tensor, Tensor, Tensor)
+输入：gate_up[R,4096]，BF16/FP16；最后维排列是完整gate[2048]拼接up[2048]，不是interleaved gate/up；contiguous、NPU、actual format0/2。
+Native支持：0<=R<=384，I固定2048；limit finite、0<=limit<=65504；core_limit静态int0..64。违约报错、不nativefallback；Meta同样检查metadata、limit、core_limit，不调用runtimefmt。
+输出：activated[R,2048]（同input dtype）、quantized[R,2048] int8、scale[R] FP32。R0产生固定shapeempty输出不launch。
+activated必须返回，因为当前非fully-sharded EP W2 LoRA的input是原始round后floatingactivation；base W2使用quantized和per-token scale。不能只保留INT8然后让W2 LoRA反量化近似替代floating语义。
+
+数学和rounding边界（D=BF16或FP16，Q_D=round to D）：
+1. gate/up从D cast为FP32。
+2. 若limit>0：gate'=Q_D(min(gate,limit))；up'=Q_D(clamp(up,-limit,+limit))，再castFP32。两个Q_D模拟torch.clamp保存原dtype后torch.cat/npu_swiglu边界，尤其limit10.1不是D精确数。
+3. FP32 y=(gate'/(1+exp(-gate')))*up'；activated=Q_D(y)，舍入CAST_RINT，与npu_swiglu返回D的边界一致。
+4. 量化重新读取round后的activated而不是未round FP32 y。m=max_j(abs(float(activated_j)))。
+5. per-row dequant scale = vector Muls(m,float(1/127))；quant multiplier = vector Div(127,m)。量化不能随意改写为scalar m/127或scalar reciprocal，这些CANN vector/CCE scalar路径舍入实测不同。
+6. 若m>0，q_float=activated_fp32*quant_multiplier；先FP32->int32 CAST_RINT(ties/even)，再精确castfloat/half/int8，避免直接half->int8造成半整数附近double rounding。m0时不乘infinite multiplier，输出quant0/scale0；zero row与CANN基线一致。
+7. scale使用精确4B DataCopyPad存储，UB源32B对齐；每core写独立row的4B，不用padding写覆盖相邻scale。该方式与本地CANN single-row DynamicQuant源代码相同，并通过大量changed-input rawbit stress检查。
+本核没有NaN/Inf输入数值guard；limitfinite不等于激活数值全finite。验证覆盖已记录finite edge/tiny/zero/clamp/exp范围，不能泛称所有非finite/overflow与任意后端bitwise相同。
+
+Launch/资源：
+- 一次kernel，同时生成三个输出；独立整行UB处理，一次1行，不跨core reduction。
+- available是NPUGuard当前设备vector core数；default cores=min(available,R)，当R<=48进一步cap24。
+- 显式core_limit>0则cores=min(available,R,core_limit)，不再自动24cap；生产调用只传input,limit两参数，使用默认策略。
+- row = block_idx + n*block_num，每core循环自己的整行。每row输入8192B，floatactivated4096B，quant2048B，scale4B输出；避免clamp/cat以及activation到quant的GM重读。
+- 固定UBbuffers：input8192 + floatingout4096 + gate/up/work各8192 + quant2048 + half4096 + scalar128 =43136B；没有runtimeUBpredicate，固定I2048适配当前A3。
+- availablecore query失败报错；BF16 kernel需CCE220及以上；没有Cube使用。
+
+Python生产真实guard（activation.py）：
+- VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION=1；MoECommType.ALLGATHER；context.use_ep truthy 且not fully_sharded。
+- activation.value或activation字符串必须严格'silu'；SWIGLUOAI、swigluoai_uninterleave/npu_clipped_swiglu(alpha,bias)、SWIGLUSTEP、GELU等全部原路径；本核没有alpha/beta语义。
+- topk_scales必须None；否则仍原activation -> activated*=topk_scales -> dynamicquant。native schema本身没有topk_scales参数，不能宣称支持router权重融合。
+- limitfinite0..65504；inputNPU、dtypeBF16/FP16、ndim2、width4096、contiguous。
+- 行数只允许1<=R<=48，不是native0..384。R49/384等即使native可执行也不生产dispatch，原因是当前测量没有稳定大行数收益。
+- eageractualfmt0/2，compile跳过Pythonfmtquery由nativeguard；schema存在。
+- flag0、missingnative、非EP/fullysharded、AlltoAll、R0/R>48、I不符、其他activation、topk_scales非None、dtype/stride/limit/物理fmt不符合，保留_apply_moe_activation+optionaltopkscale+npu_dynamic_quant。fallback可能因自身invalidmetadata而报错，不能写成任意错误自动修复。
+- quant_moe调用在W13 LoRA已经加到gate_up之后；这是真正要融合的语义位置。
+
+验证及失败证据（全部保留，不放宽容差掩盖差异）：
+- ../evidence/2026-10-06/activation-native/result.first-run.json：最初floatactivation逐bit一致，但151个INT8元素误差1、151个scale误差最多1.19e-7；原因是scalar/vector量化算术舍入差异；属于早期失败版本，不是最终结果。
+- ../evidence/2026-10-06/activation-native/result.json 与 ../evidence/2026-10-06/installed-activation-reference.json：最终78cases，dtype2×R0/1/6/7/8/9/12/24/48/128/384×limit0/10/10.1，以及zero/tiny/clampboundary/signed-expedge；floating、int8、FP32scale三项均rawbit exact；24changed-input graphcases通过。
+- ../evidence/2026-10-06/activation-native/stress-result.json + ../evidence/2026-10-06/activation-native/stress-core24-result.json：两轮各1200changed-input replays，BF16/FP16、R9/48/384、limit0/10，default与24core，三项rawbit mismatch0，合计2400。
+- ../evidence/2026-10-06/activation-native/storage-guard-result.json：ND2/limit0/10/BF16/FP16 exact；NZ29 logicallycontiguous仍native明确拒绝；4Meta与zero-row检查；format0fixture实际2，未声称真实0测试。
+- ../evidence/2026-10-06/activation-native/compiled-guard-result.json：正式installed库SHA360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839；4cases BF16/FP16×limit0/10，R48，torch.compile(fullgraph=True,dynamic=False,backend=npugraph_ex)，options force_eager=True/inplace_pass=False/clone_input=False/clone_output=False；ND fused marker1，original/changed3项rawbit exact；freshNZ29及NDcompiledcallable后换NZ29均nativeguard拒绝。此结论限该编译options，不推广任意backend配置；不宣称compiledblocked自动fallback。
+- compiled-guard-missing-library-fixture.* 是第一次脚本漏torch.ops.load_library的fixture失败，marker0走fallback，已明确保存，不能当成真实编译不兼容证据。
+- activation-native/eightrow-v1 与 onerow-v2保留失败/负收益/单次小graph被hostlaunchfloor干扰的结果；最终选择默认24core依据core-tuning-result.json（96configs）和final-default-result.json。
+- tests/ut/lora/test_decode_moe_lora.py：生产guardR48/49/384/0、dtype/device/activation/topkscales/fullysharded/format等，W2 floatingLoRA/baseint8contract。
+
+最终微基准：../evidence/2026-10-06/activation-native/final-default-result.json，100operators/graph，20replays/sample，3samples，eventdevice时间每op。
+BF16 limit0: R6 6.13855->2.80873us(2.186x)；R12 8.10184->3.33113(2.432x)；R24 8.24470->4.58185(1.799x)；R48 10.41630->5.99912(1.736x)。
+BF16 limit10: R6 16.76686->3.06410us；R12 23.98963->3.58261；R24 30.28613->4.81157；R48 33.85999->6.47213(5.232x)。
+旧真实profile routed activation显示npu_swiglu/clamp缺席，支持目标limit0；不能用limit10的5.232x替代目标noClip收益。R384 noClip收益约1.017x不稳定，生产guard保留fallback。
+
+六、组合链及证据边界
+
+../evidence/2026-10-06/validated-layer-limit0.json：完整单个本地routedMoE层，非零合成W8A8/LoRA weights，H4096/I2048/r16/localE32/A4/topk6，global专家256中rank0负责32，limit0；allflags fusedrouting/fusedactivation；一层包括routing、两次baseGMM、W13/W2LoRA、activation/quant。
+T1/R6 graph215.10920->126.04800us；T2/R12 292.10800->196.85080；T4/R24 352.28401->251.12240；T8/R48 437.06718->321.45039(1.3597x，26.45%局部链减时)；T64/R384 1382.40921->1246.39763，activationguard实际False但routing仍优化。
+5samples×50graphreplays/median；全部initialmax_abs0、15changed-inputgraphcases exact；记录inputshape/actualformat2/fusedbranch，避免只读开关却没命中。installed-layer-limit0/10为早一轮正式installed结果，validated-layer-limit0为最终guard/来源更新后的主证据。
+这些是单layer合成数据，未包含attention、跨rank HCCL、scheduler、全模型与真实LoRA权重；旧profilesum跨stream可能重叠。不得把1.3597x写成整网Decode/TP8EP8吞吐提升。
+模型/LoRA权重目前不可用，8K输入+4K输出、8并发、max_num_batched_tokens16384全网尚未重新验证。
+flags默认0；启用需在engine构建前设置。两个fusionflags参与compilerhash和外层AOTcompilefactors，避免切换选项命中旧图；无跨forward adapter-index缓存。
+../evidence/2026-10-06/runtime-source-publication.json 和 ../evidence/2026-10-06/runtime-binary-installation.json记录安装/源码hash/rollback备份。测试不能同时loadstandaloneprobe与正式C以免schema重复注册。
+
+七、本次只读审计的源码快照 hashes
+
+csrc/moe_lora_recover.cpp 229c47f3d4d404f5d2463e1e9eabfd4ba90f101af843251fee6dbcfc5fabd4c0
+csrc/kernels/moe_lora_recover_small.cpp f500993ec42c0a78dffbd6e38c6f45046c208767b17248e53b6604f6381b8dec
+csrc/kernels/moe_lora_recover_sort.cpp 11a031f25e1dc00b7b221e69ee1e9eeef43403cc8284737b58f46f965ab6fa2f
+csrc/kernels/moe_lora_recover_large.cpp 1795cbdd2586ef02184e60cf2f7d81a01de7dc037b46deea1924661e072d3325
+csrc/moe_lora_combined_indices.cpp 042a1c0ba6b0de95573a118cd5bbc2b302834602fee749e4868c14e460f186fb
+csrc/kernels/moe_lora_combined_indices.cpp a0317398806f222bbf9887d1726cbd1ba411c25a8ee8702617b1460317dfb8c3
+csrc/moe_lora_ep_routing.cpp 14720e1cdb90e03d5bd0a54fafee6a69981aadb85a269db06839b364c72ecde0
+csrc/kernels/moe_lora_ep_routing.cpp 0453e2dbe84444296b6aee7851d3ee2e4126598db2140e480b8b90a376f11de6
+csrc/moe_lora_activation.cpp a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e
+csrc/kernels/moe_lora_activation.cpp 368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9
+vllm_ascend/lora/fused_moe.py a8846e6f90ffbfe77e895478d3877b7c3b5184e051c88dac846eefea4d35c624
+vllm_ascend/lora/routing.py a71de30ebf28b9dc43880cd27d514a175c5cf8ac85a0e91b221993304fe092a7
+vllm_ascend/lora/combined_indices.py b29304c9df821b5d73462d3d6e96a0f9ab4af83778b7dbc8903cf123a30fa029
+vllm_ascend/lora/activation.py e8ba4d3103cd1b204abf11009d550009294a1373d92c7170af9225b0cb6c8296

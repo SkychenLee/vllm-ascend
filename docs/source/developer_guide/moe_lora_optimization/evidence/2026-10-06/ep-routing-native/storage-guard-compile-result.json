@@ -1,0 +1,19 @@
+{
+  "physical_device": 13,
+  "mode": "compile",
+  "fallback": [],
+  "compiled": [
+    {
+      "tokens": 8,
+      "nd_initial_exact": true,
+      "nd_changed_exact": true,
+      "blocked_after_nd": "rejected: moe_lora_ep_routing: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported"
+    },
+    {
+      "tokens": 64,
+      "nd_initial_exact": true,
+      "nd_changed_exact": true,
+      "blocked_after_nd": "rejected: moe_lora_ep_routing: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported"
+    }
+  ]
+}

@@ -40,7 +40,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.lora.fused_moe import has_lora, sync_lora_context
+from vllm_ascend.lora.fused_moe import has_lora, scoped_moe_lora_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -634,79 +634,73 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
-        if lora_context is not None:
-            sync_lora_context(self._quant_method, lora_context)
-
-        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp,
-            quant_type=self.quant_type,
-        )
-        hidden_states = prepare_output.hidden_states
-        router_logits = prepare_output.router_logits
-        mc2_mask = prepare_output.mc2_mask
-        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
-        pertoken_scale = prepare_output.pertoken_scale
-
-        # Matrix multiply.
-        # apply() expects a RoutedExperts-like layer for weight access
-        # (w13_weight, w2_weight, swiglu_limit, etc.). Pass routed_experts,
-        # not self; the routing params come through the other kwargs.
-        fused_experts_results: FusedExpertsResult = self._quant_method.apply(
-            layer=self.routed_experts,
-            x=hidden_states,
-            router_logits=router_logits,
-            pertoken_scale=pertoken_scale,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            num_experts=self.moe_config.num_experts,
-            expert_map=self._expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self._original_routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num,
-            mc2_mask=mc2_mask,
-        )
-
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
-            expert_tokens = fused_experts_results.expert_tokens
-            group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+        with scoped_moe_lora_context(self._quant_method, lora_context):
+            prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
+                enable_shared_expert_dp=self.enable_shared_expert_dp,
+                quant_type=self.quant_type,
             )
-            local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            hidden_states = prepare_output.hidden_states
+            router_logits = prepare_output.router_logits
+            mc2_mask = prepare_output.mc2_mask
+            padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
+            pertoken_scale = prepare_output.pertoken_scale
+
+            # Matrix multiply.
+            # apply() expects a RoutedExperts-like layer for weight access
+            # (w13_weight, w2_weight, swiglu_limit, etc.). Pass routed_experts,
+            # not self; the routing params come through the other kwargs.
+            fused_experts_results: FusedExpertsResult = self._quant_method.apply(
+                layer=self.routed_experts,
+                x=hidden_states,
+                router_logits=router_logits,
+                pertoken_scale=pertoken_scale,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                num_experts=self.moe_config.num_experts,
+                expert_map=self._expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self._original_routed_scaling_factor,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                enable_force_load_balance=enable_force_load_balance,
+                log2phy=self.log2phy,
+                global_redundant_expert_num=self.global_redundant_expert_num,
+                mc2_mask=mc2_mask,
             )
-            if self.multi_stage:
-                cur_iter = torch.remainder(self.load_counter, self.num_iter)
-                self.moe_load.index_add_(
-                    dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
+
+            if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
+                expert_tokens = fused_experts_results.expert_tokens
+                group_list_type = fused_experts_results.group_list_type
+                assert expert_tokens is not None and group_list_type is not None, (
+                    "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
                 )
-                self.load_counter.add_(1)
-            else:
-                self.moe_load.add_(local_load)
+                local_load = (
+                    expert_tokens
+                    if group_list_type == 1
+                    else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                )
+                if self.multi_stage:
+                    cur_iter = torch.remainder(self.load_counter, self.num_iter)
+                    self.moe_load.index_add_(
+                        dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
+                    )
+                    self.load_counter.add_(1)
+                else:
+                    self.moe_load.add_(local_load)
 
-        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
-            hidden_states=fused_experts_results.routed_out,
-            reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
-            padded_hidden_states_shape=padded_hidden_states_shape,
-        )
-
-        # clear per-forward LoRA state from long-lived singletons.
-        if lora_context is not None:
-            sync_lora_context(self._quant_method, None)
+            routed_out = _EXTRA_CTX.moe_comm_method.finalize(
+                hidden_states=fused_experts_results.routed_out,
+                reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
+                padded_hidden_states_shape=padded_hidden_states_shape,
+            )
 
         if return_with_event:
             return FusedMoEResult(

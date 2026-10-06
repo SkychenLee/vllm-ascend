@@ -1,0 +1,20 @@
+{
+  "physical_device": 15,
+  "library_sha256": "360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839",
+  "nd_exact": true,
+  "blocked_cases": [
+    {
+      "format": 3,
+      "rejected": true
+    },
+    {
+      "format": 4,
+      "rejected": true
+    },
+    {
+      "format": 29,
+      "rejected": true
+    }
+  ],
+  "pass": true
+}

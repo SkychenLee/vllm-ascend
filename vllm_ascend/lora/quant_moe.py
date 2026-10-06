@@ -25,10 +25,13 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.lora.activation import can_fuse_moe_lora_activation
 from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
@@ -216,8 +219,10 @@ def _apply_dynamic_int8_moe_lora(
             "Quantized MoE LoRA requires BF16/FP16 routed activations. "
             "Dispatch-side quantization must be disabled for LoRA batches."
         )
-    if comm_type == MoECommType.ALLGATHER and (
-        mlp_compute_input.expanded_row_idx is None or mlp_compute_input.topk_ids is None
+    if (
+        comm_type == MoECommType.ALLGATHER
+        and mlp_compute_input.lora_routing is None
+        and (mlp_compute_input.expanded_row_idx is None or mlp_compute_input.topk_ids is None)
     ):
         raise AssertionError("Quantized MoE LoRA requires AllGather routing metadata (expanded_row_idx and topk_ids).")
     input_dtype = (mlp_compute_input.output_dtype or hidden_states.dtype) if allgather_int8 else hidden_states.dtype
@@ -245,6 +250,24 @@ def _apply_dynamic_int8_moe_lora(
     if not all(len(values) == 1 for values in (w1, w2, w1_scale, w2_scale)):
         raise NotImplementedError("Quantized MoE LoRA does not support per-expert tensor lists used by dynamic EPLB.")
 
+    cube_routing = None
+    cube_state = getattr(lora_context, "cube_w13_state", None)
+    if cube_state is not None and comm_type == MoECommType.ALLGATHER and not allgather_int8:
+        cube_forward = get_forward_context()
+        # Only actual eager Prefill can read counts back. Profile/dummy without
+        # attention metadata and all graph modes retain the original BGMV path.
+        if (
+            cube_forward.cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and not getattr(cube_forward, "in_profile_run", True)
+            and cube_forward.attn_metadata is not None
+        ):
+            cube_routing = cube_state.prepare(
+                hidden_states,
+                mlp_compute_input.group_list,
+                mlp_compute_input.group_list_type,
+                getattr(lora_context.punica_wrapper, "cube_single_slot", None),
+            )
+
     if hidden_states.dtype == torch.int8:
         quantized_input = hidden_states
         input_scale = mlp_compute_input.dynamic_scale.reshape(-1).contiguous()
@@ -267,7 +290,11 @@ def _apply_dynamic_int8_moe_lora(
         output_dtype=input_dtype,
     )[0]
 
-    if comm_type == MoECommType.ALLGATHER:
+    if mlp_compute_input.lora_routing is not None:
+        gate_up_out = gate_up_out.masked_fill((mlp_compute_input.lora_routing.expert_ids < 0).unsqueeze(-1), 0)
+    if mlp_compute_input.lora_routing is not None:
+        lora_routing = mlp_compute_input.lora_routing
+    elif comm_type == MoECommType.ALLGATHER:
         lora_routing = _recover_moe_lora_routing_allgather(
             lora_context,
             mlp_compute_input.expanded_row_idx,
@@ -281,6 +308,21 @@ def _apply_dynamic_int8_moe_lora(
     act_name = getattr(mlp_compute_input.activation, "value", mlp_compute_input.activation)
     combined_lora_indices = None
     grouped_routing = None
+    if (
+        comm_type == MoECommType.ALLGATHER
+        and getattr(lora_context, "use_ep", False)
+        and not getattr(lora_context, "fully_sharded", False)
+        and hasattr(lora_context, "w13_lora_a_stacked")
+        and hasattr(lora_context, "w2_lora_a_stacked")
+        and lora_context.w13_lora_a_stacked[0].shape[:2] == lora_context.w2_lora_a_stacked[0].shape[:2]
+    ):
+        # W13 and W2 use the same local experts, adapter slots and enable mask.
+        # Keep this tensor local to one forward: graph replay must re-read the
+        # current mapping and hot-loaded adapters must not retain stale indices.
+        experts, slots = lora_routing
+        combined_lora_indices = combined_moe_lora_indices(
+            experts, slots, lora_context.adapter_enabled, lora_context.w13_lora_a_stacked[0].shape[1]
+        )
     if (
         allgather_int8
         and mlp_compute_input.fusion
@@ -314,24 +356,33 @@ def _apply_dynamic_int8_moe_lora(
             hidden_states=quantized_input if allgather_int8 else hidden_states,
             lora_routing=lora_routing,
             **({"input_scale": input_scale} if allgather_int8 else {}),
+            **({"cube_routing": cube_routing} if cube_routing is not None else {}),
+            **({"combined_indices": combined_lora_indices} if combined_lora_indices is not None else {}),
         )
 
-        activated = _apply_moe_activation(
-            gate_up_out,
-            mlp_compute_input.activation,
-            mlp_compute_input.swiglu_limit,
-            mlp_compute_input.swiglu_alpha,
-            mlp_compute_input.swiglu_beta,
-        )
-        if mlp_compute_input.topk_scales is not None:
-            activated *= mlp_compute_input.topk_scales
+        if can_fuse_moe_lora_activation(gate_up_out, mlp_compute_input, comm_type):
+            # Both consumers keep their original contracts: W2 LoRA uses the
+            # rounded BF16/FP16 activation and the base W2 uses INT8 + scales.
+            activated, quantized_activated, activated_scale = torch.ops._C_ascend.moe_lora_activation_quant(
+                gate_up_out, mlp_compute_input.swiglu_limit
+            )
+        else:
+            activated = _apply_moe_activation(
+                gate_up_out,
+                mlp_compute_input.activation,
+                mlp_compute_input.swiglu_limit,
+                mlp_compute_input.swiglu_alpha,
+                mlp_compute_input.swiglu_beta,
+            )
+            if mlp_compute_input.topk_scales is not None:
+                activated *= mlp_compute_input.topk_scales
 
-        quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
-            hidden_states=activated,
-            dynamic_scale=None,
-            act_quant_type=torch.int8,
-            use_mxfp_quant=False,
-        )
+            quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
+                hidden_states=activated,
+                dynamic_scale=None,
+                act_quant_type=torch.int8,
+                use_mxfp_quant=False,
+            )
     before_gmm2_evt = torch.npu.current_stream().record_event()
     down_out = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=quantized_activated,

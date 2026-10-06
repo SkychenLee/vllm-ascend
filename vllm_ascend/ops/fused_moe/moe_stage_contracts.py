@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -25,6 +25,13 @@ import torch
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutingParams
 
 TMoECombineMetadata = TypeVar("TMoECombineMetadata")
+
+
+class MoELoRARouting(NamedTuple):
+    """Local expert and adapter slot for every dispatched row; -1 is invalid."""
+
+    expert_ids: torch.Tensor
+    adapter_slots: torch.Tensor
 
 
 # prepare -> fused_experts
@@ -107,6 +114,7 @@ class MoEAllGatherCombineMetadata:
     topk_weights: torch.Tensor
     expanded_row_idx: torch.Tensor
     restore_shape: torch.Size
+    valid_rows: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +136,7 @@ class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
     combine_metadata: TMoECombineMetadata
     dynamic_scale: torch.Tensor | None = None
     topk_scales: torch.Tensor | None = None
+    lora_routing: MoELoRARouting | None = None
 
 
 # dispatch -> mlp -> combine
@@ -155,9 +164,11 @@ class MoEMlpComputeInput:
     output_dtype: torch.dtype | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
+    lora_routing: MoELoRARouting | None = None
 
 
 __all__ = [
+    "MoELoRARouting",
     "MoEPrepareOutput",
     "MoEWeights",
     "MoEFusedExpertsInput",

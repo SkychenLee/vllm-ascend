@@ -1,0 +1,5611 @@
+{
+  "timestamp": 1791217348.1620405,
+  "device": "physical 13 / visible 0",
+  "scope": "synthetic EP metadata operator; no model weights or end-to-end throughput",
+  "producer_contract": "unique nonnegative destination indices; duplicates unsupported",
+  "cases": [
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int32",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int32",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int32"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 0,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 1,
+      "k": 6,
+      "capacity": 6,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 21,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 7,
+      "k": 6,
+      "capacity": 42,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 24,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 8,
+      "k": 6,
+      "capacity": 48,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 64,
+      "k": 6,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 1,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 3,
+      "k": 1,
+      "capacity": 3,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "normal",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "invalid",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 0,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 192,
+      "kind": "holes",
+      "exact": true
+    },
+    {
+      "dtypes": [
+        "torch.int64",
+        "torch.int64",
+        "torch.int64"
+      ],
+      "tokens": 6,
+      "k": 64,
+      "capacity": 384,
+      "kind": "holes",
+      "exact": true
+    }
+  ],
+  "graph": [
+    {
+      "tokens": 1,
+      "rows": 6,
+      "changed_inputs_exact": true
+    },
+    {
+      "tokens": 8,
+      "rows": 48,
+      "changed_inputs_exact": true
+    },
+    {
+      "tokens": 64,
+      "rows": 384,
+      "changed_inputs_exact": true
+    }
+  ],
+  "performance": [
+    {
+      "rows": 6,
+      "eager_baseline": {
+        "samples_us": [
+          378.0495834350586,
+          377.76458740234375,
+          404.6485900878906
+        ],
+        "median_us": 378.0495834350586
+      },
+      "eager_fused": {
+        "samples_us": [
+          16.607999801635742,
+          16.34999990463257,
+          16.358400583267212
+        ],
+        "median_us": 16.358400583267212
+      },
+      "graph_baseline": {
+        "samples_us": [
+          88.78219604492188,
+          88.81119728088379,
+          88.79179954528809
+        ],
+        "median_us": 88.79179954528809
+      },
+      "graph_fused": {
+        "samples_us": [
+          8.232600092887878,
+          8.152599930763245,
+          8.204799890518188
+        ],
+        "median_us": 8.204799890518188
+      },
+      "eager_speedup": 23.110424610934178,
+      "graph_speedup": 10.821933591323734
+    },
+    {
+      "rows": 48,
+      "eager_baseline": {
+        "samples_us": [
+          375.7115936279297,
+          374.36798095703125,
+          372.4497985839844
+        ],
+        "median_us": 374.36798095703125
+      },
+      "eager_fused": {
+        "samples_us": [
+          15.994399785995483,
+          15.996999740600586,
+          16.02779984474182
+        ],
+        "median_us": 15.996999740600586
+      },
+      "graph_baseline": {
+        "samples_us": [
+          131.6510009765625,
+          131.63880348205566,
+          131.68499946594238
+        ],
+        "median_us": 131.6510009765625
+      },
+      "graph_fused": {
+        "samples_us": [
+          8.283399939537048,
+          8.2014000415802,
+          8.173400163650513
+        ],
+        "median_us": 8.2014000415802
+      },
+      "eager_speedup": 23.40238713681295,
+      "graph_speedup": 16.052259408040864
+    },
+    {
+      "rows": 384,
+      "eager_baseline": {
+        "samples_us": [
+          379.0816116333008,
+          379.3960189819336,
+          379.39178466796875
+        ],
+        "median_us": 379.39178466796875
+      },
+      "eager_fused": {
+        "samples_us": [
+          27.711400985717773,
+          27.57620096206665,
+          27.60319948196411
+        ],
+        "median_us": 27.60319948196411
+      },
+      "graph_baseline": {
+        "samples_us": [
+          135.59980392456055,
+          135.57479858398438,
+          135.5933952331543
+        ],
+        "median_us": 135.5933952331543
+      },
+      "graph_fused": {
+        "samples_us": [
+          31.53059959411621,
+          31.577200889587402,
+          31.566200256347656
+        ],
+        "median_us": 31.566200256347656
+      },
+      "eager_speedup": 13.744485849035826,
+      "graph_speedup": 4.295524774347453
+    }
+  ],
+  "dispatch_exact": true
+}

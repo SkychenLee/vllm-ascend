@@ -29,6 +29,8 @@ the MoE wrapper is mapped.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import torch
 from torch import nn
 from vllm import envs
@@ -42,10 +44,25 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
+    "prepared_lora_indices",
     "split_lora_indices",
     "permuted_lora_indices",
     "exchanged_lora_indices",
 )
+
+
+def supports_ep_lora(lora_context) -> bool:
+    """EP experts are complete local experts, independent of TP LoRA slicing."""
+    return lora_context is not None and getattr(lora_context, "use_ep", None) is True
+
+
+def prepare_allgather_lora_indices(lora_context, *, num_tokens, pad_size=0, tp_size=1, tp_rank=0):
+    """Mirror the hidden token layout without modifying Punica's dense mapping."""
+    slots = lora_context.punica_wrapper.token_lora_indices[:num_tokens]
+    slots = torch.nn.functional.pad(slots, (0, num_tokens + pad_size - slots.shape[0]), value=-1)
+    if tp_size > 1:
+        slots = torch.tensor_split(slots, tp_size, dim=0)[tp_rank]
+    lora_context.prepared_lora_indices = slots
 
 
 def has_lora(lora_context) -> bool:
@@ -176,6 +193,26 @@ def sync_lora_context(quant_method, lora_context):
         quant_method.set_lora_context(lora_context)
 
 
+@contextmanager
+def scoped_moe_lora_context(quant_method, lora_context):
+    """Refresh batch-local metadata and restore singleton state on every exit."""
+    comm_method = _EXTRA_CTX.moe_comm_method
+    previous_comm = getattr(comm_method, "lora_context", None)
+    previous_quant = getattr(quant_method, "lora_context", None)
+    if lora_context is not None:
+        reset_lora_indices(lora_context)
+    try:
+        sync_lora_context(quant_method, lora_context)
+        yield
+    finally:
+        if lora_context is not None:
+            reset_lora_indices(lora_context)
+        if hasattr(comm_method, "set_lora_context"):
+            comm_method.set_lora_context(previous_comm)
+        if hasattr(quant_method, "set_lora_context"):
+            quant_method.set_lora_context(previous_quant)
+
+
 def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
     if getattr(base_layer, "dynamic_eplb", False):
         raise AssertionError(
@@ -288,7 +325,16 @@ def _recover_moe_lora_routing_all2all(
     return expert_per_row, lora_per_row
 
 
-def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing, input_scale=None):
+def moe_lora_apply_w13(
+    lora_context,
+    *,
+    gate_up_out,
+    hidden_states,
+    lora_routing,
+    input_scale=None,
+    cube_routing=None,
+    combined_indices=None,
+):
     """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
 
     Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
@@ -314,6 +360,12 @@ def moe_lora_apply_w13(lora_context, *, gate_up_out, hidden_states, lora_routing
         fully_sharded=lora_context.fully_sharded,
         token_lora_mapping=lora_per_row,
         **({"input_scale": input_scale} if input_scale is not None else {}),
+        **(
+            {"cube_routing": cube_routing, "cube_state": lora_context.cube_w13_state}
+            if cube_routing is not None
+            else {}
+        ),
+        **({"combined_indices": combined_indices} if combined_indices is not None else {}),
     )
 
 
@@ -431,6 +483,37 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
+    def create_lora_weights(self, max_loras, lora_config, model_config=None):
+        self._cube_w13_state = None
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        if envs_ascend.VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL:
+            from vllm.config import get_current_vllm_config
+
+            from vllm_ascend.lora.cube_moe import CubeW13State, static_config_supported
+            from vllm_ascend.quantization.quant_type import QuantType
+
+            if self.base_layer.quant_type == QuantType.W8A8 and static_config_supported(
+                get_current_vllm_config(), self, lora_config
+            ):
+                self._cube_w13_state = CubeW13State(
+                    self.w13_lora_a_stacked, label=getattr(self.base_layer, "prefix", ""), log=logger
+                )
+
+    def reset_lora(self, index):
+        state = getattr(self, "_cube_w13_state", None)
+        if state is not None:
+            state.invalidate(index)
+        return super().reset_lora(index)
+
+    def set_lora(self, index, lora_a, lora_b):
+        state = getattr(self, "_cube_w13_state", None)
+        if state is not None:
+            state.invalidate(index)
+        result = super().set_lora(index, lora_a, lora_b)
+        if state is not None:
+            state.mark_loaded(index)
+        return result
+
     def _create_lora_a_weights(self, max_loras, lora_config):
         self.w13_lora_a_packed = None
         if not self.fully_sharded or self.use_ep or self._w13_slices != 2 or self.enable_moe_shared_loras:
@@ -460,6 +543,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
         lora_context.w13_lora_a_packed = getattr(self, "w13_lora_a_packed", None)
+        lora_context.cube_w13_state = getattr(self, "_cube_w13_state", None)
         return lora_context
 
     # ------------------------------------------------------------------

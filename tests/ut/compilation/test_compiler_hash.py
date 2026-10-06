@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,9 +16,16 @@ from vllm_ascend.compilation.compiler_interface import AscendCompiler
 from vllm_ascend.lora import grouped_prefill
 from vllm_ascend.patch.platform import patch_compile_cache  # noqa: F401
 
+DYNAMIC_BRANCH_FLAGS = (
+    "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING",
+    "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION",
+    "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY",
+)
 
+
+@pytest.mark.parametrize("flag_name", ("VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL", *DYNAMIC_BRANCH_FLAGS))
 @pytest.mark.parametrize("cached_enabled", [False, True])
-def test_grouped_prefill_flag_isolates_persisted_compiler_cache(tmp_path, monkeypatch, cached_enabled):
+def test_graph_branch_flag_isolates_persisted_compiler_cache(tmp_path, monkeypatch, cached_enabled, flag_name):
     """Same mode reloads its artifact; toggling the LoRA path misses that cache."""
     ascend_config = SimpleNamespace(
         ascend_compilation_config=SimpleNamespace(
@@ -31,7 +39,10 @@ def test_grouped_prefill_flag_isolates_persisted_compiler_cache(tmp_path, monkey
     handle = ("artifact_compile_range_1_8192_subgraph_0", str(tmp_path / "graph.py"))
 
     def initialize(enabled):
-        monkeypatch.setattr(grouped_prefill, "ENABLE_GROUPED_PREFILL", enabled)
+        if flag_name == "VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL":
+            monkeypatch.setattr(grouped_prefill, "ENABLE_GROUPED_PREFILL", enabled)
+        else:
+            monkeypatch.setenv(flag_name, str(int(enabled)))
         manager = CompilerManager(SimpleNamespace())
         compiler_hash = manager.compute_hash(config)
         cache_dir = tmp_path / compiler_hash
@@ -111,3 +122,56 @@ def test_aot_cache_factors_include_effective_grouped_prefill_flag(monkeypatch):
     assert aot_compile_hash_factors(config) == changed_aot
     monkeypatch.setattr(grouped_prefill, "ENABLE_GROUPED_PREFILL", False)
     assert aot_compile_hash_factors(config) == original_aot
+
+
+@pytest.mark.parametrize("flag_name", DYNAMIC_BRANCH_FLAGS)
+def test_aot_cache_factors_isolate_dynamic_decode_branches(monkeypatch, flag_name):
+    """The outer AOT key must split modes before loading a backend graph."""
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "0")
+    monkeypatch.setenv(flag_name, "0")
+    config = SimpleNamespace(compute_hash=lambda: "same-vllm-config")
+    original_env = vllm_envs.compile_factors()
+    original_aot = aot_compile_hash_factors(config)
+
+    monkeypatch.setenv(flag_name, "1")
+    changed_env = vllm_envs.compile_factors()
+    changed_aot = aot_compile_hash_factors(config)
+    assert original_env.pop(flag_name) is False
+    assert changed_env.pop(flag_name) is True
+    assert changed_env == original_env
+    assert changed_aot != original_aot
+
+    monkeypatch.setenv(flag_name, "0")
+    assert aot_compile_hash_factors(config) == original_aot
+
+
+def test_all_decode_branch_combinations_isolate_both_cache_layers(monkeypatch):
+    """Every combination gets its own key; default/unset agrees with zero."""
+    ascend_config = SimpleNamespace(
+        ascend_compilation_config=SimpleNamespace(enable_npugraph_ex=True, enable_static_kernel=False)
+    )
+    compiler = AscendCompiler()
+    config = SimpleNamespace(compute_hash=lambda: "same-vllm-config")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "0")
+    for flag in DYNAMIC_BRANCH_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+
+    with (
+        patch("vllm_ascend.compilation.compiler_interface.get_ascend_config", return_value=ascend_config),
+        patch.object(torch_npu, "__version__", "test-version", create=True),
+    ):
+        default_compiler = compiler.compute_hash(config)
+        default_aot = aot_compile_hash_factors(config)
+        compiler_keys, aot_keys = set(), set()
+        for flags in product(("0", "1"), repeat=len(DYNAMIC_BRANCH_FLAGS)):
+            for name, value in zip(DYNAMIC_BRANCH_FLAGS, flags):
+                monkeypatch.setenv(name, value)
+            compiler_key = compiler.compute_hash(config)
+            aot_key = str(aot_compile_hash_factors(config))
+            assert compiler_key not in compiler_keys
+            assert aot_key not in aot_keys
+            compiler_keys.add(compiler_key)
+            aot_keys.add(aot_key)
+            if flags == ("0", "0", "0"):
+                assert compiler_key == default_compiler
+                assert aot_compile_hash_factors(config) == default_aot

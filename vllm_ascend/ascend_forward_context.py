@@ -373,11 +373,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
-        # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
-        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
-        # is a single fused C++ op. This covers both normal model
-        # forward and _dummy_run during profile_run.
-        moe_comm_type = MoECommType.ALLTOALL
+        # An engine-level choice, including base-only batches and graph/profile
+        # dummy runs. MC2's monolithic expert kernel cannot inject MoE LoRA.
+        backend = get_ascend_config().moe_lora_ep_backend
+        moe_comm_type = MoECommType.ALLGATHER if backend == "allgather" else MoECommType.ALLTOALL
+        logger.info_once("MoE EP LoRA backend=%s, EP size=%d", backend, get_ep_group().world_size)
     elif soc_version == AscendDeviceType.A2:
         moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
     elif soc_version == AscendDeviceType.A3:

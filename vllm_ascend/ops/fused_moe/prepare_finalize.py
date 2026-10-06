@@ -30,7 +30,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.lora.fused_moe import prepare_lora_indices
+from vllm_ascend.lora.fused_moe import (
+    prepare_allgather_lora_indices,
+    prepare_lora_indices,
+    supports_ep_lora,
+)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass
@@ -360,6 +364,21 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        if supports_ep_lora(self.lora_context):
+            if self.moe_config.dp_size != 1 or self.moe_config.pcp_size != 1:
+                raise ValueError("AllGather EP LoRA requires DP=PCP=1.")
+            if _EXTRA_CTX.flash_comm_v1_enabled or enable_sp_by_pass():
+                tp_size = get_tensor_model_parallel_world_size()
+                pad_size = _EXTRA_CTX.pad_size
+                prepare_allgather_lora_indices(
+                    self.lora_context,
+                    num_tokens=hidden_states.shape[0] * tp_size - pad_size,
+                    pad_size=pad_size,
+                    tp_size=tp_size,
+                    tp_rank=get_tensor_model_parallel_rank(),
+                )
+            else:
+                prepare_allgather_lora_indices(self.lora_context, num_tokens=hidden_states.shape[0])
         if enable_sp() or enable_sp_by_pass():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
@@ -369,7 +388,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
         pertoken_scale = None
-        if quant_type == QuantType.W8A8:
+        if supports_ep_lora(self.lora_context):
+            # Preserve the same floating input for routed W13 LoRA and base
+            # dynamic quant. Slots undergo exactly the hidden gather/unpad.
+            self.lora_context.prepared_lora_indices = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                self.lora_context.prepared_lora_indices, True, True
+            )
+        elif quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
         elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(

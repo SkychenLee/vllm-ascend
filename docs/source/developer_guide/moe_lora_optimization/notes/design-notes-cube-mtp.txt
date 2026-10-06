@@ -1,0 +1,315 @@
+公开发布说明：本稿为2026-10-06只读审计快照；源码路径均相对仓库根目录。
+对应证据副本位于 ../evidence/2026-10-06/；个人机器路径使用占位符。
+专项 probe/benchmark 脚本（除仓库 benchmarks/benchmark_moe_lora_decode.py 及随附两份baseline）、
+standalone build、二进制、raw profiler/SQLite/trace、eightrow-v1/onerow-v2早期目录仅保留在原本地实验目录，未随提交发布。
+原始历史整网记录未挂载，其路径只说明来源，不是公开可下载链接；本稿不宣称可从公开包重跑全部历史实验。
+
+Cube Prefill、历史 LoRA 内核与本轮 MTP 写入优化审计
+审计日期：2026-10-06（用户日期）；只读源码/存量证据审计，本次未占用 NPU。
+源码根：{repo_root}
+运行容器：ds-ltc-v25-ep；安装源码：{installed_repo}
+
+1. 状态与命名边界
+
+已经存在的历史实现：
+  - cube_moe.py 的 routed W13 双 A Cube Prefill 路径。
+  - AscendC 的 bgmv_shrink/expand 与 sgmv_shrink/expand。
+  - INT8 paired/grouped shrink、expand+SwiGLU+quant、grouped B expand 路径。
+这些均不能列为本轮新增 native 算子。
+
+本轮新增并发布的 MTP 改动：
+  - DeepseekV4Model._copy_mtp_hidden_states，以已有 torch_npu 内建
+    npu_scatter_nd_update_ 替换大 persistent buffer 的局部视图 copy_。
+  - VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY 开关、持久 row indices、两处分支复用、
+    参数/容量检查、22 项无权重单元测试、actual helper 的 compiled graph 验证。
+这不是新增 C++ ScatterNdUpdate 内核，也没有实现 DSpark/no-spec stash 跳过。
+
+重要纠正：当前 host/container 的 Cube 调用与 C++ 注册中没有
+grouped_w13_cube 这个已实现算子。实际 Cube 入口在
+vllm_ascend/lora/cube_moe.py:248，调用
+torch.ops.aten.bmm.dtype_out(..., torch.float32, out=...)。
+矩阵乘由现有 CANN Cube 后端执行，前后的 gather/mask/scatter 和 CPU tile planner
+仍是分开的操作。可以把 grouped_w13_cube 作为后续自定义融合设计名，不能写成现状。
+
+本轮 ../evidence/2026-10-06/runtime-source-publication.json 标明 installed_and_validated，根任务总体 UT
+188 passed、lint passed；MTP 专项是其中 22 tests。当前 weights_available=False、
+end_to_end_validated=False。模型吞吐/质量及真实 speculative 路径本轮未复验。
+
+2. Cube Prefill 开关与静态调度条件
+
+开关：VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL，默认 0，集中 strict 0/1 解析；
+其他字符串会报错。源码：envs.py:100；fused_moe.py:479 起创建状态。
+开关 1 仍必须 base quant_type == W8A8，且 static_config_supported 全部成立：
+  - enforce_eager；或 FULL_DECODE_ONLY 且非空 capture sizes 的 min>=1、max<=8。
+  - speculative_config is None。
+  - TP=8、DP=1、PP=1、EP=8、use_ep=True。
+  - prefill_context_parallel_size=1、decode_context_parallel_size=1。
+  - scheduler.max_num_seqs<=8，max_num_batched_tokens<=16384。
+  - additional_config.moe_lora_ep_backend 为 allgather（缺省按 allgather）；
+    multistream_overlap_shared_expert=False。
+  - fully_sharded=False，W13 两个 slice（gate/up）。
+  - hidden_size=4096，local_num_experts=32，experts_per_token=6。
+  - max_lora_rank=16，lora_dtype=BF16。
+
+测量模型的 I=2048，但 I=2048 不是这个静态 gate；Cube 只替换 A shrink，
+不使用 B 的 intermediate size。代码也没有显式 FlashComm1/SP=False gate；
+历史目标测量是 SP=False，不应把测量条件写成未存在的代码 guard。
+
+batch adapter：Punica.update_metadata 经 single_adapter_slot 判断 CPU adapter mapping，
+必须所有 token 是同一个正 adapter id，并且它已加载。base-only、base/LoRA 混合、
+多 adapter、未加载均不启用 Cube；每次 metadata update 重置单 adapter slot。
+
+实际 forward gate：quant_moe.py:253 起，必须 comm=ALLGATHER、not allgather_int8，
+forward_context.cudagraph_runtime_mode==NONE，in_profile_run=False，且
+attn_metadata is not None，才调用 prepare。否则直接保留原路径，不读回 counts。
+因此 Decode graph、dummy/profile、全部其他 graph mode 不会执行这条 Cube 路径。
+FULL_DECODE_ONLY 服务用 graph 执行小 Decode、用 eager 执行实际 Prefill；
+Cube 是 eager Prefill 优化，不是当前小 R Decode 的 Cube 加速。
+
+3. Cube runtime guard、数据契约与回退
+
+源码：cube_moe.py:185 prepare。
+  - slot 已加载，整数，且位于 A weights slot 范围。
+  - X contiguous BF16 [R,4096]，同 device；6144<=R<=98304。
+  - counts INT64 [32]，同 device，group_list_type==1（count mode）。
+    type=0 prefix mode 不支持，不做猜测转换。
+  - 同一个 scratch NPU stream；其他流 prepare 返回 None。
+  - CPU plan 要求 32 个非负 counts；512<=sum(counts)<=R；tile 数<=1567。
+这里 R 是 routed buffer capacity，可能含未初始化/padded 尾部，sum(counts) 才是有效行数。
+不满足这些条件返回 None，继续原 BGMV shrink。prepare 之后如果输入 identity、
+generation、loaded slot、combined index shape/type/device 或 stream 变了，则明确
+ValueError；不是无声 BGMV 回退。
+
+prepare 中 counts.cpu().tolist() 是实际 256 B D2H 与 CPU 同步，也会等待前面的 NPU
+生产 counts 工作。随后 CPU 建 tile plan，并向持久 metadata 复制一次 INT64 [S,3]。
+最大实际 plan 1567*3*8=37608 B；分配容量是 1568*3*8=37632 B。
+必须把 readback、CPU plan、H2D 以及各 gather/scatter 计入 Prefill 总时间；
+只量 BMM 会夸大收益。host readback/CPU branch 是这一路不允许 graph capture 的原因。
+
+数据契约：上游 AllGather InitRouting 生产 expert-major 有效 source 前缀和 expert count，
+同一个 adapter 覆盖全 batch。combined indices 只检查 [R]、INT64、device，
+成功路径不再逐值检查它；依赖上述 producer/adapter invariant。
+
+4. Cube packing、tile/wave 与缓存生命周期
+
+输入 A_gate/A_up：两个相同形状 contiguous BF16 [slots,32,16,4096]。
+每层 packed：BF16 [32,4096,32]，gate/up 转置后 rank16+16 拼接。
+cache key=(slot,generation,storage pointer/offset/shape/stride/dtype/device)。
+set_lora/reset_lora hooks invalidate；set 成功后 mark_loaded；切 slot 或 generation
+导致重新 pack。routing 是每 batch 重新计划，不缓存。直接绕过这些 hooks 原地改 A 值
+不会被 key 检测；代码没有 content checksum/_version guard。
+
+TILE_ROWS=64，WAVE_TILES=224，MAX_ROUTED_ROWS=98304，MAX_PLAN_TILES=1567。
+每 expert count 切成最多 64 行 tile，source offset 是 count 的 expert-major prefix。
+S=sum_e ceil(count_e/64)，最大 7 waves。算法顺序：
+  1) 两个 FP32 output [R+1,16] 只在开始 zero 一次；R 行作为无效 padding sink。
+  2) 每 wave 取最多 224 个 tile，形成 [wave,64] source/valid。
+  3) index_select X 得 BF16 [wave,64,4096]，无效行 mask 为 0。
+  4) index_select packed A 得 BF16 [wave,4096,32]。
+  5) aten.bmm.dtype_out 得 FP32 [wave,64,32]。
+  6) rank 两半分别 scatter 至 FP32 [R+1,16]，无效行写 sink；返回 [:R]。
+同 stream 保证 scatter 完成顺序先于下一 wave 覆盖 arena，无 wave 间主机同步。
+一旦 routing 成功接受，全部 waves 都是该 Cube 路径；没有 overflow wave 转 BGMV。
+函数名 shrink_pair 的 bgmv 参数在成功路径不使用。
+
+只替换 routed W13 gate/up 的两个 A shrink。W13 B expand、W2 A/B、共享专家/普通
+LoRA、base W8A8 grouped matmul、激活/量化及通信都保持各自路径；不是整层 Cube。
+Punica 额外要求无 input_scale、非 fully_sharded、非 fuse_swiglu、A slices=2；
+不满足时不接受 cube_pair。源码：punica_npu.py:499。
+
+5. Cube 精确内存预算（按当前源码张量容量，只读计算）
+
+共享 CubeScratch 每 device 一个（_SCRATCH[str(device)]），同流串行复用：
+  gathered BF16 [224,64,4096]                       117440512 B  112 MiB
+  tiles BF16 [224,64,4096]                          117440512 B  112 MiB
+  tile_weights BF16 [224,4096,32]                    58720256 B   56 MiB
+  两个 outputs FP32 [98305,16]                       12583040 B   12.0001220703 MiB
+  product FP32 [224,64,32]                            1835008 B    1.75 MiB
+  values FP32 [14336,16]                               917504 B    0.875 MiB
+  j INT64 [1,64]                                         512 B
+  metadata INT64 [1568,3]                               37632 B
+  source+destination INT64 [224,64]                     229376 B
+  valid bool [224,64]                                    14336 B
+  zero BF16 scalar + sink INT64 scalar                      10 B
+  ---------------------------------------------------------------
+  shared total                                     309218698 B  294.893930435 MiB
+
+每层 packed [32,4096,32]BF16 =8388608 B =8 MiB。
+43 层 pack=360710144 B=344 MiB。
+shared +43 pack=669928842 B=638.893930435 MiB，每 rank/device。
+包括上列固定 scratch 与 pack；不包括原始 LoRA A/B、base/quant weights、KV cache、
+graph pool、CANN native workspace、allocator alignment/rounding、临时 CPU plan/H2D
+staging、PyTorch metadata 表达式可能创建的其他临时量。不能把 638.9 MiB 当总峰值。
+scratch 复用仅为当前同 device/同 stream 串行模型路径设计，未验证多个模型并行调用。
+
+6. 历史 SGMV/BGMV 与独立 grouped INT8 Prefill 路径
+
+历史内核文件：csrc/kernels/{bgmv_shrink,bgmv_expand,sgmv_shrink,sgmv_expand}.cpp。
+它们是向量 Cast/Mul/Reduce 路径，不是 Cube kernels。
+  - BGMV：per-token INT64 adapter indices，负数跳过 delta。
+  - SGMV：per-sequence adapter ids + sequence lengths。
+  - shrink：FP16/BF16 X/A -> FP32 rank outputs；输入/权重 cast 后向量乘归约。
+    TILE_LENGTH=11776；H 超过 tile 时分段累加。
+  - expand：FP32 rank input，FP16/BF16 B，cast 回 FP16/BF16 output 并加已有值；
+    BGMV 核支持 rank8/16/32/64。
+  - inactive 索引不写 shrink，所以 Python 原路径用零初始化 shrink buffer。
+普通 dense/shared LoRA 按 Punica.is_prefill 在 SGMV/BGMV 之间选择；routed MoE 路径
+默认直接 BGMV，即使是 Prefill，只有 Cube 接受时替换 W13 A shrink。
+310P 或 max_lora_rank>=128 时 Punica 选择 upstream torchops fallback。
+历史真实 Decode graph 也有 SGMV（shared/dense 的 captured metadata 分支），
+不能把所有 Decode LoRA 都称为 BGMV。
+
+另一个历史开关 VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL，默认 0，import 时决定
+grouped_prefill.ENABLE_GROUPED_PREFILL。源码：grouped_prefill.py:11,44。
+此路径是 fully_sharded=True 且 use_ep=False 的独立 INT8 路径，与上述 EP Cube 不同：
+  - INT8 hidden_states on NPU，w13_lora_a_packed 存在。
+  - 8192<=R<=2^24，R>=groups*8，0<groups<2^24。
+  - 0<H<=4096，H%64==0，2*local_rank*H<=16384。
+  - full LoRA rank in {8,16,32}；0<I_partition<=256，I_partition%32==0。
+  - 三个 native ops 已注册：bgmv_shrink_int8_pair_grouped、
+    moe_lora_expand_swiglu_quant_pair_grouped、bgmv_expand_grouped。
+GPU FP32 exact-range keys 排 combined expert/adapter index，负数/越界最后保留 -1；
+argsort(order.float()) 得 inverse。无 counts D2H，fixed shapes 可 graph replay。
+配套 C++ 注册在 csrc/moe_lora_int8.cpp；包括独立 tiled B expand。
+current TP8+EP8、非 fully_sharded 的目标不能命中 GROUPED_PREFILL；不能用它的
+存在说明 EP Decode 已经 grouped/Cube 化，也不能由此给出非 EP 整网吞吐数字。
+
+7. 历史 8K 输入 +4K 输出、C8 整网记录与可复核范围
+
+历史会话记录（9 月 30 日旧实验，不是 10 月 6 日本轮结果）：
+每请求 8192 input+4096 output；8 concurrent；max_num_batched_tokens=16384；
+max_num_seqs=8、max_model_len=16384；TP8+EP8、DP1、AllGather、W8A8；
+LoRA 非 fully_sharded；无 DSpark/无 Spec/无 prefix cache。
+两组各 8/8 complete，生成32768 tokens，ignore_eos 强制4096，无 preemption。
+adapter 为原历史零值 LoRA，仍走完整 LoRA compute，不能作为非零 adapter 质量证明。
+
+指标                          eager Cube0        Decode graph+Cube1
+output throughput tok/s       29.4580538093       129.3991029422
+测量墙钟 s                    1112.3613329        253.2320492
+TTFT P50 s                    15.9636644          12.027199
+TTFT P95 s                    27.1475633          20.441225
+TPOT P50 ms                   267.511934          58.858697
+TPOT P95 ms                   270.036965          60.872961
+combined throughput ratio     4.392656x
+
+该比率同时改变 Decode graph 与 W13 Cube，不能归因单独 Cube；各一波，未做多次统计。
+历史输出重复/含 </think> 且强制 ignore_eos，严格端到端数值/adapter 质量验证后置。
+两组均 EP；目前没有可确认的非 EP 同配置整网结果。
+
+原 summary/result/launch 文件位于旧 {original_workspace}/work-dir：
+  agentic/lora_8k4k_c8_results.md
+  validation/results/lora-8k4k-c8-{eager-r1,graph-cube-r1}-measure/result.json
+  validation/results/lora-8k4k-c8-graph-cube-r1-vs-eager.{md,json}
+  scripts/serve_lora_8k4k_c8_graph_cube.sh
+这个 mount 当前不存在，未能独立复查原结果；本审计没有从存量 logs 重建吞吐。
+上述数字应标为“历史记录”，不能声称“本轮整网验证”或给用户失效的原文件链接。
+
+存量真实 profiles 当前仍可读取：
+  ds-ltc-v25-ep:{original_profiles}/lora-8k4k-c8-eager-r1
+  ds-ltc-v25-ep:{original_profiles}/lora-8k4k-c8-graph-cube-r1
+rank0 目录：
+  dp0_pp0_tp0_dcp0_ep0_rank0_1359936_20260930013635126_ascend_pt/ASCEND_PROFILER_OUTPUT
+本轮只读 Decode 重分析保存 ../evidence/2026-10-06/profiles/rank0_decode_hotspots.json 与 ../evidence/2026-10-06/profiles/rank0_decode_hotspots.md，SQLite
+TASK.modelId=49 的12 graph replays，每步8308 tasks、43层，T8/topK6/R48/H4096/
+I2048/E32/r16。device span mean49.01843ms（48.44178～49.55214），start interval
+mean57.38503ms，outside graph gap8.41512ms。该 profile 是短 Prefill+12 Decode
+样本，不能替代全部4096-token formal wave。算子时间求和不是 critical path；通信
+hcom 与 AivKernel 为同一 HCCL task 的重复视图，不应叠加。
+
+8. MTP persistent buffer 问题与本轮实现
+
+源码：deepseek_v4.py:1085 分配、1097 helper、1189/1191 SP/非SP调用、1331 getter。
+buffer 始终分配 [Bmax,hc_mult*H]，model dtype，稳定地址；即便 spec=None 仍 stash。
+目标 Bmax16384、hc_mult4、H4096：BF16 [16384,16384] =536870912 B=512 MiB/rank。
+当前改变写入方式，未减少这512 MiB持久分配。
+
+新开关 VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY，strict 0/1 默认 0。
+flag1 在初始化持久 INT64 arange(Bmax)[:,None]，[16384,1] 为131072 B=128KiB/rank。
+flag0 field=None，没有这一额外 tensor。
+
+helper 顺序与 fallback：
+  1) 必须二维且 width==buffer width，否则 ValueError；n>capacity 同样在写前报错。
+  2) n==0 返回，避免空 NPU operator。
+  3) flag0/rows=None、源/目标 dtype 不同、device 不同或目标不为 FP16/BF16时，
+     buffer[:n].copy_(source)，保留原 copy_ 的转换语义。
+  4) 其他条件使用 npu_scatter_nd_update_(full_buffer,rows[:n],source)。
+同 persistent pointer、已有 aliases 与尾部 [n:] 完整保持，更新前 n 行。
+SP 分支仍先 all_gather flattened residual，再去 pad，调用同 helper；非 SP 直接
+flatten(1) 调同 helper。没有变更 all_gather、hc_head、getter 或 speculative 分流。
+
+原因证据分层：
+  - 旧 rank0 graph 两个巨大 TensorMove 每步共1.6904567ms；形状flat268435456 与
+    [16384,16384] BF16。旧模型 cached computation_graph 标明对应 persistent MTP
+    buffer slice-copy；小摘录 ../evidence/2026-10-06/profiles/old_mtp_capture_excerpt.txt。
+  - 普通 raw NPUGraph 小 partial copy9.32us、scatter16.64us，并不重现问题。
+  - torch.func.functionalize 单独测试也不是实际后端归属证据。
+  - 实际 npugraph_ex compiler，force_eager=True、inplace_pass=False、
+    clone_input/clone_output=False，局部 view mutation 被 functionalization 展开，
+    每步两个完整512MiB buffer copies；builtin native scatter 保持真正 in-place。
+因此1.69ms属于这个已观察到的编译图条件，不能声称所有 copy_ 都昂贵或所有配置
+都必得同样整网收益。原隔离函数含 source+1 baseline1726.29us、scatter22.59us，
+而下面更强证据直接调用实际 production helper。
+
+9. MTP 验证与结果边界
+
+实际 production helper，从源码抽取后用 synthetic tensors 编译 npugraph_ex；
+固定 buffer [16384,16384]，只物理12/visible0，所有本 agent 进程已释放。
+graph 五组样本 median（us）：
+  dtype       T       flag0          flag1
+  BF16        1       1721.9701      13.5548
+  BF16        8       1725.0844      21.7846
+  FP16        1       1721.3908      14.0738
+  FP16        8       1728.4200      22.3524
+8 cases 均 PASS；各更新源3次，验证 head exact、整个 tail unchanged、persistent
+pointer unchanged、消费输出 exact。BF16 T8 isolated helper ratio约79.19x。
+这是 MTP 写入 microbenchmark，不是整网 token throughput ratio。
+
+profiler 3 replays：flag0 共6 TensorMove（815.612～859.514us），flag1 共3
+ScatterNdUpdate（9.481～12.301us），没有完整 TensorMove；source+1 的 Adds 是
+复现/校验开销。22 UT 覆盖初始化 flag、两类 dtype、重复变化/尾部/alias、空/全容量、
+rank/width/capacity errors、conversion fallback、SP/非SP分支与 padding。
+ruff check/format PASS。没有加载 model weights，也没有 MTP/DSpark acceptance test。
+
+可复核 artifact：
+  profiles/verify_integrated_mtp_copy.py
+  ../evidence/2026-10-06/profiles/mtp_copy_integrated_result.json
+  ../evidence/2026-10-06/profiles/mtp_copy_integrated_kernel_summary.json
+  ../evidence/2026-10-06/profiles/mtp_copy_integrated_release.json
+  profiles/verify_compiled_mtp_copy.py
+  ../evidence/2026-10-06/profiles/mtp_partial_copy_compiled_result.json
+  profiles/verify_mtp_partial_copy.py
+  ../evidence/2026-10-06/profiles/mtp_partial_copy_result.json
+  ../evidence/2026-10-06/profiles/mtp_partial_copy_functionalized_result.json
+  tests/ut/models/test_deepseek_v4_mtp_copy.py
+compiler_interface.py:253-256 的 explicit hash factors 已加入 fused_routing、
+fused_activation、optimize_mtp_buffer_copy，grouped_prefill 使用有效 import-time
+branch；避免 flag 切换后误复用旧 persisted compiled graph。
+../evidence/2026-10-06/runtime-source-publication.json 记 host/container 模型 sha 一致且已安装验证。
+
+10. DSpark/no-spec skip 仍为待实现候选，以及 V2 getter 风险
+
+当前 DeepseekV4Model 不论是否 speculative 都 stash；MTP flag只改写入算子。
+get_mtp_target_hidden_states 返回 persistent pre-hc_head residual；本轮没有让它为None。
+DSpark target 的 aux layers 收集 hidden_states.mean(dim=1)，draft model
+deepseek_v4_dspark.py 有自己的 main_proj/main_norm、layers 与 hc_head，
+combine_hidden_states 合并目标 aux；draft没有 _mtp_hidden_buffer/helper/getter。
+这不自动证明 target buffer可跳过，因为 runner 还有 generic consumer。
+
+V1 worker/model_runner_v1.py:1575 位于 speculative 分支，用 getter 后只有
+method==mtp 且 result is not None 才替换 hidden_states；无 spec不消费该 getter。
+V2 Ascend NPUModelRunner 继承 upstream GPUModelRunner，当前容器上游
+{upstream_repo}/vllm/v1/worker/gpu/model_runner.py:599 和1463：
+  if hasattr(self.model, 'get_mtp_target_hidden_states'):
+      pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+      spec_hidden_states = pre_hc_hidden_states[:hidden_states.shape[0]]
+没有 None guard，也没有按 mtp method 限制；Ascend V2 DSpark speculator 将
+last_hidden_states/aux_hidden_states 继续传给 superclass。因此未来若把 DSpark/no-spec
+buffer allocation取消或getter改None，V2 spec 分支可发生 None slicing。
+当前写入替换仍保持 buffer存在，未新增这个风险。
+
+后续 skip 设计必须先按实际 runner/spec method 明确消费契约，统一 None guard 与
+method-specific selection，验证 no-spec、MTP、DSpark（含 V1/V2、SP和graph），
+再省 allocation/copy；不能只检查 DeepseekV4Model.speculative_config。
+另一个 Cube 后续候选是 device-only tile planning/fused gather+BMM+scatter：
+可减少counts CPU同步与临时读写，但当前并未实现，需占用率/多adapter/pack lifecycle/
+stream安全验证，且小 R Decode 应单独设计，不能照搬64行Tile的Prefill路径。

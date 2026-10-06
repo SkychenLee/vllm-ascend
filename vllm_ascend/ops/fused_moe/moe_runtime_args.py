@@ -64,6 +64,7 @@ from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
     MoEFusedExpertsInput,
+    MoELoRARouting,
     MoEMC2CombineMetadata,
     MoEMlpComputeInput,
     MoEPrepareOutput,
@@ -261,10 +262,12 @@ def build_mlp_compute_input(
         topk_ids=fused_experts_input.topk_ids,
         output_dtype=output_dtype,
         lora_context=fused_experts_input.lora_context,
+        lora_routing=token_dispatch_output.lora_routing,
     )
 
 
 __all__ = [
+    "MoELoRARouting",
     "MoEAllGatherCombineMetadata",
     "MoEAllToAllCombineMetadata",
     "MoEFusedExpertsInput",

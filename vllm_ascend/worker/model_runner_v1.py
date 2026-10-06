@@ -100,6 +100,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
@@ -279,6 +280,9 @@ class NPUModelRunner(GPUModelRunner):
             super().__init__(vllm_config, device)
 
         self.pin_memory = PIN_MEMORY
+        # CPU-only diagnostics, opt-in and limited to global rank zero.
+        self._decode_graph_evidence = ascend_envs.VLLM_ASCEND_DECODE_GRAPH_EVIDENCE and dist.get_rank() == 0
+        self._decode_graph_evidence_seen = set()
 
         set_offloader(create_offloader(self.offload_config))
 
@@ -2689,6 +2693,15 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        # A one-token tail of chunked prefill can otherwise look like decode.
+        # Dummy capture passes an explicit override and has no live request state.
+        prefill_present = False
+        if force_uniform_decode is None:
+            prefill_present = bool(np.any(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                < self.input_batch.num_prompt_tokens[:num_reqs]
+            ))
+            force_eager = force_eager or prefill_present
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
@@ -2762,6 +2775,16 @@ class NPUModelRunner(GPUModelRunner):
                 num_paddings=batch_descriptor.num_tokens - num_tokens,
                 runtime_mode=str(cudagraph_mode),
             )
+
+        if self._decode_graph_evidence and force_uniform_decode is None:
+            # This records dispatch, not successful graph replay/device completion.
+            key = (cudagraph_mode, prefill_present, batch_descriptor)
+            if key not in self._decode_graph_evidence_seen:
+                self._decode_graph_evidence_seen.add(key)
+                logger.info(
+                    "Decode graph dispatch mode=%s prefill_present=%s descriptor=%s active_loras=%d",
+                    cudagraph_mode, prefill_present, batch_descriptor, num_active_loras,
+                )
 
         return (
             cudagraph_mode,
@@ -3283,10 +3306,13 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens,
             num_sampled_tokens,
             remove_lora,
-            # TODO: The next line is a temporary workaround
-            # to fix the accuracy issue of test_llama32_lora.py,
-            # which is introduced by vllm-project/vllm#32005
-            num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
+            # Profile the maximum LoRA workload, but keep capture/warmup
+            # mappings consistent with their active-LoRA graph bucket.
+            num_active_loras=(
+                self.lora_config.max_loras
+                if is_profile and self.lora_config is not None
+                else num_active_loras
+            ),
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens

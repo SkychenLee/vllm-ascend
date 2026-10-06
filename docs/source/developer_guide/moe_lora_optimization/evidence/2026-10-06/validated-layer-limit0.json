@@ -1,0 +1,403 @@
+{
+  "scope": "one routed MoE layer; no model/attention/communication/scheduler",
+  "physical_devices": "15",
+  "local_device": 0,
+  "libraries": [
+    "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so"
+  ],
+  "library_sha256": {
+    "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": "360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839"
+  },
+  "shape": {
+    "H": 4096,
+    "I": 2048,
+    "rank": 16,
+    "experts": 32,
+    "adapters": 4,
+    "topk": 6
+  },
+  "nonzero_synthetic_lora": true,
+  "routing_distribution": "deterministic global expert selections; rank0 owns 32/256 experts",
+  "swiglu_limit": 0.0,
+  "flags": {
+    "fused_routing": true,
+    "fused_activation": true
+  },
+  "cases": [
+    {
+      "tokens": 1,
+      "capacity": 6,
+      "active_rows": 1,
+      "initial_max_abs": 0.0,
+      "activation_dispatch": [
+        {
+          "shape": [
+            6,
+            4096
+          ],
+          "dtype": "torch.bfloat16",
+          "storage_format": 2,
+          "fused": true
+        }
+      ],
+      "baseline_eager": {
+        "samples_us": [
+          1456.0487365722656,
+          1420.4519653320312,
+          1392.6840209960938,
+          1398.6824035644531,
+          1400.5239868164062
+        ],
+        "median_us": 1400.5239868164062
+      },
+      "baseline_graph": {
+        "samples_us": [
+          215.2720069885254,
+          215.1612091064453,
+          215.09639739990234,
+          215.10919570922852,
+          214.83640670776367
+        ],
+        "median_us": 215.10919570922852
+      },
+      "optimized_eager": {
+        "samples_us": [
+          936.1711883544922,
+          935.9819793701172,
+          932.9308319091797,
+          934.2832183837891,
+          933.2592010498047
+        ],
+        "median_us": 934.2832183837891
+      },
+      "optimized_graph": {
+        "samples_us": [
+          126.04800224304199,
+          126.0636043548584,
+          126.04599952697754,
+          126.08280181884766,
+          125.95479965209961
+        ],
+        "median_us": 126.04800224304199
+      },
+      "changed_input_replays": [
+        {
+          "phase": 1,
+          "active_rows": 1,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 2,
+          "active_rows": 0,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 3,
+          "active_rows": 0,
+          "max_abs": 0.0
+        }
+      ],
+      "graph_speedup": 1.7065656883197673
+    },
+    {
+      "tokens": 2,
+      "capacity": 12,
+      "active_rows": 2,
+      "initial_max_abs": 0.0,
+      "activation_dispatch": [
+        {
+          "shape": [
+            12,
+            4096
+          ],
+          "dtype": "torch.bfloat16",
+          "storage_format": 2,
+          "fused": true
+        }
+      ],
+      "baseline_eager": {
+        "samples_us": [
+          1425.5595397949219,
+          1424.2900085449219,
+          1423.1019592285156,
+          1421.3032531738281,
+          1439.7567749023438
+        ],
+        "median_us": 1424.2900085449219
+      },
+      "baseline_graph": {
+        "samples_us": [
+          292.2155952453613,
+          292.20279693603516,
+          292.02880859375,
+          292.1080017089844,
+          292.0587921142578
+        ],
+        "median_us": 292.1080017089844
+      },
+      "optimized_eager": {
+        "samples_us": [
+          940.7340240478516,
+          942.8723907470703,
+          942.3332214355469,
+          943.5472106933594,
+          944.4995880126953
+        ],
+        "median_us": 942.8723907470703
+      },
+      "optimized_graph": {
+        "samples_us": [
+          197.10119247436523,
+          196.77520751953125,
+          196.84320449829102,
+          196.86840057373047,
+          196.8507957458496
+        ],
+        "median_us": 196.8507957458496
+      },
+      "changed_input_replays": [
+        {
+          "phase": 1,
+          "active_rows": 2,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 2,
+          "active_rows": 1,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 3,
+          "active_rows": 1,
+          "max_abs": 0.0
+        }
+      ],
+      "graph_speedup": 1.483905617969254
+    },
+    {
+      "tokens": 4,
+      "capacity": 24,
+      "active_rows": 4,
+      "initial_max_abs": 0.0,
+      "activation_dispatch": [
+        {
+          "shape": [
+            24,
+            4096
+          ],
+          "dtype": "torch.bfloat16",
+          "storage_format": 2,
+          "fused": true
+        }
+      ],
+      "baseline_eager": {
+        "samples_us": [
+          1420.7403564453125,
+          1424.5455932617188,
+          1422.7027893066406,
+          1419.8480224609375,
+          1420.6803894042969
+        ],
+        "median_us": 1420.7403564453125
+      },
+      "baseline_graph": {
+        "samples_us": [
+          351.73839569091797,
+          351.9895935058594,
+          352.50438690185547,
+          352.5920104980469,
+          352.2840118408203
+        ],
+        "median_us": 352.2840118408203
+      },
+      "optimized_eager": {
+        "samples_us": [
+          978.0328369140625,
+          941.9735717773438,
+          942.1463775634766,
+          948.5996246337891,
+          954.8175811767578
+        ],
+        "median_us": 948.5996246337891
+      },
+      "optimized_graph": {
+        "samples_us": [
+          251.19600296020508,
+          251.12239837646484,
+          251.18440628051758,
+          251.1203956604004,
+          251.09479904174805
+        ],
+        "median_us": 251.12239837646484
+      },
+      "changed_input_replays": [
+        {
+          "phase": 1,
+          "active_rows": 4,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 2,
+          "active_rows": 3,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 3,
+          "active_rows": 3,
+          "max_abs": 0.0
+        }
+      ],
+      "graph_speedup": 1.4028378755474498
+    },
+    {
+      "tokens": 8,
+      "capacity": 48,
+      "active_rows": 7,
+      "initial_max_abs": 0.0,
+      "activation_dispatch": [
+        {
+          "shape": [
+            48,
+            4096
+          ],
+          "dtype": "torch.bfloat16",
+          "storage_format": 2,
+          "fused": true
+        }
+      ],
+      "baseline_eager": {
+        "samples_us": [
+          1485.2911376953125,
+          1450.4147338867188,
+          1420.0851440429688,
+          1457.4632263183594,
+          1434.2340087890625
+        ],
+        "median_us": 1450.4147338867188
+      },
+      "baseline_graph": {
+        "samples_us": [
+          437.51678466796875,
+          437.04681396484375,
+          436.88159942626953,
+          437.7363967895508,
+          437.0671844482422
+        ],
+        "median_us": 437.0671844482422
+      },
+      "optimized_eager": {
+        "samples_us": [
+          1020.8744049072266,
+          942.3583984375,
+          939.5223999023438,
+          998.1031799316406,
+          944.5364379882812
+        ],
+        "median_us": 944.5364379882812
+      },
+      "optimized_graph": {
+        "samples_us": [
+          321.1888122558594,
+          321.31561279296875,
+          321.4503860473633,
+          321.4788055419922,
+          321.45320892333984
+        ],
+        "median_us": 321.4503860473633
+      },
+      "changed_input_replays": [
+        {
+          "phase": 1,
+          "active_rows": 5,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 2,
+          "active_rows": 6,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 3,
+          "active_rows": 5,
+          "max_abs": 0.0
+        }
+      ],
+      "graph_speedup": 1.3596722960035383
+    },
+    {
+      "tokens": 64,
+      "capacity": 384,
+      "active_rows": 49,
+      "initial_max_abs": 0.0,
+      "activation_dispatch": [
+        {
+          "shape": [
+            384,
+            4096
+          ],
+          "dtype": "torch.bfloat16",
+          "storage_format": 2,
+          "fused": false
+        }
+      ],
+      "baseline_eager": {
+        "samples_us": [
+          1379.4172668457031,
+          1375.7304382324219,
+          1376.1328125,
+          1432.8291320800781,
+          1424.5924377441406
+        ],
+        "median_us": 1379.4172668457031
+      },
+      "baseline_graph": {
+        "samples_us": [
+          1382.4592590332031,
+          1382.49755859375,
+          1382.4092102050781,
+          1382.2871398925781,
+          1381.6264343261719
+        ],
+        "median_us": 1382.4092102050781
+      },
+      "optimized_eager": {
+        "samples_us": [
+          1238.4848022460938,
+          1239.4508361816406,
+          1238.9320373535156,
+          1238.0180358886719,
+          1238.3096313476562
+        ],
+        "median_us": 1238.4848022460938
+      },
+      "optimized_graph": {
+        "samples_us": [
+          1246.5351867675781,
+          1246.3976287841797,
+          1245.955581665039,
+          1246.3507843017578,
+          1247.0491790771484
+        ],
+        "median_us": 1246.3976287841797
+      },
+      "changed_input_replays": [
+        {
+          "phase": 1,
+          "active_rows": 48,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 2,
+          "active_rows": 48,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 3,
+          "active_rows": 48,
+          "max_abs": 0.0
+        }
+      ],
+      "graph_speedup": 1.1091237485372731
+    }
+  ]
+}

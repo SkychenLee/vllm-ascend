@@ -1,0 +1,194 @@
+{
+  "physical_device": 13,
+  "mode": "blocked",
+  "compiled": [],
+  "direct_native_format_cases": [
+    {
+      "tokens": 8,
+      "metadata": "expanded",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "expanded",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "expanded",
+      "requested_format": 29,
+      "actual_format": 2,
+      "contiguous": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "topk",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "topk",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "topk",
+      "requested_format": 29,
+      "actual_format": 29,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "slots",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "slots",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "slots",
+      "requested_format": 29,
+      "actual_format": 2,
+      "contiguous": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "map",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "map",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 8,
+      "metadata": "map",
+      "requested_format": 29,
+      "actual_format": 2,
+      "contiguous": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "expanded",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "expanded",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "expanded",
+      "requested_format": 29,
+      "actual_format": 2,
+      "contiguous": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "topk",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "topk",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "topk",
+      "requested_format": 29,
+      "actual_format": 29,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "slots",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "slots",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "slots",
+      "requested_format": 29,
+      "actual_format": 2,
+      "contiguous": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "map",
+      "requested_format": 3,
+      "actual_format": 3,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "map",
+      "requested_format": 4,
+      "actual_format": 4,
+      "contiguous": true,
+      "native_rejected": true
+    },
+    {
+      "tokens": 64,
+      "metadata": "map",
+      "requested_format": 29,
+      "actual_format": 2,
+      "contiguous": true
+    }
+  ],
+  "eager_fallback_limit": "Legacy blocked integer Cast/Identity/TransData is unsupported by CANN; Python fallback dispatch is covered by guard unit tests."
+}

@@ -1,0 +1,388 @@
+{
+  "analysis_date": "2026-10-06",
+  "device": "physical 12 / visible 0",
+  "scope": "actual production helper with synthetic tensors and compiled graph; no model weights or throughput",
+  "model_source": "{repo_root}/vllm_ascend/models/deepseek_v4.py",
+  "buffer_shape": [
+    16384,
+    16384
+  ],
+  "backend_options": {
+    "force_eager": true,
+    "inplace_pass": false,
+    "clone_input": false,
+    "clone_output": false
+  },
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "tokens": 1,
+      "enabled": false,
+      "graph": {
+        "samples_us": [
+          1721.9047546386719,
+          1721.8304443359375,
+          1722.0726013183594,
+          1721.9700622558594,
+          1722.1426391601562
+        ],
+        "median_us": 1721.9700622558594
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "tokens": 1,
+      "enabled": true,
+      "graph": {
+        "samples_us": [
+          13.71899962425232,
+          13.554799556732178,
+          13.539199829101562,
+          13.603999614715576,
+          13.442399501800537
+        ],
+        "median_us": 13.554799556732178
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "tokens": 8,
+      "enabled": false,
+      "graph": {
+        "samples_us": [
+          1724.869384765625,
+          1724.9183654785156,
+          1725.0843811035156,
+          1730.4501342773438,
+          1725.29541015625
+        ],
+        "median_us": 1725.0843811035156
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "tokens": 8,
+      "enabled": true,
+      "graph": {
+        "samples_us": [
+          21.779000759124756,
+          21.78459882736206,
+          21.786398887634277,
+          21.849799156188965,
+          21.770598888397217
+        ],
+        "median_us": 21.78459882736206
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.float16",
+      "tokens": 1,
+      "enabled": false,
+      "graph": {
+        "samples_us": [
+          1721.1181640625,
+          1721.3908386230469,
+          1721.0595703125,
+          1721.8008422851562,
+          1721.566162109375
+        ],
+        "median_us": 1721.3908386230469
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.float16",
+      "tokens": 1,
+      "enabled": true,
+      "graph": {
+        "samples_us": [
+          15.800199508666992,
+          14.571800231933594,
+          14.073799848556519,
+          13.529800176620483,
+          13.992199897766113
+        ],
+        "median_us": 14.073799848556519
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.float16",
+      "tokens": 8,
+      "enabled": false,
+      "graph": {
+        "samples_us": [
+          1728.4199523925781,
+          1727.5656127929688,
+          1733.1352233886719,
+          1728.4141540527344,
+          1728.5670471191406
+        ],
+        "median_us": 1728.4199523925781
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "dtype": "torch.float16",
+      "tokens": 8,
+      "enabled": true,
+      "graph": {
+        "samples_us": [
+          22.090599536895752,
+          22.400999069213867,
+          22.352399826049805,
+          21.402599811553955,
+          23.3981990814209
+        ],
+        "median_us": 22.352399826049805
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "buffer_pointer_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    }
+  ],
+  "profile_directory": "{repo_root}/work-dir/decode-optimization-20261006/profiles/mtp_copy_integrated_profile",
+  "unit_tests": {
+    "path": "tests/ut/models/test_deepseek_v4_mtp_copy.py",
+    "passed": 22,
+    "duration_seconds": 0.38
+  },
+  "lint": "ruff check and ruff format --check passed for production model and new unit test",
+  "profile_kernel_evidence": {
+    "aclnnInplaceCopy_TensorMoveAiCore_TensorMove": {
+      "count": 6,
+      "durations_us": [
+        815.612,
+        853.154,
+        859.514,
+        854.994,
+        857.814,
+        857.774
+      ]
+    },
+    "aclnnAdds_AddAiCore_Add": {
+      "count": 6,
+      "durations_us": [
+        7.221,
+        7.041,
+        7.121,
+        7.2,
+        6.64,
+        6.54
+      ]
+    },
+    "aclnnScatterNdUpdate_ScatterNdUpdateAiCore_ScatterNdUpdate": {
+      "count": 3,
+      "durations_us": [
+        12.301,
+        9.641,
+        9.481
+      ]
+    }
+  },
+  "implementation": {
+    "path": "vllm_ascend/models/deepseek_v4.py",
+    "flag": "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY",
+    "default": 0,
+    "states": "flag0 preserves partial copy; flag1 persistent int64 prefix indices and native in-place scatter for matched-device matched-dtype FP16/BF16; dtype/device conversion fallback preserves legacy copy",
+    "sp": "SP still gathers all TP residual rows and removes trailing padding before the common helper; non-SP flattens hidden states before same helper",
+    "capacity": "width/rank/capacity mismatches fail before buffer write; empty input does not launch NPU operation",
+    "additional_memory_bytes_at_batch16384": 131072
+  },
+  "source_sha256": {
+    "vllm_ascend/models/deepseek_v4.py": "d3172918978c5ea4da3df03e0c23cf7e33dd110660f2f384c36efa1e326b7f7e",
+    "tests/ut/models/test_deepseek_v4_mtp_copy.py": "9c14ce5d372dbd543cd5a05ac4e004e073bb143b6b0fca8d9a9ac156e5c8c2f7"
+  },
+  "micro_speedups": {
+    "torch.bfloat16:T1": 127.03766330507037,
+    "torch.bfloat16:T8": 79.18825564677196,
+    "torch.float16:T1": 122.31173223623765,
+    "torch.float16:T8": 77.32592320482085
+  }
+}

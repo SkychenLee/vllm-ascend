@@ -1,0 +1,9 @@
+{
+  "analysis_date": "2026-10-06",
+  "device": 12,
+  "processes_remaining": [],
+  "verification": "docker exec ds-ltc-v25-ep npu-smi info -t proc-mem -i 6 -c 0",
+  "output": "No process in device.",
+  "production_model_source_changed": true,
+  "container_publication": "root controls publication"
+}

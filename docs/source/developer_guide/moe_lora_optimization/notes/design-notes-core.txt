@@ -1,0 +1,517 @@
+公开发布说明：本稿为2026-10-06只读审计快照；源码路径均相对仓库根目录。
+对应证据副本位于 ../evidence/2026-10-06/；个人机器路径使用占位符。
+专项 probe/benchmark 脚本（除仓库 benchmarks/benchmark_moe_lora_decode.py 及随附两份baseline）、
+standalone build、二进制、raw profiler/SQLite/trace、eightrow-v1/onerow-v2早期目录仅保留在原本地实验目录，未随提交发布。
+原始历史整网记录未挂载，其路径只说明来源，不是公开可下载链接；本稿不宣称可从公开包重跑全部历史实验。
+
+核心优化设计审计备忘（供完整设计文档整合）
+审计日期：2026-10-06
+审计对象：{repo_root} 当前共享源码；上游相关 LoRA
+  约束使用容器 ds-ltc-v25-ep 内 {upstream_repo}/vllm 源码。
+本备忘只做源码审计，未修改生产代码，未使用 NPU，未重新测试。
+实际性能、验证次数与权重缺失情况应使用主代理掌握的独立结果补齐。
+
+一、路径必须区分：当前 TP+EP 与既有 TP fully-sharded
+
+1. 当前 TP8+EP8 常规 LoRA：enable_expert_parallel=True，fully_sharded_loras=False。
+   EP 将专家分布到原 TP 组，但每个本地专家完整保存自己的 LoRA rank。
+   W8A8 基座使用 INT8 GMM；LoRA 的 A 输入仍是 BF16/FP16。
+   W13 LoRA 加到基座 gate/up 浮点结果，激活后得到浮点 activated 与基座
+   GMM2 所需 INT8+scale；W2 LoRA 使用浮点 activated。
+   不能把“W8A8 基座”误写成“该模式 LoRA A 也使用 INT8 输入”。
+
+2. 既有非 EP TP fully-sharded：fully_sharded_loras=True，use_ep=False。
+   W13 A 按 LoRA rank 切分，低 rank 结果执行 TP 通信后供 B 使用；W2 A
+   可能覆盖完整 rank，但输入是 TP 切分的 intermediate，需要 TP all-reduce。
+   该模式允许基座和 LoRA 共用 INT8 激活与 FP32 per-token scale。
+   W13 B/add/SwiGLU/quant 的旧融合和 grouped_prefill 都仅服务于该模式。
+
+3. EP 与 fully_sharded_loras=True 仍明确不支持。Ascend 包装器继承上游
+   FusedMoEWithLoRA._verify_ep_fs；上游 fused_moe.py:229–237 通过 assert
+   拒绝两者同时开启，因为专家切分与 rank 切分使用同一组但布局假设冲突。
+   TP+EP 意味着模型其他 TP 层加 EP 专家，不代表 fully-sharded EP LoRA。
+
+源码：vllm_ascend/lora/fused_moe.py:54–80、447–477、510–533；
+      vllm_ascend/lora/quant_moe.py:215–239、342–422。
+
+二、EP LoRA AllGather 兼容及默认通信选择
+
+1. 配置项 additional_config["moe_lora_ep_backend"] 的默认值是 "allgather"。
+   仅接受精确小写字符串 "allgather"、"alltoall"；非法字符串、大小写或
+   类型会 ValueError。要恢复旧 AlltoAll 必须显式设置 "alltoall"。
+   这不是 vLLM 通用 all2all_backend 选项，也不是新增环境变量。
+
+2. select_moe_comm_method 对 LoRA-enabled engine、EP world_size>1 固定
+   选该 backend，涵盖当前没有活跃 adapter 的 base-only batch，以及
+   profile、dummy 和 graph capture。因此不因当前 token 数在 MC2/
+   AlltoAll/AllGather 间切换，避免捕获和真实 decode 的通信结构不同。
+   非 EP/EP world_size==1 始终 AllGather；没有 LoRA 配置的 engine 仍
+   使用原 A2/A3/A5 token 阈值选择，310P 仍 AllGather。
+   选择器没有为 LoRA AllGather 额外加 A3-only whitelist；不能由此推导
+   所有芯片均已完成该能力验证。
+
+3. AllGather EP LoRA 的启动验证只针对 LoRA enabled + EP + effective
+   ep_size>1 + MoE 模型。ep_size 计算为 TP*DP*PCP。
+   要求 DP=PCP=DCP=1、expert_placement_strategy="linear"，不允许
+   mix_placement、enable_eplb、upstream redundant experts、dynamic_eplb、
+   expert_map_path、expert_map_record_path 或 additional redundant experts。
+   这些是配置错误，直接 ValueError，不会偷偷改成 AlltoAll。
+   prepare 层再次检查 DP=PCP=1。
+   包装器还拒绝 dynamic_eplb，以及 VLLM_ASCEND_ENABLE_FUSED_MC2 非0；
+   MC2/FusedMC2 单一专家大算子无法在中间插入当前 MoE LoRA。
+
+4. AscendFusedMoEWithLoRA 跳过 GPU modular-kernel 构造逻辑，保留上游
+   adapter 权重创建/加载和 manager 可见模块结构，通过 MoE stage context
+   注入 W13/W2 LoRA。使用 moe_parallel_config.tp_size/tp_rank；EP 已将
+   专家内部 TP size 设为1，不能再次用全局 TP size 切本地专家 LoRA。
+   Shared experts 仍经原 dense LoRA wrappers；不是 routed MoE 融合的一部分。
+
+5. Prepared adapter slots 与隐藏状态执行相同 truncate/pad/split/gather/unpad。
+   无 SP 时用当前 tokens 的 slots；FlashComm1 或 SP pass 时使用
+   local_rows*TP-pad_size 的逻辑 token 数，pad 取-1，再按 TP rank split。
+   prepared_lora_indices 不覆盖 Punica 的 dense token_lora_indices。
+   EP prepare 不提前量化浮点 hidden，dispatch 强制 with_quant=False。
+
+6. InitRouting 使用 rank 对应连续 global expert 范围，提供显式 global-to-local
+   expert_map，expert_tokens_num_type=1/count group_list，恢复出本地 expert id
+   和 adapter slot。expanded 是原 (token,k) -> routed row，不是反向映射。
+   负值代表未被本 rank 接收，绝不能 abs 后重新当作合法目的位置。
+   容量尾行可能未写入、含 NaN：dispatch、GMM1 后以及 combine 前均通过
+   masked_fill 替换为0，不能乘0（NaN*0仍是NaN）。
+   empty dispatch 不调用空 NPU kernel，但外围通信仍完成。
+
+7. 原专家 reduce 语义保持：AllGather 在 shared+routed 合并后的最终结果
+   执行 maybe_all_reduce_tensor_model_parallel；shared 分支不重复 reduce。
+   AlltoAll/MC2 shared expert 原先已有独立 TP reduce。
+
+8. scoped_moe_lora_context 在 forward 前后清除 prepared/split/permuted/
+   exchanged indices，finally 恢复原通信对象/quant method context；异常也
+   不遗留上一 batch 的 LoRA routing。Combined indices 只能在同一 forward
+   的 W13/W2 之间复用，不跨 batch 缓存。
+
+源码：ascend_config.py:33–76；ascend_forward_context.py:368–395；
+      lora/fused_moe.py:59–65、197–230、447–477；
+      ops/fused_moe/prepare_finalize.py:367–415；
+      ops/fused_moe/token_dispatcher.py:374–496；
+      ops/fused_moe/fused_moe.py:599–615。
+
+三、量化 MoE LoRA 的基座契约与错误边界
+
+1. quant_moe.py 的 registry 当前只注册 QuantType.W8A8 动态 INT8。
+   其他量化模式（例如 W4A8、FP8/MXFP）进入活跃 MoE LoRA 分派会
+   NotImplementedError；不能写成它们自动回退普通非量化 LoRA。
+   允许通信类型 ALLGATHER、ALLTOALL；MC2/FUSED_MC2 明确报错。
+   dynamic EPLB、fused weight-scale-bias、antiquant offset、动态 EPLB 使用的
+   多个 per-expert tensor list 均明确不支持。
+   要求 w1_scale/w2_scale 均存在，w1/w2/scale lists 各只有一个 tensor。
+
+2. AllGather + TP fully-sharded 才启用 allgather_int8。其输入可以是
+   BF16/FP16（无 dynamic_scale）或 INT8（必须有 FP32 scale，同设备，
+   shape 为输入除最后维的 shape 或附加1）。INT8 时必须提供模型
+   BF16/FP16 output_dtype。非法 scale/layout 合约 ValueError。
+   其他模式需要普通 BF16/FP16 routed activation；INT8 或已有
+   dynamic_scale 在 prepare validator 为 NotImplementedError，若绕过前置
+   validator 到 MLP 则 AssertionError。普通浮点路径的 validator 没有
+   完整 dtype whitelist；其 intended/native contract 是 BF16/FP16，不能
+   据此宣称 FP32 模型支持已经验证。
+
+3. Base GMM1：INT8 input/weight，FP32 input scale，weight scale 转换为
+   W2 scale dtype，输出模型浮点 dtype。Base GMM2：INT8 activated 和
+   per-token scale，基座权重 scale。LoRA 不修改原 quant weight 布局。
+   空 routed input 提前返回模型 dtype，不调用 GMM/LoRA kernels。
+
+源码：lora/quant_moe.py:105–132、177–268、285–299、391–422。
+
+四、TP fully-sharded INT8 LoRA A 投影、W13 融合及 W2
+
+1. INT8 A-shrink 在 AscendC Vector 中按行读 INT8 x 与 FP32 scale，先
+   解量化为 FP32，再与 BF16/FP16 LoRA A 权重做 FP32 reduction。
+   不为整个 routed tensor 物化浮点反量化输入；无 adapter 行输出显式0。
+   常规 float BGMV skip inactive row，因此 shrink buffer 必须 zeros；INT8
+   shrink 写所有行（包括0），可用 empty。
+
+2. W13 gate/up 的 A 存储打包为 [2,max_loras,E_local,r_local,H]；已有
+   loader/reset 操作写此存储的连续 view，没有重复权重、逐 forward pack
+   或热加载时 graph 指针替换。仅 fully_sharded=True、use_ep=False、
+   W13两片、未启用 shared-MoE-LoRA 时采用；其他条件保留原 allocation。
+   max_lora_rank 必须被专家 TP size 整除，否则 ValueError。
+
+3. Paired A kernel 一次读 x，同时计算 gate/up shrink，输出
+   [R,2*r_local] FP32。fully-sharded 情况若 local rank 等于 full rank，
+   做 all-reduce；否则 all-gather dim0，保留 rank-major 输出直接 view
+   为 [num_shards,R,2*r_local]，避免按最后维 gather 后转置。
+   没有 packed A 时保留两次独立 INT8 shrink/TP 通信，仍可融合下面 B。
+
+4. fused B kernel 在每个 row 内完成 gate/up B projection、加基座 gate/up、
+   optional clipping、SwiGLU、optional topk multiplication、amax 与 INT8
+   quantization，只写 INT8 activated[R,I] 与 FP32 scale[R]。
+   保留 gate/up 相加后的模型 dtype rounding、clip 后模型 dtype rounding、
+   SwiGLU 模型 dtype rounding，以及 topk 相乘后的 rounding。
+   gate clip 只限制最大值，up clip 为 [-limit,+limit]；limit=0 不剪裁。
+   scale=amax(abs(activated))/127。量化先在 FP32 round-to-nearest-int32，
+   再经可精确承载该整数范围的 FP16 转 INT8，避免提前低精度导致双舍入。
+   无 adapter 行跳过 B delta，但仍对基座输出完成激活/量化。
+   该旧算子不返回浮点 activated，因为后续 W2 LoRA 在此模式也使用 INT8。
+
+5. Python dispatch 的有利区域远小于 native API 上限：
+   ALLGATHER + fully_sharded=True/use_ep=False；mlp_compute_input.fusion=True；
+   activation name/value 精确 "silu"；W13必须两片；full rank 为 >=8 的
+   2次幂；I%32==0、I<=256、I*full_rank<=8192。
+   实际 I 应为正数；native 对 I>0 强制检查。
+   此旧融合没有独立 env 开关；fusion/shape 判断通过自动选择。
+   当前 DS Flash EP 本地 I2048 不满足 use_ep=False 和 I<=256，完全不会
+   进入此旧融合。新 FUSED_ACTIVATION 是独立的普通 EP 浮点边界融合。
+   guard miss 保留普通 W13+activation+dynamic_quant，不中断推理。
+
+6. W2 基座与 LoRA A 使用同一 INT8 activation+scale，A 输出 FP32，
+   根据 TP layout all-reduce/all-gather 后 B 写回 down_out；fully-sharded
+   W2 的输出 offset 为 tp_rank * B_local_output_width。
+   普通 Vector B 支持 rank8/16/32/64；INT8 shrink 支持但 B native 不支持
+   的 rank 使用 bounded PyTorch B fallback：分 tile index_select 权重、
+   FP32 sum，再 model dtype 写回，保留 inactive output。
+   tile rows=max(1,2^21/(Bwidth*rank))，避免无限大中间 broadcast。
+
+7. 旧 core INT8 schemas 在实际调用处没有统一 hasattr fallback。
+   如 bgmv_shrink_int8、bgmv_shrink_int8_pair、旧 fused B schemas 不存在，
+   需要当前 native library；会 operator lookup/error，不是自动回退。
+   不要把 grouped-prefill/new optional ops 的兼容回退泛化为所有 INT8 ops。
+
+源码：lora/quant_moe.py:51–68、321–368；lora/fused_moe.py:365–395、397–430、
+      510–533；lora/punica_npu.py:354–496、515–606；
+      csrc/kernels/moe_lora_int8.cpp:Int8Shrink、ExpandSwigluQuant。
+
+五、grouped_prefill：排序薄 metadata、复用权重
+
+1. VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL 默认0，严格接受0/1。
+   grouped_prefill.py 在模块 import 时保存 ENABLE_GROUPED_PREFILL。
+   必须在进程导入该模块/启动 engine 前设置；运行时改 env 不改变有效值。
+   分组是每 batch 独立计算，不跨 batch 假设 expert/adapter occupancy。
+
+2. 入口位于上节旧 fully-sharded INT8 fused W13 分支内部，必须有 packed
+   W13 A、INT8 NPU x、fully_sharded=True、use_ep=False。
+   R>=8192、R<=2^24、R>=8*groups，0<groups<2^24，其中
+   groups=max_loras*E_local。H为正、H<=4096、H%64==0、
+   2*r_local*H<=16384；full rank ∈ {8,16,32}；0<I<=256、I%32==0。
+   必须存在 paired grouped A、paired grouped fused B、grouped expand schemas。
+   没有显式 is_prefill 判断；名字表示目标场景，代码按静态大行数筛选。
+   Current EP 非 fully-sharded 和小 decode row 数均不适用。
+
+3. Combined index = slot*E_local+expert（inactive=-1）。仅对 index 排序，
+   无效 id 以 groups 排最后，keys cast FP32；rows/groups 上限保证 exact
+   sort keys。order=argsort(keys.float())；inverse=argsort(order.float())。
+   保留原 INT64 index payload，未把 adapter/expert 值经浮点保存。
+   无 device scalar/occupancy CPU 读，不使用 unique/nonzero 改输出 shape。
+
+4. Grouped A 用 order 间接读原完整 X，按连续 adapter/expert 复用 UB A
+   cache，产生按排序顺序的小 paired 输出；inverse index_select 恢复原顺序
+   后再 TP 通信。C++ binding 只对薄 scale 做
+   sorted_scale=index_select(scale,0,order)，因此 scale 与原 X row 正确对齐。
+   不会对完整 X 做排序复制。Grouped fused B 从原 row 的 base/paired读取，
+   按组缓存 B，产生排序 Q/scale，再用 inverse 恢复以供 GMM2。
+
+5. W2 reused grouped routing。Grouped B add 使用 sorted ids/order 间接读
+   原顺序 FP32 shrink，并将 delta 写回原输出 row；不会改变主输出顺序。
+   Python grouped B 要求 fullrank8/16/32/64、Bwidth∈(0,8192]、width/offset/
+   output width 均16对齐。Bwidth*rank<=8192 用原 narrow schema；更宽时
+   必须存在 bgmv_expand_grouped_tiled，按列 tile 将 UB cache限制8192元素。
+   旧 native .so 只有 narrow schema 时，wide B 会回到普通 BGMV。
+
+6. 新 grouped feature 的 dispatch miss、schema缺失回到非 grouped 原有路径。
+   直接调用 native malformed dtype/shape/order 维度为 TORCH_CHECK error。
+   row_order 必须是完整合法 permutation；native只验证维度和行数，不
+   逐值核验唯一性、范围。Python helper负责建立该契约。
+
+源码：lora/grouped_prefill.py:11–80；lora/quant_moe.py:328–350；
+      lora/punica_npu.py:440–484、553–576；
+      csrc/moe_lora_int8.cpp:234–265、270–319；
+      csrc/kernels/moe_lora_int8.cpp:542–649。
+
+六、非 EP fully-sharded routing recovery 原生优化
+
+1. _recover_moe_lora_routing_allgather 的 native moe_lora_recover 仅选择
+   supports_tp_fully_sharded_lora=True，也就是 use_ep=False 的完整 expert
+   permutation producer。它不是当前 EP负值排除恢复的 native op。
+   需要 top_k为正int、expanded[M]、topk[T,K]、M=T*K、M<=2^24，
+   slots为INT64一维（非空路由要求slots非空）、expanded/topk INT32或INT64，
+   同 NPU device、schema存在。入口对非连续输入调用 contiguous()。
+   无该schema/不满足callerguard走Python abs+argsort+gather恢复。
+
+2. Native内部三层：rows+T<=1024 且 UB满足时 small inverse scatter；
+   其他符合资源预算的 rows<=8160 使用 Vector sort/gather；
+   rows8161..262144 且 UB预算满足/可查询vectorcore时使用两kernel大路由。
+   大路由 tile512，每目的row独占64B scratch，payload为expert+slot INT64，
+   第二kernel compact；scratch上限16MiB，不经FP32传递整数payload。
+   UB不足、core query为0、超native预算等保留ATen original实现。
+   原路径abs/float32 sort只适用abs(expanded)完整 [0,M) permutation，
+   caller保证无重复invalid sentinel；不能把此契约用于EP subset。
+
+3. Native Meta只校验metadata/固定shape；直接native输入非法dtype、dim、
+   device、contiguity为错误。完整 permutation 值域/唯一性不做CPU读。
+   该优化没有专用 env gate，按 conservative caller guards 自动选择。
+
+源码：lora/fused_moe.py:236–288；csrc/moe_lora_recover.cpp:29–106；
+      csrc/moe_lora_recover_validation.h；kernels/moe_lora_recover_sort.h；
+      kernels/moe_lora_recover_large.h。
+
+七、LoRA 图捕获、真实 batch 接入与编译缓存
+
+1. add_lora_fused_moe 不使用按 active adapter torch.unique/nonzero 的
+   value-dependent output shape。预展开 row 的 top_k_num 必须1；per-row
+   slots和experts折叠为combined int64 index，inactive=-1，weight stack view
+   flatten为[max_loras*E,...]，BGMV按row读。Graph replay重新读取当前映射/
+   enable mask；不能把某次batch的combined indices作为长期静态metadata。
+
+2. 模型runner _use_aclgraph 要求 cudagraph_mode!=NONE、
+   compilation_config.mode==CompilationMode.VLLM_COMPILE、!enforce_eager。
+   真请求中只要任意 req computed_tokens<prompt_tokens 就强制Eager，
+   这是共享runner策略，未以has_lora作条件；无LoRA配置/base-only请求同样受影响。
+   包括chunked-prefill剩余1token；dummy capture显式force_uniform_decode
+   不用真实请求prefill检查，保留capture流程。
+
+3. Uniform Decode 要求 max_scheduled_tokens==uniform_decode_query_len、
+   num_tokens=max_scheduled_tokens*num_reqs；speculation时所有computed>0。
+   Dispatcher传实际has_lora和num_active_loras。Dummy以待capture LoRA
+   bucket num_active_loras同时传force_has_lora/force_num_active_loras；
+   maybe_dummy_run_with_lora capture/warmup用该bucket，profile才用max_loras。
+   这避免先按base descriptor捕获却在context激活dummyadapter，或所有LoRA
+   buckets都用最大adapter占用；真实prefill已强制Eager。
+   SequenceParallel descriptor padded tokens必须能被TP整除。
+
+4. VLLM_ASCEND_DECODE_GRAPH_EVIDENCE 默认0、严格0/1，仅rank0为每个
+   (mode,prefill_present,descriptor)记一次CPU dispatch证据。
+   日志说明选择了哪个bucket，不能作为实际 graph replay/device completion
+   的证明。需要trace/profiler或执行结果验证回放。
+
+5. AscendCompilationConfig 默认 enable_npugraph_ex=True、static_kernel=False。
+   310P禁用npugraph_ex/static_kernel；static_kernel=True要求npugraph_ex。
+   npugraph_ex配置force_eager=True、inplace_pass=False、clone_input=False、
+   clone_output=False；保留首次FX eager执行后capture，避免reinplace导致
+   GELU CPU fallback。静态kernel缺LOCAL_WORLD_SIZE时从并行配置补齐；
+   只对capture_sizes中的[num_spec_tokens+1,max_num_seqs*(num_spec_tokens+1)]
+   批大小启用静态decode kernel范围。
+
+6. 两层cache均隔离会改变图的新开关：
+   AscendCompiler.compute_hash 包含torch_npu版本、npugraph_ex/static_kernel、
+   effective ENABLE_GROUPED_PREFILL、FUSED_ROUTING、FUSED_ACTIVATION、
+   OPTIMIZE_MTP_BUFFER_COPY。外层vLLM AOT compile_factors通过
+   patch_compile_cache.py注册相同booleans；GROUPED_PREFILL读取实际
+   import-time常量，而非后来env值；新三个开关读取严格runtime env。
+   所有开关必须启动/编译/捕获前确定。Cache隔离不表示可以修改正在使用的
+   graph选项后继续复用旧capture；切换配置应重启engine并重新捕获。
+   新三个开关默认0，未设置与显式0同hash；非法env ValueError。
+   注意 W13_CUBE_PREFILL 分支仅actual eager prefill，图分支不使用它；
+   本备忘不重复 Cube 专项设计。
+
+源码：lora/punica_npu.py:354–429；worker/model_runner_v1.py:630–635、
+      2698–2789、3188–3192、3304–3315；
+      compilation/compiler_interface.py:72–148、239–263；
+      patch/platform/patch_compile_cache.py；ascend_config.py:546–592。
+
+八、旧 INT8/Grouped native API（torch.ops._C_ascend namespace）
+
+bgmv_shrink_int8(Tensor x, Tensor weight, Tensor indices, Tensor scale,
+                Tensor(a!) y) -> ()
+bgmv_shrink_int8_pair(Tensor x, Tensor weight, Tensor indices, Tensor scale,
+                     Tensor(a!) y) -> ()
+moe_lora_expand_swiglu_quant(Tensor base, Tensor gate, Tensor up,
+                            Tensor bg, Tensor bu, Tensor indices,
+                            Tensor? topk, float limit) -> (Tensor, Tensor)
+moe_lora_expand_swiglu_quant_pair(Tensor base, Tensor paired,
+                                 Tensor bg, Tensor bu, Tensor indices,
+                                 Tensor? topk, float limit) -> (Tensor, Tensor)
+bgmv_shrink_int8_pair_grouped(Tensor x, Tensor weight, Tensor indices,
+                             Tensor row_order, Tensor scale,
+                             Tensor(a!) y) -> ()
+moe_lora_expand_swiglu_quant_pair_grouped(Tensor base, Tensor paired,
+                                         Tensor bg, Tensor bu, Tensor indices,
+                                         Tensor row_order, Tensor? topk,
+                                         float limit) -> (Tensor, Tensor)
+bgmv_expand_grouped(Tensor x, Tensor weight, Tensor indices,
+                    Tensor row_order, Tensor(a!) y, int offset) -> ()
+bgmv_expand_grouped_tiled(Tensor x, Tensor weight, Tensor indices,
+                          Tensor row_order, Tensor(a!) y, int offset) -> ()
+moe_lora_recover(Tensor expanded_row_idx, Tensor topk_ids,
+                 Tensor token_lora_indices, int top_k) -> (Tensor, Tensor)
+
+1. shrink契约：x INT8[R,H]；weight FP16/BF16[G,r,H]；indices INT64[R]；
+   scale FP32[R]；mutable y FP32[R,r]。paired weight[2,G,r_local,H]，
+   y[R,2*r_local]。所有同device、连续；R/H/G<=INT32_MAX，G/H正，
+   0<r或r_local<=512。输出不能与输入overlap。runtime必须NPU。
+
+2. fused B契约：base FP16/BF16[R,2I]；gate/up FP32[R,r]；
+   Bg/Bu 与base相同dtype[G,I,r]；indices INT64[R]；optional topk FP32[R]；
+   limit finite且>=0；0<I<=8192，0<r<=512，G>0，R/G<=INT32_MAX。
+   paired为FP32[shards,R,2*r_local]，shards>0且shards*r_local==r，
+   (2R-1)*r_local*4需不超过UINT32_MAX（R>0时）。
+   返回INT8[R,I]与FP32[R]；具体业务dispatch仍使用窄I<=256条件。
+
+3. grouped native额外契约：row_order INT64[R]完整permutation；
+   grouped A H<=4096、H%64==0、2*r_local*H<=16384；
+   grouped fused B I<=256、I%32==0、r∈8/16/32；
+   grouped expand x FP32[R,r]，weight/model y同FP16/BF16，r∈8/16/32/64，
+   0<Bwidth<=8192，width/offset/full-output-width16对齐，offset>=0、
+   offset+Bwidth<=outputwidth。rows/groups/outputwidth不超过INT32_MAX。
+   malformed native metadata TORCH_CHECK，Python guards不捕获native错误。
+
+4. 所有上述bindings受 VLLM_ENABLE_ATB_AND_DIRECT_KERNELS 宏保护，
+   注册PrivateUse1和Meta implementations。kernel为AscendC Vector，不是
+   Cube；Cube W13 是独立业务分支。运行时queryACL vector core和/或UB资源。
+   主CMake明确对SOC_VERSION ascend310p.* 和 ascend950 跳过direct kernels
+   库并不定义该宏。因此这些原生schema不能宣称310P/A5正常可用。
+   非缺失schema optional分支可回退，旧必需INT8 schema缺失仍会错误。
+   源码未对A2/A3再细分runtime whitelist；已验证硬件范围应引用实际测试，
+   不以编译可能性代替验证。SDKABI用Torch-free platform object隔离。
+
+5. 物理storage限制必须独立于is_contiguous说明：上述旧INT8、grouped和
+   非EPrecover tensor_check仅检查logical contiguity，未检查NPU物理format。
+   它们是raw data_ptr kernel，应使用普通ND/base物理storage；不能宣称
+   对format29或其他blocked storage有运行时拒绝/安全转换。
+   本轮新EP routing/activation另有format0/2 guard，不能套用给旧ops。
+   Meta提供shape/dtype追踪并不验证实际physical storage。
+
+源码：csrc/moe_lora_int8.cpp:19–112、234–265、270–319、341–375；
+      csrc/moe_lora_recover_validation.h；CMakeLists.txt:74–80、112–120、
+      168–172、195–224。
+
+九、便于完整文档采用的回退/报错矩阵
+
+- 默认EP AllGather配置违反DP/PCP/DCP/staticlinear/EPLB限制：启动ValueError；
+  显式alltoall才恢复旧通信，不自动回退。
+- EP+fully-sharded LoRA：继承上游assert拒绝；无本功能回退。
+- 非W8A8量化活跃MoE LoRA、MC2/FusedMC2、dynamicEPLB、scale-bias/offset/
+  per-expert lists：NotImplementedError/AssertionError；非fallback。
+- TP fully-sharded fused W13 shape/activation/fusion guard miss：普通W13+
+  activation+quant，INT8 A契约继续保留。
+- grouped_prefill flag0或eligibility/schema miss：原非grouped路径；wide grouped
+  B缺tiled schema：普通BGMV B。
+- 非EP routing callerguard/schema miss：原framework recovery；nativeUB预算miss：
+  native内部framework original；malformed native metadata：TORCH_CHECK。
+- 新optional FUSED_ROUTING/FUSED_ACTIVATION类flag默认0：原路径；详见其他
+  专项notes中各guard、schema缺失与blocked storage compiled error说明。
+- 实际prefill（包括1token尾）graph：强制Eager；不符合capture descriptor/
+  mode的batch按dispatcher正常选择，不强行FULL replay。
+- legacy native schema缺失：需要重建/安装当前库，不保证回退。
+- 默认关闭优化flag/有限dispatch区域不代表性能必然变差；扩展形状应在
+  真实micro/graph/整网场景分别验证，不把单kernel收益写为整网加速比。
+
+十、基线浮点 BGMV/SGMV、dense LoRA 与浮点 pair 实验的当前状态
+
+1. PunicaWrapperNPU.__init__：310P或max_lora_rank>=128时，普通dense/MoE
+   float BGMV/SGMV wrappers选择上游 vllm.lora.ops.torch_ops；其他情况使用
+   vllm_ascend.lora.lora_ops 的原生Vector入口。这个构造时选择独立于新
+   FUSED_ROUTING/FUSED_ACTIVATION flags，也不替代显式INT8 native调用。
+   因原生Vector B有效rank8/16/32/64，不能将包装器“rank<128”选择条件
+   本身看作所有0..127 rank均受该kernel支持；实际LoRA配置需合法rank。
+
+2. 普通dense LoRA：_apply_shrink/_apply_expand按Punica.is_prefill决定
+   SGMV或BGMV。prefill无adapter时直接跳过；decode调用按token index
+   的BGMV。SGMV使用prefill seq_len和adapter slot，按连续segment累计
+   查出每row对应slot，不同于MoE的(expert,adapter)组合排序。
+   add_lora_linear为每个output_slice分配FP32 zeros shrink buffer，
+   add_shrink仍逐片调用（代码TODO fuse），add_expand逐片累加到主输出。
+   dense W13包含gate/up等多片时也仍逐片A计算，没有自动调用float pair。
+
+3. 普通MoE float路径 add_lora_fused_moe 始终采用已经预展开的per-row
+   BGMV，不读取Punica.is_prefill去用SGMV；专家/adapter metadata并不
+   保证原dense segment假设。非Cube情况下每个W13 slice分别float
+   bgmv_shrink，然后bgmv_expand_slice；W2同理。Cube W13选中时仅替代
+   A-shrink来源，其B-expand仍走既有分派（Cube专项notes详述）。
+
+4. 原生BGMV shrink intended dtype：x和A同FP16/BF16，y FP32；
+   x[M,H]、A[slots,r,H]（或旧兼容[slots,1,r,H]）、indices INT64[M]、
+   y[M,r]，H>r>0。每row FP32 reduction后乘scale并写回；负index跳过，
+   因而caller需zero initialize。K/H宽于11776时tile累加；当前kernel
+   DataCopyPad处理不对齐输入/weight/output tail。原binding仅做部分
+   shape/dtype检查，未完整验证A/y/index dtype、device、contiguous、
+   物理format、index正值上限、空shape，也不能当成安全通用API。
+   使用普通连续ND/base、有效slots和模型布局是生产caller契约。
+
+5. BGMV/SGMV expand intended dtype：x FP32[M,r]、B/model output同
+   FP16/BF16、indices INT64，rank8/16/32/64。按输出列tile读取B，FP32
+   reduction和model dtype写回；负slot保持原y。slice_offset>=0，
+   r<=slice_size，slice_offset+slice_size<=ywidth。
+   lora_ops.py的add_inputs参数没有传给native；原生expand固定执行
+   原y+delta，不是可任选覆盖语义。需覆盖时caller预置y符合需求。
+   SGMV shrink/expand同样通过seq_len映射slot，kernel依赖原模型常规
+   32B块对齐/shape，旧binding未完整运行时强制这些storage约束；不能
+   从BGMV新tail测试推出SGMV任意odd H全支持。
+
+6. 所有float public native入口（namespace _C_ascend）：
+   bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,
+               float scale) -> ()
+   bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,
+               int slice_offset, int slice_size) -> Tensor
+   sgmv_shrink(Tensor! x, Tensor! weight, Tensor! lora_indices,
+               Tensor! seq_len, Tensor! y, float scale) -> ()
+   sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices,
+               Tensor! seq_len, Tensor! y, int slice_offset,
+               int slice_size) -> Tensor
+   bgmv_shrink_pair(Tensor x, Tensor weight0, Tensor weight1, Tensor indices,
+                    Tensor(a!) y_pair, float scale) -> ()
+   expand/sgmv_expand现有Meta返回empty_like(y)，pair有严格metadata Meta；
+   基线void shrink schemas没有在torch_binding_meta.cpp另行注册Meta。
+   All float native入口也受VLLM_ENABLE_ATB_AND_DIRECT_KERNELS保护。
+
+7. bgmv_shrink_pair 是保留ABI/测试入口，当前生产Python全仓没有调用。
+   其native实现不是当前有效单kernel融合：bgmv_shrink.cpp:272–292明确
+   顺序调用两次原bgmv_shrink_impl，分别写y_pair[0]、y_pair[1]。
+   因此完整设计须标记“实验/兼容入口，未接入dense/ordinary MoE，当前
+   保守实现两launch”，不能写成当前整网双A单launch加速。
+   pair公共契约是x同FP16/BF16，两个同shape权重[slots,r,H]，
+   indices INT64[M]，mutable y_pair FP32[2,M,r]，同device全部连续，
+   slots>0、H>r>0，rows/H<=INT32_MAX、r<=UINT32_MAX/4。
+   runtime NPU guard、vectorcore query、input/output不overlap；empty M
+   不launch。index正值需caller保持合法；inactive行保持原y包括-0位型。
+
+源码：lora/punica_npu.py:28–58、82–211、213–352、497–528；
+      lora/lora_ops.py:19–122；csrc/torch_binding.cpp:318–533、2175–2193；
+      csrc/bgmv_shrink_pair_validation.h；torch_binding_meta.cpp:53–72、
+      1564–1571；kernels/bgmv_shrink.cpp、bgmv_expand.cpp、sgmv_*.cpp。
+
+十一、库中已有基座融合、关闭实验与可引用的验证证据
+
+1. grouped_matmul_swiglu_quant、grouped_matmul_swiglu_quant_weight_nz、
+   grouped_matmul_swiglu_quant_weight_nz_tensor_list、grouped_matmul_swiglu_quant_v2
+   是仓库原基座MoE GMM1+SwiGLU+quant融合入口，不是本轮新增MoE LoRA
+   融合。它们本身没有接收LoRA A/B/adapter metadata，也不在W13基座GMM
+   和activation之间插入LoRA delta。
+   moe_mlp.py:649–652有active LoRA时先return quant_moe专用实现。
+   quant_moe.py始终独立GMM1 -> W13 LoRA ->激活/量化 ->GMM2 ->W2 LoRA；
+   不因fusion=True自动调用上述基座GMM-SwiGLU-quant ops。
+   没有active LoRA时原基座moe_mlp不同设备/量化/comm/fusion条件仍可用
+   这些已有ops（例如MC2路径），不应描述成被本轮统一替代。
+   对应schemas/adapter见torch_binding.cpp:2235–2262、device_op.py:213–237、
+   1166–1203、moe_mlp.py:178–203、346–386。
+
+2. 保留的历史文档 docs/source/developer_guide/moe_lora_v25_optimization.md
+   明确记录grouped W2在目标形状较旧BGMV更慢；建议GROUPED_PREFILL=0。
+   因此该feature是精度可行但未推荐性能开启的checkpoint，不能在“已
+   优化性能”清单直接标为收益。whole-weight BF16 cache是独立本地原型，
+   未接入此分支，不包含prototype/build产品；无可启用production开关。
+   float pair当前两原launch/无Pythoncall也应列未接入/回退实验。
+
+3. 上述历史文档可引用的既有执行记录（不是本次审计重新运行）：
+   CANN9.0.1、Torch2.10、torch_npu2.10.post2、Ascend910A3、vLLM0.25.1。
+   large recovery 85 NPU ST；combined indices 35数值case+12改输入graph；
+   grouped W2 123 NPU precision/graph +149 host-Meta +36 CPUdispatch。
+   indices graph isolated 288rows 28.115->11.660us，98304rows
+   216.885->125.256us。这里不是TTFT/TPOT；历史端到端baseline当时因
+   可用37.74GiB低于0.93memory-utilization需56.99GiB未启动，未完成新
+   正式serving请求。当前无真实模型权重进一步限制新的整网结论。
+
+4. 当前测试源码覆盖，不等于本次已运行证据：
+   test_bgmv_shrink.py：BF16/FP16、mixed/inactive、宽H11776附近、oddH/r、
+   rank128/257、更新input/weight/indices的graph。test_bgmv_expand.py：
+   rank8/16/32/64、output slice/tail、inactive、graph、精度容差。
+   test_bgmv_shrink_pair.py：20 dtype/shape case（含empty、M8/64,H2048,r2、
+   oddshape/r257、H11777、output offset1、inactive），4 graph case各三次
+   修改输入/双权重/route/base；与两个singles bitwise比较，inactive位型保护。
+   test_moe_lora_int8.py：独立shrink/B-fusion、paired、rank-major、Meta错误、
+   scale合约、changed route/weight graph、完整quantMLP对分阶段参考。
+   test_moe_lora_grouped_prefill.py：independent per-batch routes、nonuniform/
+   negative/zero scale、A参考、W2 untouched columns、rank-major fusedB、
+   改输入/weights/route graph和Meta错误。
+   test_moe_lora_grouped_w2.py：rank8/16/32/64，width16..8192、offset/tile
+   boundary，largeR49152/98304，tiled vs legacy exact、FP64抽检、graph。
+   这些tests全位于tests/e2e/nightly/single_node/ops/singlecard_ops；只凭
+   文件存在不可写全部case在当前正式安装版本跑过。

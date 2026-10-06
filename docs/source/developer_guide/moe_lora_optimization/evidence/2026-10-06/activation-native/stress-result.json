@@ -1,0 +1,142 @@
+{
+  "physical_device": 14,
+  "iterations_per_case": 100,
+  "kernel_sha256": "bc5cb4d2d455da87e48584a018f1ab2016003d56a591a62aabefb3966c9e273d",
+  "scope": "Independent operator correctness stress; no model weights or end-to-end run",
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 9,
+      "limit": 0.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 9,
+      "limit": 10.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 9,
+      "limit": 0.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 9,
+      "limit": 10.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "iterations": 100,
+      "bits_mismatches": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "pass": true,
+  "total_changed_input_replays": 1200
+}

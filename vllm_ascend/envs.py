@@ -36,6 +36,9 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Non-sensitive, opt-in CPU dispatch evidence on global rank 0.
+    # Strict 0/1, default 0; logs each real (mode, prefill, descriptor) once.
+    "VLLM_ASCEND_DECODE_GRAPH_EVIDENCE": lambda: _strict_binary_env("VLLM_ASCEND_DECODE_GRAPH_EVIDENCE"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
@@ -81,9 +84,20 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Disable host pinning when the driver cannot allocate pinned host memory.
     # Set before starting the engine; valid values: 0 or 1 (default: 0).
     "VLLM_ASCEND_DISABLE_PIN_MEMORY": lambda: _strict_binary_env("VLLM_ASCEND_DISABLE_PIN_MEMORY"),
-    # Fuse <=98304 routed rows of MoE LoRA index construction. Experimental:
-    # default 0; valid values 0 or 1; not sensitive. Requires the native op.
+    # Fuse MoE LoRA indices (<=98304 rows) and AllGather EP metadata
+    # (<=384 pairs). Experimental; default 0; valid 0/1; not sensitive.
+    # Unsupported inputs and missing native ops retain the existing path.
     "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_ROUTING"),
+    # Fuse SwiGLU (with optional clipping) and quant, retaining floating W2 LoRA
+    # activations. Experimental Decode sizes <=48 rows, width 2048; requires
+    # the native op. Default 0; valid values 0 or 1; not sensitive.
+    "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION"),
+    # Replace partial MTP hidden-buffer copy with a row-update operator to
+    # avoid full-storage copies after npugraph_ex functionalization.
+    # Experimental; default 0; valid values 0 or 1; not sensitive.
+    "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY": lambda: _strict_binary_env("VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY"),
+    # Opt-in measured BF16 W13 Cube prefill path; all unsupported cases fall back.
+    "VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL"),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
     # DEPRECATED: use additional_config.enable_flashcomm1 instead.

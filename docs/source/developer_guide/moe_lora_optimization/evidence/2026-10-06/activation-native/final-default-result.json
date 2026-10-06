@@ -1,0 +1,464 @@
+{
+  "physical_device": 14,
+  "scope": "Synthetic operator only; end-to-end deferred without weights",
+  "timing": "100 operators per graph; 20 replays per sample block; 3 sample blocks",
+  "tiling": "rows<=48: min(available,rows,24) unless explicit core_limit",
+  "sha256": {
+    "{repo_root}/csrc/moe_lora_activation.cpp": "a747d2ef330872c627c4c561af6c15e8aaf47e80154028ebdf1a266f842f2f96",
+    "{repo_root}/csrc/kernels/moe_lora_activation.cpp": "368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9",
+    "{repo_root}/csrc/kernels/moe_lora_activation.h": "a1d915fb81be26ad17c7e34209c5496c4d9ded4eab5bec3c5e7b6a62df66987c",
+    "{repo_root}/work-dir/decode-optimization-20261006/activation-native/build/libmoe_activation_probe.so": "d9e662b1589a4b1da5ec2ea0af8e39ba970cca030fd5a89d4f713d0d2267c430",
+    "{repo_root}/work-dir/decode-optimization-20261006/activation-native/build/lib/libmoe_activation_kernels.so": "bc5cb4d2d455da87e48584a018f1ab2016003d56a591a62aabefb3966c9e273d"
+  },
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 6,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.1385498046875,
+      "fused_device_us": 2.808729887008667,
+      "baseline_graph_samples_us": [
+        614.1479969024658,
+        613.85498046875,
+        613.700008392334
+      ],
+      "fused_graph_samples_us": [
+        281.0189962387085,
+        280.8729887008667,
+        280.85999488830566
+      ],
+      "speedup": 2.1855251489580345
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 6,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.76685905456543,
+      "fused_device_us": 3.0641000270843506,
+      "baseline_graph_samples_us": [
+        1676.685905456543,
+        1676.749038696289,
+        1676.082992553711
+      ],
+      "fused_graph_samples_us": [
+        306.41000270843506,
+        305.84399700164795,
+        306.5510034561157
+      ],
+      "speedup": 5.472033845618272
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 12,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 8.101840019226074,
+      "fused_device_us": 3.331130027770996,
+      "baseline_graph_samples_us": [
+        810.3240013122559,
+        810.1840019226074,
+        810.0810050964355
+      ],
+      "fused_graph_samples_us": [
+        333.6509943008423,
+        333.1130027770996,
+        332.94498920440674
+      ],
+      "speedup": 2.4321596430288155
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 12,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 23.9896297454834,
+      "fused_device_us": 3.5826098918914795,
+      "baseline_graph_samples_us": [
+        2397.871971130371,
+        2398.96297454834,
+        2399.0360260009766
+      ],
+      "fused_graph_samples_us": [
+        358.26499462127686,
+        358.174991607666,
+        358.26098918914795
+      ],
+      "speedup": 6.696132280486113
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 24,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 8.24470043182373,
+      "fused_device_us": 4.581850051879883,
+      "baseline_graph_samples_us": [
+        824.3000030517578,
+        824.470043182373,
+        825.35400390625
+      ],
+      "fused_graph_samples_us": [
+        458.1850051879883,
+        458.0749988555908,
+        458.35399627685547
+      ],
+      "speedup": 1.7994260699214764
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 24,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 30.286130905151367,
+      "fused_device_us": 4.811570167541504,
+      "baseline_graph_samples_us": [
+        3028.7919998168945,
+        3028.6130905151367,
+        3028.4610748291016
+      ],
+      "fused_graph_samples_us": [
+        480.75499534606934,
+        481.65998458862305,
+        481.1570167541504
+      ],
+      "speedup": 6.294438166871048
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 10.416299819946289,
+      "fused_device_us": 5.999120235443115,
+      "baseline_graph_samples_us": [
+        1041.5069580078125,
+        1041.802978515625,
+        1041.629981994629
+      ],
+      "fused_graph_samples_us": [
+        599.8569965362549,
+        600.0649929046631,
+        599.9120235443115
+      ],
+      "speedup": 1.7363045598596685
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 33.859989166259766,
+      "fused_device_us": 6.472129821777344,
+      "baseline_graph_samples_us": [
+        3385.9989166259766,
+        3386.3510131835938,
+        3385.5419158935547
+      ],
+      "fused_graph_samples_us": [
+        647.065019607544,
+        647.2129821777344,
+        647.8670120239258
+      ],
+      "speedup": 5.231660998567749
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 6,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.055789947509766,
+      "fused_device_us": 2.786400079727173,
+      "baseline_graph_samples_us": [
+        605.55100440979,
+        606.7319869995117,
+        605.5789947509766
+      ],
+      "fused_graph_samples_us": [
+        278.8599967956543,
+        277.3979902267456,
+        278.6400079727173
+      ],
+      "speedup": 2.1733382767139138
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 6,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 14.351719856262207,
+      "fused_device_us": 3.016700029373169,
+      "baseline_graph_samples_us": [
+        1435.1719856262207,
+        1435.1860046386719,
+        1435.0760459899902
+      ],
+      "fused_graph_samples_us": [
+        302.6139974594116,
+        300.9500026702881,
+        301.6700029373169
+      ],
+      "speedup": 4.757423580906819
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 12,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 8.120960235595703,
+      "fused_device_us": 3.3307299613952637,
+      "baseline_graph_samples_us": [
+        812.0960235595703,
+        812.0140075683594,
+        812.108039855957
+      ],
+      "fused_graph_samples_us": [
+        357.18300342559814,
+        333.07299613952637,
+        333.01000595092773
+      ],
+      "speedup": 2.438192327123926
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 12,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 19.177600860595703,
+      "fused_device_us": 3.539609909057617,
+      "baseline_graph_samples_us": [
+        1917.5529479980469,
+        1918.8819885253906,
+        1917.7600860595703
+      ],
+      "fused_graph_samples_us": [
+        353.8480043411255,
+        354.1189908981323,
+        353.9609909057617
+      ],
+      "speedup": 5.417998410367636
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 24,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 8.22605037689209,
+      "fused_device_us": 4.567820072174072,
+      "baseline_graph_samples_us": [
+        822.605037689209,
+        822.7970123291016,
+        822.0009803771973
+      ],
+      "fused_graph_samples_us": [
+        457.0469856262207,
+        456.7820072174072,
+        456.56299591064453
+      ],
+      "speedup": 1.8008700533111996
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 24,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 25.184789657592773,
+      "fused_device_us": 4.793630123138428,
+      "baseline_graph_samples_us": [
+        2518.4789657592773,
+        2519.0710067749023,
+        2518.2899475097656
+      ],
+      "fused_graph_samples_us": [
+        479.46300506591797,
+        479.14600372314453,
+        479.3630123138428
+      ],
+      "speedup": 5.253803278652649
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 10.350760459899902,
+      "fused_device_us": 5.902050018310547,
+      "baseline_graph_samples_us": [
+        1035.0760459899902,
+        1034.794044494629,
+        1036.8060111999512
+      ],
+      "fused_graph_samples_us": [
+        590.015983581543,
+        590.9870147705078,
+        590.2050018310547
+      ],
+      "speedup": 1.7537568180187657
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "changed_input_bits_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 34.172218322753906,
+      "fused_device_us": 6.365409851074219,
+      "baseline_graph_samples_us": [
+        3417.2218322753906,
+        3417.028045654297,
+        3418.210983276367
+      ],
+      "fused_graph_samples_us": [
+        636.5409851074219,
+        635.3750228881836,
+        636.5829944610596
+      ],
+      "speedup": 5.368423891351952
+    }
+  ],
+  "pass": true
+}

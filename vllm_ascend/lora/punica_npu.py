@@ -9,7 +9,9 @@ from vllm.distributed import (
 )
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
+from vllm_ascend.lora.cube_moe import single_adapter_slot
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -27,6 +29,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
+        self.cube_single_slot = None
         if get_ascend_device_type() == AscendDeviceType._310P or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
@@ -62,6 +65,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         vocab_size,
         **kwargs,
     ) -> None:
+        self.cube_single_slot = None
         super().update_metadata(
             mapping,
             lora_index_to_id,
@@ -72,6 +76,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
         self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+        if envs_ascend.VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL:
+            self.cube_single_slot = single_adapter_slot(mapping.index_mapping, lora_index_to_id)
 
     def _shrink_prefill(
         self,
@@ -370,6 +376,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         combined_indices: torch.Tensor | None = None,
         paired_a_stacked: torch.Tensor | None = None,
         grouped_routing=None,
+        cube_routing=None,
+        cube_state=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -486,6 +494,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 )
             return quantized, scale, combined_idx
 
+        cube_pair = None
+        if cube_routing is not None:
+            if (
+                cube_state is None
+                or input_scale is not None
+                or fully_sharded
+                or fuse_swiglu
+                or len(lora_a_stacked) != 2
+            ):
+                raise ValueError("Cube W13 requires ordinary BF16 double-A without TP rank sharding")
+            cube_pair = cube_state.shrink_pair(x, combined_idx, lora_a_stacked, cube_routing, self.bgmv_shrink)
         projections = []
         expand_weights = []
         for slice_idx in range(len(lora_a_stacked)):
@@ -503,15 +522,16 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             # (its X_T), so the shrink buffer is fp32.
             # The INT8 kernel writes every row, including inactive adapters.
             # The legacy float kernel skips inactive rows and still needs zeros.
-            allocate_shrink = torch.empty if input_scale is not None else torch.zeros
-            shrink_out = allocate_shrink((x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
-            if input_scale is not None:
-                # The short-K rank-vectorized kernel remains faster for w2 A;
-                # group reuse pays off for its B projection below. Do not add
-                # scale/order gathers and restoration to this small projection.
-                torch.ops._C_ascend.bgmv_shrink_int8(x2d, a_flat, combined_idx, input_scale, shrink_out)
+            if cube_pair is not None:
+                shrink_out = cube_pair[slice_idx]
             else:
-                self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+                allocate_shrink = torch.empty if input_scale is not None else torch.zeros
+                shrink_out = allocate_shrink((x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
+                if input_scale is not None:
+                    # Keep the existing INT8 W13/W2 shrink path unchanged.
+                    torch.ops._C_ascend.bgmv_shrink_int8(x2d, a_flat, combined_idx, input_scale, shrink_out)
+                else:
+                    self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
             if fully_sharded:
                 if local_rank == full_rank:
                     shrink_out = tensor_model_parallel_all_reduce(shrink_out)

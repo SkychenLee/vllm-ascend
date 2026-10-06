@@ -1,0 +1,2312 @@
+{
+  "physical_device": 14,
+  "scope": "No weights; synthetic independent activation only",
+  "timing": "100 operators captured in one graph; 20 replays; three sample blocks",
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 3.9512100219726562,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        395.69199085235596,
+        395.1210021972656,
+        394.8889970779419
+      ],
+      "speedup": 1.6800929439092631
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.903330087661743,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        290.2290105819702,
+        290.3330087661743,
+        290.33799171447754
+      ],
+      "speedup": 2.2864778986140695
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.8933699131011963,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        289.4540071487427,
+        289.1900062561035,
+        289.33699131011963
+      ],
+      "speedup": 2.2943489001392834
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.871769905090332,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        287.1769905090332,
+        287.3960018157959,
+        286.98699474334717
+      ],
+      "speedup": 2.3116058379374276
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.8868300914764404,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        288.7239933013916,
+        288.3430004119873,
+        288.68300914764404
+      ],
+      "speedup": 2.2995465155431716
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.9142699241638184,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        291.9450044631958,
+        291.0799980163574,
+        291.42699241638184
+      ],
+      "speedup": 2.2778947216855894
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.8971500396728516,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        289.88099098205566,
+        289.23799991607666,
+        289.71500396728516
+      ],
+      "speedup": 2.291355292931062
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.638400077819824,
+      "fused_device_us": 2.8796699047088623,
+      "baseline_graph_samples_us": [
+        664.7439956665039,
+        663.8400077819824,
+        663.6119842529297
+      ],
+      "fused_graph_samples_us": [
+        287.90600299835205,
+        287.96699047088623,
+        288.16399574279785
+      ],
+      "speedup": 2.3052642481572807
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 4.430659770965576,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        442.7070140838623,
+        443.0659770965576,
+        443.1600093841553
+      ],
+      "speedup": 4.206213091654149
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.1556599140167236,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        315.7299995422363,
+        315.56599140167236,
+        315.19200801849365
+      ],
+      "speedup": 5.905674135074753
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.1286799907684326,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        312.7350091934204,
+        312.86799907684326,
+        312.9110097885132
+      ],
+      "speedup": 5.95660124662463
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.1195099353790283,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        311.62099838256836,
+        311.95099353790283,
+        312.27400302886963
+      ],
+      "speedup": 5.97411116468729
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.1350700855255127,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        313.1550073623657,
+        313.50700855255127,
+        313.7749910354614
+      ],
+      "speedup": 5.944460131639096
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.1461400985717773,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        314.493989944458,
+        314.61400985717773,
+        314.7890090942383
+      ],
+      "speedup": 5.923543945726041
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.1254498958587646,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        312.7389907836914,
+        312.16299533843994,
+        312.54498958587646
+      ],
+      "speedup": 5.96275728431736
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 18.63629913330078,
+      "fused_device_us": 3.123189926147461,
+      "baseline_graph_samples_us": [
+        1863.6299133300781,
+        1863.6419296264648,
+        1863.3590698242188
+      ],
+      "fused_graph_samples_us": [
+        312.2030019760132,
+        312.3189926147461,
+        312.5540018081665
+      ],
+      "speedup": 5.9670719917725785
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 17.72439956665039,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        1774.0530014038086,
+        1772.439956665039,
+        1772.2549438476562
+      ],
+      "speedup": 0.5632241579133707
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 9.821209907531738,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        982.2549819946289,
+        981.9729804992676,
+        982.1209907531738
+      ],
+      "speedup": 1.0164541960141906
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 7.363639831542969,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        736.3639831542969,
+        736.5149974822998,
+        735.8049869537354
+      ],
+      "speedup": 1.3556896112279015
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 6.3549699783325195,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        635.496997833252,
+        635.8099937438965,
+        634.5709800720215
+      ],
+      "speedup": 1.5708665901622665
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 5.699240207672119,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        570.6639766693115,
+        569.9240207672119,
+        569.8470115661621
+      ],
+      "speedup": 1.7516036623633209
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 5.79695987701416,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        579.3900012969971,
+        579.695987701416,
+        579.7190189361572
+      ],
+      "speedup": 1.72207678373455
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 6.172239780426025,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        617.2239780426025,
+        617.8160190582275,
+        617.0519828796387
+      ],
+      "speedup": 1.6173723600475118
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.982810020446777,
+      "fused_device_us": 6.2076802253723145,
+      "baseline_graph_samples_us": [
+        998.2480049133301,
+        998.2810020446777,
+        998.4439849853516
+      ],
+      "fused_graph_samples_us": [
+        620.9539890289307,
+        620.7680225372314,
+        619.7319984436035
+      ],
+      "speedup": 1.608138573189479
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 20.65365982055664,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        2065.3200149536133,
+        2065.365982055664,
+        2065.4550552368164
+      ],
+      "speedup": 1.5377981516495505
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 11.288680076599121,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        1129.4919967651367,
+        1128.868007659912,
+        1128.8200378417969
+      ],
+      "speedup": 2.8135406160273697
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 8.347840309143066,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        834.9120140075684,
+        834.7149848937988,
+        834.7840309143066
+      ],
+      "speedup": 3.8047157972180923
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 7.079150199890137,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        707.9150199890137,
+        708.2469940185547,
+        707.7390193939209
+      ],
+      "speedup": 4.486578049628541
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 6.184080123901367,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        618.4080123901367,
+        618.3340072631836,
+        618.543004989624
+      ],
+      "speedup": 5.135955430799519
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 6.080520153045654,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        608.0329895019531,
+        608.5700035095215,
+        608.0520153045654
+      ],
+      "speedup": 5.22342811098847
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 6.325170040130615,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        632.5170040130615,
+        632.6260089874268,
+        632.381010055542
+      ],
+      "speedup": 5.021392262237857
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.761159896850586,
+      "fused_device_us": 6.37293004989624,
+      "baseline_graph_samples_us": [
+        3176.6029357910156,
+        3175.979995727539,
+        3176.1159896850586
+      ],
+      "fused_graph_samples_us": [
+        637.0629787445068,
+        637.3630046844482,
+        637.293004989624
+      ],
+      "speedup": 4.983760946406073
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 133.6698455810547,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        13366.984558105469,
+        13367.247009277344,
+        13366.911315917969
+      ],
+      "speedup": 0.15151196258710004
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 67.90528106689453,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        6790.543365478516,
+        6790.528106689453,
+        6790.164947509766
+      ],
+      "speedup": 0.29824750482586276
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 46.11235809326172,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        4611.117935180664,
+        4611.4959716796875,
+        4611.235809326172
+      ],
+      "speedup": 0.4392007149523688
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 35.354061126708984,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        3535.4061126708984,
+        3535.4591369628906,
+        3535.2798461914062
+      ],
+      "speedup": 0.5728501902543792
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 25.12990951538086,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        2513.1019592285156,
+        2512.990951538086,
+        2512.8889083862305
+      ],
+      "speedup": 0.8059153826361581
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 21.020750045776367,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        2101.8699645996094,
+        2102.4450302124023,
+        2102.0750045776367
+      ],
+      "speedup": 0.963456613041716
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 20.316789627075195,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        2031.460952758789,
+        2031.6789627075195,
+        2031.8010330200195
+      ],
+      "speedup": 0.9968396097240958
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.252580642700195,
+      "fused_device_us": 19.91436004638672,
+      "baseline_graph_samples_us": [
+        2025.0370025634766,
+        2025.278091430664,
+        2025.2580642700195
+      ],
+      "fused_graph_samples_us": [
+        1992.4570083618164,
+        1991.4350509643555,
+        1991.4360046386719
+      ],
+      "speedup": 1.0169837542118179
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 157.564697265625,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        15756.570434570312,
+        15756.298828125,
+        15756.4697265625
+      ],
+      "speedup": 0.5074654566654013
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 79.81674194335938,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        7981.6741943359375,
+        7981.202697753906,
+        7982.660675048828
+      ],
+      "speedup": 1.0017778113392228
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 54.07273864746094,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        5407.355880737305,
+        5406.993103027344,
+        5407.273864746094
+      ],
+      "speedup": 1.4787237164655922
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 41.32587814331055,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        4131.674957275391,
+        4132.793045043945,
+        4132.587814331055
+      ],
+      "speedup": 1.9348322321177116
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 29.054779052734375,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        2905.4779052734375,
+        2905.1010131835938,
+        2905.6209564208984
+      ],
+      "speedup": 2.7519961830417397
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 23.286449432373047,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        2328.647994995117,
+        2328.001022338867,
+        2328.6449432373047
+      ],
+      "speedup": 3.4336982666445843
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 21.94890022277832,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        2194.8509216308594,
+        2195.863914489746,
+        2194.890022277832
+      ],
+      "speedup": 3.6429452155086075
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 79.9586410522461,
+      "fused_device_us": 21.17738914489746,
+      "baseline_graph_samples_us": [
+        7995.864105224609,
+        7995.398712158203,
+        7996.510314941406
+      ],
+      "fused_graph_samples_us": [
+        2117.738914489746,
+        2117.556953430176,
+        2120.306968688965
+      ],
+      "speedup": 3.7756609422040843
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 3.8999099731445312,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        389.9909973144531,
+        389.7779941558838,
+        390.3290033340454
+      ],
+      "speedup": 1.6810516678437073
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.8545000553131104,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        285.48600673675537,
+        285.39299964904785,
+        285.45000553131104
+      ],
+      "speedup": 2.296706967159543
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.865540027618408,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        286.5540027618408,
+        286.5799903869629,
+        286.3420009613037
+      ],
+      "speedup": 2.287858519374328
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.890130043029785,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        289.0130043029785,
+        289.07599449157715,
+        288.8400077819824
+      ],
+      "speedup": 2.268392794506291
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.8743600845336914,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        287.21399307250977,
+        287.7010107040405,
+        287.43600845336914
+      ],
+      "speedup": 2.2808381594467124
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.856100082397461,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        285.5109930038452,
+        285.7439994812012,
+        285.6100082397461
+      ],
+      "speedup": 2.295420319897103
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.8666200637817383,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        286.6620063781738,
+        286.79699897766113,
+        286.49001121520996
+      ],
+      "speedup": 2.2869965391039995
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 0.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 6.555950164794922,
+      "fused_device_us": 2.8812100887298584,
+      "baseline_graph_samples_us": [
+        655.3890228271484,
+        655.5950164794922,
+        655.6260108947754
+      ],
+      "fused_graph_samples_us": [
+        288.09800148010254,
+        288.12100887298584,
+        288.1360054016113
+      ],
+      "speedup": 2.27541552434485
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 4.344820022583008,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        434.7670078277588,
+        434.4820022583008,
+        433.29200744628906
+      ],
+      "speedup": 3.685931612682879
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.073509931564331,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        307.3509931564331,
+        307.32998847961426,
+        307.60700702667236
+      ],
+      "speedup": 5.210560508748774
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.0826900005340576,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        308.26900005340576,
+        308.29999446868896,
+        307.8059911727905
+      ],
+      "speedup": 5.195043766931413
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.0996599197387695,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        309.9169969558716,
+        310.03899574279785,
+        309.96599197387695
+      ],
+      "speedup": 5.166602107113068
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.076230049133301,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        307.6230049133301,
+        307.7039957046509,
+        307.41400718688965
+      ],
+      "speedup": 5.205953136426921
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.069930076599121,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        306.9350004196167,
+        307.33799934387207,
+        306.9930076599121
+      ],
+      "speedup": 5.216636559487179
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.077239990234375,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        307.39901065826416,
+        307.8249931335449,
+        307.7239990234375
+      ],
+      "speedup": 5.204244557941191
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 8,
+      "limit": 10.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 16.01470947265625,
+      "fused_device_us": 3.1004199981689453,
+      "baseline_graph_samples_us": [
+        1601.470947265625,
+        1601.7879486083984,
+        1601.0259628295898
+      ],
+      "fused_graph_samples_us": [
+        309.67400074005127,
+        310.04199981689453,
+        310.13500690460205
+      ],
+      "speedup": 5.165335497163049
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 17.523189544677734,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        1752.3189544677734,
+        1752.495002746582,
+        1752.3099899291992
+      ],
+      "speedup": 0.566762684335311
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 9.692060470581055,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        969.2060470581055,
+        969.1519737243652,
+        969.435977935791
+      ],
+      "speedup": 1.0247036710721842
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 7.287189960479736,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        728.7189960479736,
+        728.5739898681641,
+        728.8919925689697
+      ],
+      "speedup": 1.3628696381347234
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 6.279489994049072,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        628.0280113220215,
+        627.9489994049072,
+        627.830982208252
+      ],
+      "speedup": 1.5815758849635642
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 5.658510208129883,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        565.3850078582764,
+        565.8689975738525,
+        565.8510208129883
+      ],
+      "speedup": 1.7551421803903273
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 5.759550094604492,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        575.9550094604492,
+        576.0700225830078,
+        575.8900165557861
+      ],
+      "speedup": 1.7243516909006071
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 6.147250175476074,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        615.7380104064941,
+        614.7250175476074,
+        614.6699905395508
+      ],
+      "speedup": 1.6155987898587294
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 0.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 9.931489944458008,
+      "fused_device_us": 6.13047981262207,
+      "baseline_graph_samples_us": [
+        993.1489944458008,
+        992.7650451660156,
+        993.1989669799805
+      ],
+      "fused_graph_samples_us": [
+        613.1110191345215,
+        612.6190185546875,
+        613.047981262207
+      ],
+      "speedup": 1.6200183750723756
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 20.16560935974121,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        2016.560935974121,
+        2017.1989440917969,
+        2016.3509368896484
+      ],
+      "speedup": 1.585513176670951
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 11.035679817199707,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        1103.8339614868164,
+        1103.5510063171387,
+        1103.5679817199707
+      ],
+      "speedup": 2.89722426575274
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 8.159449577331543,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        816.0670280456543,
+        815.9449577331543,
+        815.5579566955566
+      ],
+      "speedup": 3.9185044349431606
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 6.955729961395264,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        695.5729961395264,
+        695.5739974975586,
+        695.4050064086914
+      ],
+      "speedup": 4.596618835538471
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 6.075329780578613,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        607.5329780578613,
+        607.4659824371338,
+        608.0130100250244
+      ],
+      "speedup": 5.262733137167027
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 5.961900234222412,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        596.1900234222412,
+        596.3580131530762,
+        595.9099769592285
+      ],
+      "speedup": 5.362860514159349
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 6.257569789886475,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        625.7569789886475,
+        625.4980087280273,
+        626.2340068817139
+      ],
+      "speedup": 5.109465883567685
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "limit": 10.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 31.97283935546875,
+      "fused_device_us": 6.343860149383545,
+      "baseline_graph_samples_us": [
+        3197.283935546875,
+        3197.587013244629,
+        3197.0449447631836
+      ],
+      "fused_graph_samples_us": [
+        634.3860149383545,
+        634.4110012054443,
+        634.3850135803223
+      ],
+      "speedup": 5.039965983262677
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 132.14483642578125,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        13214.421081542969,
+        13214.707946777344,
+        13214.483642578125
+      ],
+      "speedup": 0.1525015345987942
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 67.095703125,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        6710.266876220703,
+        6709.5703125,
+        6708.747863769531
+      ],
+      "speedup": 0.3003514294603091
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 45.58662033081055,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        4558.520889282227,
+        4558.834075927734,
+        4558.662033081055
+      ],
+      "speedup": 0.4420658999943014
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 34.97193145751953,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        3497.193145751953,
+        3497.209930419922,
+        3497.058868408203
+      ],
+      "speedup": 0.5762418460849754
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 24.85219955444336,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        2485.219955444336,
+        2485.28995513916,
+        2484.992027282715
+      ],
+      "speedup": 0.8108855837927321
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 20.940570831298828,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        2094.4419860839844,
+        2093.577003479004,
+        2094.057083129883
+      ],
+      "speedup": 0.9623563037793438
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 20.239280700683594,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        2023.5139846801758,
+        2023.9280700683594,
+        2024.785041809082
+      ],
+      "speedup": 0.9957019047400052
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 0.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 20.15229034423828,
+      "fused_device_us": 19.807449340820312,
+      "baseline_graph_samples_us": [
+        2015.195083618164,
+        2015.4670715332031,
+        2015.2290344238281
+      ],
+      "fused_graph_samples_us": [
+        1980.7449340820312,
+        1979.5040130615234,
+        1981.5059661865234
+      ],
+      "speedup": 1.0174096622681903
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 4,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 153.38807678222656,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        15339.054870605469,
+        15338.807678222656,
+        15338.714599609375
+      ],
+      "speedup": 0.4324212397764881
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 8,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 77.68132781982422,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        7768.077087402344,
+        7768.157196044922,
+        7768.132781982422
+      ],
+      "speedup": 0.853850779725918
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 12,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 52.679931640625,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        5268.087005615234,
+        5267.742156982422,
+        5267.9931640625
+      ],
+      "speedup": 1.2590802657373121
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 16,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 40.259010314941406,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        4025.9010314941406,
+        4026.4678955078125,
+        4025.7369995117188
+      ],
+      "speedup": 1.647538322731322
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 24,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 28.367300033569336,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        2836.972999572754,
+        2836.724090576172,
+        2836.7300033569336
+      ],
+      "speedup": 2.3381944087244797
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 32,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 22.822389602661133,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        2282.508087158203,
+        2282.168960571289,
+        2282.2389602661133
+      ],
+      "speedup": 2.9062803450418517
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 48,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 21.711299896240234,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        2171.1299896240234,
+        2171.8320846557617,
+        2171.0710525512695
+      ],
+      "speedup": 3.055011106939188
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 384,
+      "limit": 10.0,
+      "core_limit": 64,
+      "bit_mismatches": [
+        0,
+        0,
+        0
+      ],
+      "baseline_device_us": 66.32826232910156,
+      "fused_device_us": 20.991260528564453,
+      "baseline_graph_samples_us": [
+        6633.3343505859375,
+        6632.826232910156,
+        6632.718658447266
+      ],
+      "fused_graph_samples_us": [
+        2098.2410430908203,
+        2099.167060852051,
+        2099.1260528564453
+      ],
+      "speedup": 3.159803683006244
+    }
+  ],
+  "pass": true
+}

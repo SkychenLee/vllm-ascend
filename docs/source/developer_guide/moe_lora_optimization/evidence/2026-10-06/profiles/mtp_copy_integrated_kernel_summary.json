@@ -1,0 +1,32 @@
+{
+  "aclnnInplaceCopy_TensorMoveAiCore_TensorMove": {
+    "count": 6,
+    "durations_us": [
+      815.612,
+      853.154,
+      859.514,
+      854.994,
+      857.814,
+      857.774
+    ]
+  },
+  "aclnnAdds_AddAiCore_Add": {
+    "count": 6,
+    "durations_us": [
+      7.221,
+      7.041,
+      7.121,
+      7.2,
+      6.64,
+      6.54
+    ]
+  },
+  "aclnnScatterNdUpdate_ScatterNdUpdateAiCore_ScatterNdUpdate": {
+    "count": 3,
+    "durations_us": [
+      12.301,
+      9.641,
+      9.481
+    ]
+  }
+}

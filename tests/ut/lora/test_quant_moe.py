@@ -11,7 +11,7 @@ from vllm_ascend.lora.quant_moe import (
     quant_apply_mlp_with_moe_lora,
     validate_quant_moe_lora_activation_input,
 )
-from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput, MoEQuantParams, MoEWeights
+from vllm_ascend.ops.fused_moe.moe_runtime_args import MoELoRARouting, MoEMlpComputeInput, MoEQuantParams, MoEWeights
 from vllm_ascend.quantization.quant_type import QuantType
 
 QUANT_MOE = "vllm_ascend.lora.quant_moe"
@@ -45,6 +45,15 @@ def _make_input(**overrides) -> MoEMlpComputeInput:
     ("comm_type", "mlp_input"),
     [
         (MoECommType.ALLGATHER, _make_input()),
+        (
+            MoECommType.ALLGATHER,
+            _make_input(
+                expanded_row_idx=None,
+                topk_ids=None,
+                lora_context=SimpleNamespace(use_ep=True),
+                lora_routing=MoELoRARouting(torch.tensor([0, 1]), torch.tensor([0, 1])),
+            ),
+        ),
         (
             MoECommType.ALLTOALL,
             _make_input(
@@ -96,7 +105,16 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
     assert dynamic_quant.call_args_list[1].kwargs["hidden_states"] is activated
     assert gmm1.call_args.kwargs["x"][0] is quantized_input
     assert gmm2.call_args.kwargs["hidden_states"] is quantized_activated
-    if comm_type == MoECommType.ALLGATHER:
+    if mlp_input.lora_routing is not None:
+        recover_allgather.assert_not_called()
+        recover_all2all.assert_not_called()
+        assert apply_w13.call_args.kwargs["lora_routing"] is mlp_input.lora_routing
+        assert apply_w2.call_args.kwargs["lora_routing"] is mlp_input.lora_routing
+        routing = mlp_input.lora_routing
+        actual_gate_up = apply_w13.call_args.kwargs["gate_up_out"]
+        torch.testing.assert_close(actual_gate_up, gate_up_out)
+        gate_up_out = actual_gate_up
+    elif comm_type == MoECommType.ALLGATHER:
         recover_allgather.assert_called_once_with(
             mlp_input.lora_context,
             mlp_input.expanded_row_idx,

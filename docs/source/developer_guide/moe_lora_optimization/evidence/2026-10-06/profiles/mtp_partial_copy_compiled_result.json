@@ -1,0 +1,125 @@
+{
+  "analysis_date": "2026-10-06",
+  "device": "physical 12 / visible 0",
+  "scope": "synthetic compiled MTP stash only; no model weights or throughput",
+  "buffer_shape": [
+    16384,
+    16384
+  ],
+  "source_shape": [
+    8,
+    16384
+  ],
+  "backend_options": {
+    "force_eager": true,
+    "inplace_pass": false,
+    "clone_input": false,
+    "clone_output": false
+  },
+  "cases": [
+    {
+      "name": "compiled_slice_copy",
+      "graph": {
+        "samples_us": [
+          1726.2301635742188,
+          1726.0539245605469,
+          1726.2898254394531,
+          1726.5159606933594,
+          1726.4697265625
+        ],
+        "median_us": 1726.2898254394531
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "compiled_scatter_nd_update",
+      "graph": {
+        "samples_us": [
+          22.587199211120605,
+          22.601799964904785,
+          22.542200088500977,
+          22.595601081848145,
+          22.528200149536133
+        ],
+        "median_us": 22.587199211120605
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "output_exact": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true,
+          "output_exact": true
+        }
+      ],
+      "status": "PASS"
+    }
+  ],
+  "profile_directory": "{repo_root}/work-dir/decode-optimization-20261006/profiles/mtp_partial_copy_compiled_profile",
+  "micro_speedup": 76.42779475684306,
+  "compiled_profiler_kernel_evidence": {
+    "aclnnInplaceCopy_TensorMoveAiCore_TensorMove": {
+      "count": 6,
+      "durations_us": [
+        815.313,
+        856.835,
+        858.534,
+        856.235,
+        858.734,
+        855.774
+      ]
+    },
+    "aclnnAdds_AddAiCore_Add": {
+      "count": 6,
+      "durations_us": [
+        7.26,
+        7.12,
+        7.101,
+        7.18,
+        6.72,
+        6.66
+      ]
+    },
+    "aclnnScatterNdUpdate_ScatterNdUpdateAiCore_ScatterNdUpdate": {
+      "count": 3,
+      "durations_us": [
+        10.7,
+        9.14,
+        9.481
+      ]
+    }
+  },
+  "original_capture_evidence": "old_mtp_capture_excerpt.txt: fb20f96bb8/rank_0_0 cache Sep30 01:32, buffer bf16[16384,16384], slice None:s72 copy_ at model line1160",
+  "conclusion": "Same npugraph_ex options reproduce two full 512MiB TensorMove kernels per slice-copy graph replay; npu_scatter_nd_update_ compiles to one small ScatterNdUpdate kernel and preserves changed head and full tail. This validates a no-weights synthetic replacement candidate; production code and full-model latency remain unmodified/unmeasured."
+}

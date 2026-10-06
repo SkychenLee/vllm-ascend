@@ -1,0 +1,19 @@
+Source: {compile_cache}/fb20f96bb8/rank_0_0/backbone/computation_graph.py
+Capture cache mtime_ns: 1790731931100000000
+Captured input annotation: l_self_mtp_hidden_buffer: "bf16[16384, 16384]"
+3922:             sym_size_int_43: "Sym(s72)" = torch.ops.aten.sym_size.int(squeeze_85, 0)
+3923:
+3924:             # File: {installed_repo}/vllm_ascend/models/deepseek_v4.py:1160 in forward, code: self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+3925:             getitem_473: "bf16[s72, 16384]" = l_self_mtp_hidden_buffer[slice(None, s72, None)];  l_self_mtp_hidden_buffer = s72 = None
+3926:             flatten: "bf16[s72, 16384]" = squeeze_85.flatten(1)
+3927:             copy_: "bf16[s72, 16384]" = getitem_473.copy_(flatten);  getitem_473 = flatten = copy_ = None
+3928:
+3929:             # File: {installed_repo}/vllm_ascend/models/deepseek_v4.py:1096 in hc_head, code: x = x.flatten(1).float()
+3923:
+3924:             # File: {installed_repo}/vllm_ascend/models/deepseek_v4.py:1160 in forward, code: self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+3925:             getitem_473: "bf16[s72, 16384]" = l_self_mtp_hidden_buffer[slice(None, s72, None)];  l_self_mtp_hidden_buffer = s72 = None
+3926:             flatten: "bf16[s72, 16384]" = squeeze_85.flatten(1)
+3927:             copy_: "bf16[s72, 16384]" = getitem_473.copy_(flatten);  getitem_473 = flatten = copy_ = None
+3928:
+3929:             # File: {installed_repo}/vllm_ascend/models/deepseek_v4.py:1096 in hc_head, code: x = x.flatten(1).float()
+3930:             flatten_1: "bf16[s72, 16384]" = squeeze_85.flatten(1);  squeeze_85 = None

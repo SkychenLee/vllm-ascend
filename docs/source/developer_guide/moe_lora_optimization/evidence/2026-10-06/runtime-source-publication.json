@@ -1,0 +1,182 @@
+{
+  "container": "ds-ltc-v25-ep",
+  "status": "installed_and_validated",
+  "files": [
+    {
+      "path": "vllm_ascend/envs.py",
+      "sha256": "ca35cba2b1f7e725f1593c11e127232e59286f0ff038d3d27260e9fee604b513",
+      "installed_sha256": "ca35cba2b1f7e725f1593c11e127232e59286f0ff038d3d27260e9fee604b513",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/envs.py"
+    },
+    {
+      "path": "vllm_ascend/lora/activation.py",
+      "sha256": "e8ba4d3103cd1b204abf11009d550009294a1373d92c7170af9225b0cb6c8296",
+      "installed_sha256": "e8ba4d3103cd1b204abf11009d550009294a1373d92c7170af9225b0cb6c8296",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "vllm_ascend/lora/quant_moe.py",
+      "sha256": "3e11795136afea1b1dc2699d6a5a32edb42b87fa1671510792af43e86aa76aef",
+      "installed_sha256": "3e11795136afea1b1dc2699d6a5a32edb42b87fa1671510792af43e86aa76aef",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/lora/quant_moe.py"
+    },
+    {
+      "path": "vllm_ascend/lora/fused_moe.py",
+      "sha256": "a8846e6f90ffbfe77e895478d3877b7c3b5184e051c88dac846eefea4d35c624",
+      "installed_sha256": "a8846e6f90ffbfe77e895478d3877b7c3b5184e051c88dac846eefea4d35c624",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/lora/fused_moe.py"
+    },
+    {
+      "path": "vllm_ascend/lora/routing.py",
+      "sha256": "a71de30ebf28b9dc43880cd27d514a175c5cf8ac85a0e91b221993304fe092a7",
+      "installed_sha256": "a71de30ebf28b9dc43880cd27d514a175c5cf8ac85a0e91b221993304fe092a7",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/lora/routing.py"
+    },
+    {
+      "path": "csrc/moe_lora_activation.cpp",
+      "sha256": "a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e",
+      "installed_sha256": "a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "csrc/kernels/moe_lora_activation.cpp",
+      "sha256": "368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9",
+      "installed_sha256": "368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "csrc/kernels/moe_lora_activation.h",
+      "sha256": "a1d915fb81be26ad17c7e34209c5496c4d9ded4eab5bec3c5e7b6a62df66987c",
+      "installed_sha256": "a1d915fb81be26ad17c7e34209c5496c4d9ded4eab5bec3c5e7b6a62df66987c",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "csrc/moe_lora_ep_routing.cpp",
+      "sha256": "14720e1cdb90e03d5bd0a54fafee6a69981aadb85a269db06839b364c72ecde0",
+      "installed_sha256": "14720e1cdb90e03d5bd0a54fafee6a69981aadb85a269db06839b364c72ecde0",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "csrc/kernels/moe_lora_ep_routing.cpp",
+      "sha256": "0453e2dbe84444296b6aee7851d3ee2e4126598db2140e480b8b90a376f11de6",
+      "installed_sha256": "0453e2dbe84444296b6aee7851d3ee2e4126598db2140e480b8b90a376f11de6",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "csrc/kernels/moe_lora_ep_routing.h",
+      "sha256": "e8b87b54ff893afa06991763a1a0277ec6dccdaae90e23f78789b9bd61875482",
+      "installed_sha256": "e8b87b54ff893afa06991763a1a0277ec6dccdaae90e23f78789b9bd61875482",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "tests/ut/lora/test_decode_moe_lora.py",
+      "sha256": "3afbd4ef7d4bd12e5c979138ce4c4ea4bfa9498dc4247b71aaa8a79969ccc68c",
+      "installed_sha256": "3afbd4ef7d4bd12e5c979138ce4c4ea4bfa9498dc4247b71aaa8a79969ccc68c",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "tests/ut/lora/test_ep_routing_fusion.py",
+      "sha256": "6fd5d490d574c90931e53685d6fd9ce638c1c78eb03df53371ac921d16752eab",
+      "installed_sha256": "6fd5d490d574c90931e53685d6fd9ce638c1c78eb03df53371ac921d16752eab",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "benchmarks/benchmark_moe_lora_decode.py",
+      "sha256": "19075e19487eb19cd37d65cf7dccc221f6a7a157d8d1747ec9fb6cabe43db642",
+      "installed_sha256": "19075e19487eb19cd37d65cf7dccc221f6a7a157d8d1747ec9fb6cabe43db642",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/benchmarks/benchmark_moe_lora_decode.py"
+    },
+    {
+      "path": "vllm_ascend/models/deepseek_v4.py",
+      "sha256": "d3172918978c5ea4da3df03e0c23cf7e33dd110660f2f384c36efa1e326b7f7e",
+      "installed_sha256": "d3172918978c5ea4da3df03e0c23cf7e33dd110660f2f384c36efa1e326b7f7e",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/models/deepseek_v4.py"
+    },
+    {
+      "path": "tests/ut/models/test_deepseek_v4_mtp_copy.py",
+      "sha256": "9c14ce5d372dbd543cd5a05ac4e004e073bb143b6b0fca8d9a9ac156e5c8c2f7",
+      "installed_sha256": "9c14ce5d372dbd543cd5a05ac4e004e073bb143b6b0fca8d9a9ac156e5c8c2f7",
+      "previously_exists": false,
+      "backup": null
+    },
+    {
+      "path": "vllm_ascend/compilation/compiler_interface.py",
+      "sha256": "77861bac21cf55d6ec7515ece2003d49aa3005dc8f0a7bc3163ec2ca76c8c8c1",
+      "installed_sha256": "77861bac21cf55d6ec7515ece2003d49aa3005dc8f0a7bc3163ec2ca76c8c8c1",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/compilation/compiler_interface.py"
+    },
+    {
+      "path": "vllm_ascend/patch/platform/patch_compile_cache.py",
+      "sha256": "f4298f84390f0d3f7bf612351be2a09be155517a85e3626ce6f8ac95b8efa0b9",
+      "installed_sha256": "f4298f84390f0d3f7bf612351be2a09be155517a85e3626ce6f8ac95b8efa0b9",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/patch/platform/patch_compile_cache.py"
+    },
+    {
+      "path": "tests/ut/compilation/test_compiler_hash.py",
+      "sha256": "d63a300ab4b6ee32d6402e0041f5221924a30a13daf8d9f7bdb4144f7faa60f6",
+      "installed_sha256": "d63a300ab4b6ee32d6402e0041f5221924a30a13daf8d9f7bdb4144f7faa60f6",
+      "previously_exists": true,
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/tests/ut/compilation/test_compiler_hash.py"
+    }
+  ],
+  "analysis_date": "2026-10-06",
+  "timezone": "Asia/Shanghai",
+  "installed_repo": "{installed_repo}",
+  "host_repo": "{repo_root}",
+  "binaries": [
+    {
+      "path": "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so",
+      "sha256": "360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839",
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so",
+      "backup_sha256": "30bad88c45ecbff9b06c064c14e5c5caa63d54c332c0b14e1ad83a63f6c56f7f",
+      "previous_intermediate": "{repo_root}/work-dir/decode-optimization-20261006/runtime-intermediate/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so.5d2599c96eaad4f3911b8dc87f5ef424e767ebd154e1cee2571432cdc87f91b0"
+    },
+    {
+      "path": "{installed_repo}/vllm_ascend/libvllm_ascend_kernels.so",
+      "sha256": "9be9047e3d41c1155458433de43b1bfceb6f1c3b01601279739dc9f052d9c6cf",
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/libvllm_ascend_kernels.so",
+      "backup_sha256": "c5e300ae2118ddf870c66d70da1b81034aa14eeb1cec5af2e15d1e1638aa1a84"
+    },
+    {
+      "path": "{installed_repo}/vllm_ascend/lib/libvllm_ascend_kernels.so",
+      "sha256": "9be9047e3d41c1155458433de43b1bfceb6f1c3b01601279739dc9f052d9c6cf",
+      "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/lib/libvllm_ascend_kernels.so",
+      "backup_sha256": "c5e300ae2118ddf870c66d70da1b81034aa14eeb1cec5af2e15d1e1638aa1a84"
+    }
+  ],
+  "validation": {
+    "unit_tests": "188 passed",
+    "lint": "passed",
+    "synthetic_local_moe_layer": "validated-layer-limit0.json",
+    "activation_reference": "installed-activation-reference.json",
+    "activation_compilation": "activation-native/compiled-guard-result.json",
+    "ep_compilation": "ep-routing-native/storage-guard-compile-result.json",
+    "installed_ep_format": "installed-ep-format-smoke.json",
+    "compiled_mtp_helper": "profiles/mtp_copy_integrated_result.json",
+    "weights_available": false,
+    "end_to_end_validated": false,
+    "physical_compute_devices": [
+      12,
+      13,
+      14,
+      15
+    ]
+  }
+}

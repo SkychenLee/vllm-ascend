@@ -1,0 +1,414 @@
+{
+  "physical_device": 14,
+  "adapter_sha256": "a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e",
+  "library_sha256": "8e9fd223e1558731a7224c391420d0c14194c8423738422a040f5b6b8240cea0",
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "requested_format": 0,
+      "actual_format": 2,
+      "fixture_unavailable": true,
+      "note": "2D NCHW allocator/copy canonicalizes to ND; format 0 not claimed tested"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "format": 2,
+      "limit": 0.0,
+      "contiguous": true,
+      "comparison": [
+        {
+          "dtype": "torch.bfloat16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ],
+      "changed_input_graph": [
+        {
+          "dtype": "torch.bfloat16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "format": 2,
+      "limit": 10.0,
+      "contiguous": true,
+      "comparison": [
+        {
+          "dtype": "torch.bfloat16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ],
+      "changed_input_graph": [
+        {
+          "dtype": "torch.bfloat16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ]
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "format": 29,
+      "contiguous": true,
+      "pass_rejected": true,
+      "error": "moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported"
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 0,
+      "format": 2,
+      "pass": true
+    },
+    {
+      "dtype": "torch.float16",
+      "requested_format": 0,
+      "actual_format": 2,
+      "fixture_unavailable": true,
+      "note": "2D NCHW allocator/copy canonicalizes to ND; format 0 not claimed tested"
+    },
+    {
+      "dtype": "torch.float16",
+      "format": 2,
+      "limit": 0.0,
+      "contiguous": true,
+      "comparison": [
+        {
+          "dtype": "torch.float16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ],
+      "changed_input_graph": [
+        {
+          "dtype": "torch.float16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "format": 2,
+      "limit": 10.0,
+      "contiguous": true,
+      "comparison": [
+        {
+          "dtype": "torch.float16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ],
+      "changed_input_graph": [
+        {
+          "dtype": "torch.float16",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.int8",
+          "shape": [
+            48,
+            2048
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        },
+        {
+          "dtype": "torch.float32",
+          "shape": [
+            48
+          ],
+          "unequal": 0,
+          "bits_unequal": 0,
+          "max_abs": 0.0,
+          "max_rel": 0.0,
+          "nonfinite_ref": 0,
+          "nonfinite_actual": 0
+        }
+      ]
+    },
+    {
+      "dtype": "torch.float16",
+      "format": 29,
+      "contiguous": true,
+      "pass_rejected": true,
+      "error": "moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported"
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 0,
+      "format": 2,
+      "pass": true
+    }
+  ],
+  "meta": [
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 0,
+      "pass": true
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "rows": 48,
+      "pass": true
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 0,
+      "pass": true
+    },
+    {
+      "dtype": "torch.float16",
+      "rows": 48,
+      "pass": true
+    }
+  ],
+  "pass": true
+}

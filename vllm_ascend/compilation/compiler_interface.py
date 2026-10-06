@@ -32,6 +32,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
@@ -248,6 +249,11 @@ class AscendCompiler(CompilerInterface):
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
             # Hash the effective import-time branch, not a later env mutation.
             "moe_lora_grouped_prefill": grouped_prefill.ENABLE_GROUPED_PREFILL,
+            # These opt-in branches alter the traced kernels and mutations.
+            # Separate their persisted graphs even for an identical config.
+            "moe_lora_fused_routing": envs.VLLM_ASCEND_MOE_LORA_FUSED_ROUTING,
+            "moe_lora_fused_activation": envs.VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION,
+            "optimize_mtp_buffer_copy": envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]

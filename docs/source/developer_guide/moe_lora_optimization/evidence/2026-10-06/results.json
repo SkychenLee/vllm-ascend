@@ -1,0 +1,192 @@
+{
+  "date": "2026-10-06",
+  "timezone": "Asia/Shanghai",
+  "status": "installed_and_validated_without_model_weights",
+  "container": "ds-ltc-v25-ep",
+  "installed_repo": "{installed_repo}",
+  "artifact_dir": "{repo_root}/work-dir/decode-optimization-20261006",
+  "physical_compute_devices": [
+    12,
+    13,
+    14,
+    15
+  ],
+  "implemented": [
+    "AllGather EP routing metadata fused into a native inverse-scatter operator",
+    "One combined expert/adapter index tensor reused by W13 and W2 within each forward",
+    "SwiGLU with optional clipping and dynamic INT8 quantization fused; floating W2 LoRA activation retained",
+    "Compiled MTP partial-buffer copy replaced by native in-place row update behind an opt-in flag",
+    "Native physical-format validation and FakeTensor-safe Python dispatch",
+    "Compiler and outer AOT cache isolation for all three opt-in flags"
+  ],
+  "single_local_moe_layer": {
+    "scope": "one routed MoE layer; no model/attention/communication/scheduler",
+    "shape": {
+      "H": 4096,
+      "I": 2048,
+      "rank": 16,
+      "experts": 32,
+      "adapters": 4,
+      "topk": 6
+    },
+    "nonzero_synthetic_weights": true,
+    "swiglu_limit": 0,
+    "timing": "5 samples x 50 graph replays; median device-event time",
+    "routing_distribution": "deterministic global expert selections; rank0 owns 32/256 experts",
+    "cases": [
+      {
+        "tokens": 1,
+        "capacity": 6,
+        "initial_local_active_rows": 1,
+        "baseline_graph_us": 215.10919570922852,
+        "optimized_graph_us": 126.04800224304199,
+        "speedup": 1.7065656883197673,
+        "time_reduction_percent": 41.40278297845249,
+        "exact": true,
+        "activation_fused": true
+      },
+      {
+        "tokens": 2,
+        "capacity": 12,
+        "initial_local_active_rows": 2,
+        "baseline_graph_us": 292.1080017089844,
+        "optimized_graph_us": 196.8507957458496,
+        "speedup": 1.483905617969254,
+        "time_reduction_percent": 32.610269285959426,
+        "exact": true,
+        "activation_fused": true
+      },
+      {
+        "tokens": 4,
+        "capacity": 24,
+        "initial_local_active_rows": 4,
+        "baseline_graph_us": 352.2840118408203,
+        "optimized_graph_us": 251.12239837646484,
+        "speedup": 1.4028378755474498,
+        "time_reduction_percent": 28.71592523763622,
+        "exact": true,
+        "activation_fused": true
+      },
+      {
+        "tokens": 8,
+        "capacity": 48,
+        "initial_local_active_rows": 7,
+        "baseline_graph_us": 437.0671844482422,
+        "optimized_graph_us": 321.4503860473633,
+        "speedup": 1.3596722960035383,
+        "time_reduction_percent": 26.45286640470038,
+        "exact": true,
+        "activation_fused": true
+      },
+      {
+        "tokens": 64,
+        "capacity": 384,
+        "initial_local_active_rows": 49,
+        "baseline_graph_us": 1382.4092102050781,
+        "optimized_graph_us": 1246.3976287841797,
+        "speedup": 1.1091237485372731,
+        "time_reduction_percent": 9.83873518903432,
+        "exact": true,
+        "activation_fused": false
+      }
+    ],
+    "evidence": "validated-layer-limit0.json"
+  },
+  "operator_micro_R48": {
+    "ep_metadata": {
+      "baseline_us": 131.6510009765625,
+      "fused_us": 8.2014000415802,
+      "speedup": 16.052259408040864,
+      "timing": "single-operator graph replay; host enqueue floor retained",
+      "evidence": "ep-routing-native/result.json"
+    },
+    "bf16_activation_quant_limit0": {
+      "baseline_us": 10.416299819946289,
+      "fused_us": 5.999120235443115,
+      "speedup": 1.7363045598596685,
+      "timing": "100 operators per graph; 20 replays per sample; 3 samples",
+      "evidence": "activation-native/final-default-result.json"
+    },
+    "bf16_compiled_mtp_T8": {
+      "baseline_us": 1725.0843811035156,
+      "fused_us": 21.78459882736206,
+      "speedup": 79.18825564677196,
+      "scope": "isolated real production helper compiled by npugraph_ex; not whole-model Decode",
+      "evidence": "profiles/mtp_copy_integrated_result.json"
+    }
+  },
+  "validation": {
+    "unit_tests": 188,
+    "unit_log": "validated-unit-tests.log",
+    "lint": "passed",
+    "activation_reference_cases": 78,
+    "activation_reference_rawbit_exact": true,
+    "activation_changed_input_graph_cases": 24,
+    "activation_stress_changed_input_replays": 2400,
+    "ep_metadata_reference_cases": 456,
+    "single_layer_changed_input_graph_cases": 15,
+    "compiled_mtp_cases": 8,
+    "compiled_activation_cases": 4,
+    "compiled_ep_shapes": [
+      48,
+      384
+    ],
+    "compiled_changed_data_exact": true,
+    "compiled_blocked_format_rejected": true,
+    "installed_ep_format_checks": "installed-ep-format-smoke.json"
+  },
+  "guards": {
+    "activation_max_routed_rows": 48,
+    "activation_gate_up_width": 4096,
+    "activation_dtype": [
+      "bf16",
+      "fp16"
+    ],
+    "ep_max_pairs": 384,
+    "ep_max_global_experts": 512,
+    "native_physical_formats": [
+      0,
+      2
+    ],
+    "format0_fixture_note": "Runtime canonicalized requested format0 to2; actual format0 not claimed tested",
+    "eager_blocked_behavior": "Preserves old fallback; current CANN blocked integer Cast/Identity/TransData may itself be unsupported",
+    "compiled_blocked_behavior": "Native runtime rejects blocked input, including ND compiled callable subsequently given blocked input",
+    "ep_producer_contract": "Unique nonnegative expanded destinations"
+  },
+  "enable_before_engine_construction": {
+    "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": 1,
+    "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION": 1,
+    "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY": 1
+  },
+  "flags_default": 0,
+  "cache_isolation": "AscendCompiler.compute_hash and outer AOT compile_factors; all8 flag combinations tested",
+  "profile_basis": {
+    "source": "September30 TP8/EP8 AllGather LoRA rank0 graph,43 layers; no new full-model run",
+    "graph_device_span_ms": 49.018,
+    "lora_kernels_summed_ms": 6.683,
+    "index_check_plus_index_summed_ms": 3.488,
+    "routed_activation_plus_quant_summed_ms": 0.594,
+    "mtp_full_buffer_copies_summed_ms": 1.69,
+    "evidence": "profiles/rank0_decode_hotspots.md",
+    "note": "Kernel duration sums overlap across streams; do not infer end-to-end speedup"
+  },
+  "end_to_end": {
+    "validated": false,
+    "reason": "Model and LoRA weights unavailable; original {original_workspace} is not mounted",
+    "requested_scenario": {
+      "input_tokens": 8192,
+      "output_tokens": 4096,
+      "concurrency": 8,
+      "max_num_batched_tokens": 16384
+    },
+    "full_model_throughput_updated": false
+  },
+  "next_decode_candidates": [
+    "Pair routed BF16 W13 gate/up shrink to share input loads and remove one launch",
+    "Fuse shared-expert clipped activation and quantization using its actual alpha/bias semantics",
+    "Use restored weights to verify TP8/EP8 throughput, then profile again"
+  ],
+  "cube_note": "The existing Cube prefill path is retained. This round does not claim a new Decode Cube gain; very small rows per expert first favor launch/input-traffic reductions.",
+  "publication_manifest": "runtime-source-publication.json",
+  "rollback": "Original Python sources, native binding and both kernel-library locations are preserved under runtime-backup/"
+}

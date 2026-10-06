@@ -1,0 +1,87 @@
+{
+  "scope": "one routed MoE layer; no model/attention/communication/scheduler",
+  "physical_devices": "15",
+  "local_device": 0,
+  "libraries": [
+    "{repo_root}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so"
+  ],
+  "shape": {
+    "H": 4096,
+    "I": 2048,
+    "rank": 16,
+    "experts": 32,
+    "adapters": 4,
+    "topk": 6
+  },
+  "nonzero_synthetic_lora": true,
+  "flags": {
+    "fused_routing": true,
+    "fused_activation": false
+  },
+  "cases": [
+    {
+      "tokens": 8,
+      "capacity": 48,
+      "active_rows": 13,
+      "initial_max_abs": 0.0,
+      "baseline_eager": {
+        "samples_us": [
+          1601.589012145996,
+          1596.0980415344238,
+          1589.9510383605957,
+          1511.5739822387695,
+          1497.0990180969238
+        ],
+        "median_us": 1589.9510383605957
+      },
+      "baseline_graph": {
+        "samples_us": [
+          522.0320224761963,
+          522.1370220184326,
+          522.0230102539062,
+          521.9029903411865,
+          522.2070217132568
+        ],
+        "median_us": 522.0320224761963
+      },
+      "optimized_eager": {
+        "samples_us": [
+          1479.5900344848633,
+          1476.222038269043,
+          1472.3910331726074,
+          1467.2479629516602,
+          1464.1539573669434
+        ],
+        "median_us": 1472.3910331726074
+      },
+      "optimized_graph": {
+        "samples_us": [
+          514.084005355835,
+          514.0309810638428,
+          514.463996887207,
+          514.9280071258545,
+          513.4659767150879
+        ],
+        "median_us": 514.084005355835
+      },
+      "changed_input_replays": [
+        {
+          "phase": 1,
+          "active_rows": 12,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 2,
+          "active_rows": 13,
+          "max_abs": 0.0
+        },
+        {
+          "phase": 3,
+          "active_rows": 12,
+          "max_abs": 0.0
+        }
+      ],
+      "graph_speedup": 1.0154605415409879
+    }
+  ]
+}

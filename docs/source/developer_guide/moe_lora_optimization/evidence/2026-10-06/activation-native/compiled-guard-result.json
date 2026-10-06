@@ -1,0 +1,94 @@
+{
+  "physical_device": 14,
+  "scope": "Installed production guard/native compile micro only; no weights",
+  "backend": "npugraph_ex",
+  "fullgraph": true,
+  "dynamic": false,
+  "options": {
+    "force_eager": true,
+    "inplace_pass": false,
+    "clone_input": false,
+    "clone_output": false
+  },
+  "activation_source_sha256": "e8ba4d3103cd1b204abf11009d550009294a1373d92c7170af9225b0cb6c8296",
+  "installed_library_sha256": "360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839",
+  "cases": [
+    {
+      "dtype": "torch.bfloat16",
+      "limit": 0.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 1,
+      "changed_nd_exact": true,
+      "blocked_format": 29,
+      "cached_nd_then_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "fresh_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "pass": true
+    },
+    {
+      "dtype": "torch.bfloat16",
+      "limit": 10.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 1,
+      "changed_nd_exact": true,
+      "blocked_format": 29,
+      "cached_nd_then_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "fresh_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "pass": true
+    },
+    {
+      "dtype": "torch.float16",
+      "limit": 0.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 1,
+      "changed_nd_exact": true,
+      "blocked_format": 29,
+      "cached_nd_then_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "fresh_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "pass": true
+    },
+    {
+      "dtype": "torch.float16",
+      "limit": 10.0,
+      "rows": 48,
+      "initial_format": 2,
+      "nd_exact": true,
+      "fused_branch_marker": 1,
+      "changed_nd_exact": true,
+      "blocked_format": 29,
+      "cached_nd_then_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "fresh_blocked": {
+        "rejected": true,
+        "error": "RuntimeError('moe_lora_activation_quant: ND/base storage (format 0 or 2) required; blocked NPU storage is unsupported')"
+      },
+      "pass": true
+    }
+  ],
+  "pass": true
+}

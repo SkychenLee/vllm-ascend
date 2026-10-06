@@ -29,9 +29,51 @@ class AscendConfig:
     Configuration Object for additional_config from vllm.configs.
     """
 
+    @staticmethod
+    def _parse_moe_lora_ep_backend(additional_config: dict) -> str:
+        backend = additional_config.get("moe_lora_ep_backend", "allgather")
+        if not isinstance(backend, str) or backend not in ("allgather", "alltoall"):
+            raise ValueError("moe_lora_ep_backend must be 'allgather' or 'alltoall'.")
+        return backend
+
+    @staticmethod
+    def _validate_moe_lora_ep_backend(vllm_config: "VllmConfig", additional_config: dict, backend: str) -> None:
+        parallel = vllm_config.parallel_config
+        model = vllm_config.model_config
+        ep_size = parallel.tensor_parallel_size * parallel.data_parallel_size * parallel.prefill_context_parallel_size
+        if not (
+            backend == "allgather"
+            and vllm_config.lora_config is not None
+            and parallel.enable_expert_parallel
+            and ep_size > 1
+            and model is not None
+            and model.get_num_experts() > 0
+        ):
+            return
+        if any(
+            getattr(parallel, name, 1) != 1
+            for name in ("data_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size")
+        ):
+            raise ValueError("AllGather EP LoRA currently requires DP=PCP=DCP=1; use moe_lora_ep_backend=alltoall.")
+        eplb = additional_config.get("eplb_config") or {}
+        upstream_eplb = getattr(parallel, "eplb_config", None)
+        if (
+            getattr(parallel, "expert_placement_strategy", "linear") != "linear"
+            or additional_config.get("mix_placement", False)
+            or getattr(parallel, "enable_eplb", False)
+            or getattr(upstream_eplb, "num_redundant_experts", 0)
+            or eplb.get("dynamic_eplb", False)
+            or eplb.get("expert_map_path") is not None
+            or eplb.get("expert_map_record_path") is not None
+            or eplb.get("num_redundant_experts", 0)
+        ):
+            raise ValueError("AllGather EP LoRA requires static linear expert placement without EPLB or expert maps.")
+
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self.moe_lora_ep_backend = self._parse_moe_lora_ep_backend(additional_config)
+        self._validate_moe_lora_ep_backend(vllm_config, additional_config, self.moe_lora_ep_backend)
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})

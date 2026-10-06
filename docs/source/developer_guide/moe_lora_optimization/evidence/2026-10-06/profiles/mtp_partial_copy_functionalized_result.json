@@ -1,0 +1,225 @@
+{
+  "analysis_date": "2026-10-06",
+  "device": "physical 12 / visible 0",
+  "shape": {
+    "buffer": [
+      16384,
+      16384
+    ],
+    "source": [
+      8,
+      16384
+    ]
+  },
+  "dtype": "bfloat16",
+  "buffer_bytes": 536870912,
+  "scope": "synthetic buffer writes only; no full model or end-to-end inference",
+  "cases": [
+    {
+      "name": "slice_copy",
+      "eager": {
+        "samples_us": [
+          22.829999923706055,
+          23.41820001602173,
+          23.34820032119751,
+          23.502800464630127,
+          23.36980104446411
+        ],
+        "median_us": 23.36980104446411
+      },
+      "graph": {
+        "samples_us": [
+          9.654800295829773,
+          9.488000273704529,
+          9.256799817085266,
+          9.250400066375732,
+          9.109799861907959
+        ],
+        "median_us": 9.256799817085266
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "scatter_nd_update",
+      "eager": {
+        "samples_us": [
+          59.01259899139404,
+          10.803600549697876,
+          10.643399953842163,
+          10.852799415588379,
+          10.553799867630005
+        ],
+        "median_us": 10.803600549697876
+      },
+      "graph": {
+        "samples_us": [
+          15.710599422454834,
+          15.630199909210205,
+          15.673199892044067,
+          15.685800313949585,
+          15.655399560928345
+        ],
+        "median_us": 15.673199892044067
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "index_copy",
+      "eager": {
+        "samples_us": [
+          16.821000576019287,
+          16.44979953765869,
+          16.72760009765625,
+          16.531800031661987,
+          16.5802001953125
+        ],
+        "median_us": 16.5802001953125
+      },
+      "graph": {
+        "samples_us": [
+          24.003798961639404,
+          23.903000354766846,
+          37.438600063323975,
+          23.92859935760498,
+          23.90939950942993
+        ],
+        "median_us": 23.92859935760498
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "functionalized_slice_copy",
+      "eager": {
+        "samples_us": [
+          2570.4327392578125,
+          2570.8453369140625,
+          2570.9323120117188,
+          2570.5203247070312,
+          2570.8782958984375
+        ],
+        "median_us": 2570.8453369140625
+      },
+      "graph": {
+        "samples_us": [
+          2582.87109375,
+          2583.1787109375,
+          2585.9909057617188,
+          2582.5225830078125,
+          2582.1249389648438
+        ],
+        "median_us": 2582.87109375
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "functionalized_scatter_nd_update",
+      "eager": {
+        "samples_us": [
+          1725.4092407226562,
+          1725.3338623046875,
+          1725.7789611816406,
+          1725.6260681152344,
+          1725.7609558105469
+        ],
+        "median_us": 1725.6260681152344
+      },
+      "graph": {
+        "samples_us": [
+          1737.0297241210938,
+          1736.7820739746094,
+          1742.7998352050781,
+          1736.7460632324219,
+          1736.3662719726562
+        ],
+        "median_us": 1736.7820739746094
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    }
+  ],
+  "profile_directory": "{repo_root}/work-dir/decode-optimization-20261006/profiles/mtp_partial_copy_functionalized_profile"
+}

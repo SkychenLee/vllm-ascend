@@ -78,6 +78,7 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
@@ -1079,7 +1080,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
-        # address (outside the cudagraph pool) so the copy_ in forward()
+        # address (outside the cudagraph pool) so the write in forward()
         # refreshes it correctly across captured shapes.
         self._mtp_hidden_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1087,6 +1088,38 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             dtype=vllm_config.model_config.dtype,
             device=self.device,
         )
+        self._mtp_buffer_row_indices = (
+            torch.arange(self._mtp_hidden_buffer.shape[0], dtype=torch.int64, device=self.device).unsqueeze(-1)
+            if envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY
+            else None
+        )
+
+    def _copy_mtp_hidden_states(self, hidden_states: torch.Tensor) -> None:
+        """Refresh only valid residual rows without changing the buffer address.
+
+        AOT functionalization expands partial-view copy_ to two full-buffer
+        copies when npugraph_ex disables the reinplace pass. Its native scatter
+        update remains in place, including under compiled graph replay.
+        """
+        buffer = self._mtp_hidden_buffer
+        if hidden_states.ndim != 2 or hidden_states.shape[1] != buffer.shape[1]:
+            raise ValueError("MTP residual rows must match the persistent buffer width.")
+        num_tokens = hidden_states.shape[0]
+        if num_tokens > buffer.shape[0]:
+            raise ValueError("MTP residual rows exceed the persistent buffer capacity.")
+        if num_tokens == 0:
+            return
+        rows = self._mtp_buffer_row_indices
+        if (
+            rows is None
+            or hidden_states.dtype != buffer.dtype
+            or hidden_states.device != buffer.device
+            or buffer.dtype not in (torch.float16, torch.bfloat16)
+        ):
+            # Preserve copy_ conversion semantics outside the validated path.
+            buffer[:num_tokens].copy_(hidden_states)
+            return
+        torch_npu.npu_scatter_nd_update_(buffer, rows[:num_tokens], hidden_states)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1138,7 +1171,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states.mean(dim=1))
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
+        # Stash pre-hc_head residual for the MTP draft (captured write).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
         # partitioned across TP ranks via reduce_scatter in each layer's
         # row-parallel output projection.  We must all_gather here so the
@@ -1153,11 +1186,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             pad_size = forward_ctx.pad_size
             if pad_size > 0:
                 h_states_flat = h_states_flat[:-pad_size]
-            num_tokens = h_states_flat.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
+            self._copy_mtp_hidden_states(h_states_flat)
         else:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            self._copy_mtp_hidden_states(hidden_states.flatten(1))
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

@@ -1,0 +1,144 @@
+{
+  "analysis_date": "2026-10-06",
+  "device": "physical 12 / visible 0",
+  "shape": {
+    "buffer": [
+      16384,
+      16384
+    ],
+    "source": [
+      8,
+      16384
+    ]
+  },
+  "dtype": "bfloat16",
+  "buffer_bytes": 536870912,
+  "scope": "synthetic buffer writes only; no full model or end-to-end inference",
+  "cases": [
+    {
+      "name": "slice_copy",
+      "eager": {
+        "samples_us": [
+          33.6326003074646,
+          34.79419946670532,
+          35.31820058822632,
+          35.63859939575195,
+          35.27760028839111
+        ],
+        "median_us": 35.27760028839111
+      },
+      "graph": {
+        "samples_us": [
+          9.315800070762634,
+          9.365800023078918,
+          9.316400289535522,
+          9.071999788284302,
+          9.136199951171875
+        ],
+        "median_us": 9.315800070762634
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "scatter_nd_update",
+      "eager": {
+        "samples_us": [
+          36.37399911880493,
+          18.038400411605835,
+          24.479000568389893,
+          19.29900050163269,
+          15.35099983215332
+        ],
+        "median_us": 19.29900050163269
+      },
+      "graph": {
+        "samples_us": [
+          16.68280005455017,
+          16.60140037536621,
+          16.644599437713623,
+          16.60199999809265,
+          16.670000553131104
+        ],
+        "median_us": 16.644599437713623
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    },
+    {
+      "name": "index_copy",
+      "eager": {
+        "samples_us": [
+          25.32900094985962,
+          25.005600452423096,
+          24.656200408935547,
+          24.653000831604004,
+          24.48199987411499
+        ],
+        "median_us": 24.656200408935547
+      },
+      "graph": {
+        "samples_us": [
+          26.617600917816162,
+          26.67840003967285,
+          26.658999919891357,
+          26.642398834228516,
+          26.643800735473633
+        ],
+        "median_us": 26.643800735473633
+      },
+      "checks": [
+        {
+          "source_offset": 7,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": -3,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        },
+        {
+          "source_offset": 19,
+          "head_exact": true,
+          "entire_tail_unchanged": true
+        }
+      ],
+      "status": "PASS"
+    }
+  ],
+  "profile_directory": "{repo_root}/work-dir/decode-optimization-20261006/profiles/mtp_partial_copy_profile",
+  "followup": "See mtp_partial_copy_functionalized_result.json and mtp_partial_copy_compiled_result.json. Plain NPUGraph is not sufficient to reproduce the real compiled issue; actual npugraph_ex options reproduce it. Compiler backend handles scatter correctly although torch.func.functionalize alone still copies entire buffer."
+}

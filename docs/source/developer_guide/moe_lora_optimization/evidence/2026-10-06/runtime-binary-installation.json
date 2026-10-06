@@ -1,0 +1,21 @@
+[
+  {
+    "path": "{installed_repo}/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so",
+    "sha256": "360386bcd788fe7f94882743472a8ad707995954ec8e02b421e0128f6800f839",
+    "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so",
+    "backup_sha256": "30bad88c45ecbff9b06c064c14e5c5caa63d54c332c0b14e1ad83a63f6c56f7f",
+    "previous_intermediate": "{repo_root}/work-dir/decode-optimization-20261006/runtime-intermediate/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so.5d2599c96eaad4f3911b8dc87f5ef424e767ebd154e1cee2571432cdc87f91b0"
+  },
+  {
+    "path": "{installed_repo}/vllm_ascend/libvllm_ascend_kernels.so",
+    "sha256": "9be9047e3d41c1155458433de43b1bfceb6f1c3b01601279739dc9f052d9c6cf",
+    "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/libvllm_ascend_kernels.so",
+    "backup_sha256": "c5e300ae2118ddf870c66d70da1b81034aa14eeb1cec5af2e15d1e1638aa1a84"
+  },
+  {
+    "path": "{installed_repo}/vllm_ascend/lib/libvllm_ascend_kernels.so",
+    "sha256": "9be9047e3d41c1155458433de43b1bfceb6f1c3b01601279739dc9f052d9c6cf",
+    "backup": "{repo_root}/work-dir/decode-optimization-20261006/runtime-backup/vllm_ascend/lib/libvllm_ascend_kernels.so",
+    "backup_sha256": "c5e300ae2118ddf870c66d70da1b81034aa14eeb1cec5af2e15d1e1638aa1a84"
+  }
+]

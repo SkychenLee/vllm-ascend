@@ -37,9 +37,11 @@ from vllm_ascend.lora.fused_moe import (
     has_lora,
     postprocess_lora_indices,
     preprocess_lora_indices,
+    supports_ep_lora,
     supports_tp_fully_sharded_lora,
 )
 from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
+from vllm_ascend.lora.routing import recover_allgather_ep_lora_routing
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -376,6 +378,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
         with_quant = with_quant and not unquantized_mxfp4_dispatch
+        ep_lora = supports_ep_lora(self.lora_context)
         if has_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
             validate_quant_moe_lora_activation_input(
                 quant_type=quant_type,
@@ -387,6 +390,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             with_quant = quant_type == QuantType.W8A8 and supports_tp_fully_sharded_lora(self.lora_context)
             if with_quant and dynamic_scale is not None:
                 dynamic_scale = dynamic_scale.reshape(-1).contiguous()
+        if ep_lora:
+            with_quant = False
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -429,34 +434,61 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
-            hidden_states,
-            topk_ids,
-            scale=dynamic_scale,
-            active_num=num_tokens * self.top_k,
-            expert_num=global_num_experts,
-            expert_tokens_num_type=1,
-            expert_tokens_num_flag=True,
-            active_expert_range=[first_expert_idx, last_expert_idx],
-            quant_mode=quant_mode,
-            act_quant_type=act_quant_type,
-        )
+        if ep_lora and num_tokens == 0:
+            sorted_hidden_states = hidden_states.reshape(0, hidden_states.shape[-1])
+            expanded_row_idx = topk_ids.new_empty((0,))
+            expert_tokens = topk_ids.new_zeros((self.num_experts_local,), dtype=torch.int64)
+        else:
+            sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
+                hidden_states,
+                topk_ids,
+                scale=dynamic_scale,
+                active_num=num_tokens * self.top_k,
+                expert_num=global_num_experts,
+                expert_tokens_num_type=1,
+                expert_tokens_num_flag=True,
+                active_expert_range=[first_expert_idx, last_expert_idx],
+                quant_mode=quant_mode,
+                act_quant_type=act_quant_type,
+            )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
+        lora_routing = None
+        valid_rows = None
+        if ep_lora:
+            if expert_map is None:
+                raise ValueError("AllGather EP LoRA requires an explicit global-to-local expert map.")
+            lora_routing = recover_allgather_ep_lora_routing(
+                expanded_row_idx=expanded_row_idx,
+                topk_ids=topk_ids,
+                prepared_lora_indices=self.lora_context.prepared_lora_indices,
+                expert_map=expert_map,
+                num_dispatched_rows=sorted_hidden_states.shape[0],
+            )
+            valid_rows = lora_routing.expert_ids >= 0
+            # init_routing leaves capacity tails unwritten, including possible
+            # NaNs. Replace them rather than multiplying by a zero mask.
+            sorted_hidden_states = sorted_hidden_states.masked_fill(~valid_rows.unsqueeze(-1), 0)
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
             dynamic_scale=dynamic_scale if with_quant else None,
             group_list=expert_tokens,
             group_list_type=group_list_type,
+            lora_routing=lora_routing,
             combine_metadata=MoEAllGatherCombineMetadata(
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
+                valid_rows=valid_rows,
             ),
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
+        if combine_metadata.valid_rows is not None:
+            if hidden_states.shape[0] == 0:
+                return hidden_states.new_zeros(combine_metadata.restore_shape)
+            hidden_states = hidden_states.masked_fill(~combine_metadata.valid_rows.unsqueeze(-1), 0)
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
