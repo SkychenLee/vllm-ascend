@@ -325,6 +325,16 @@ def _recover_moe_lora_routing_all2all(
     return expert_per_row, lora_per_row
 
 
+def _resolve_moe_lora_routing(lora_routing, combined_indices):
+    """Fused routing needs no separate expert and adapter output tensors."""
+    if lora_routing is None:
+        if combined_indices is None:
+            raise ValueError("MoE LoRA requires routing or combined indices.")
+        return None, None, combined_indices.numel()
+    experts, slots = lora_routing
+    return experts, slots, experts.numel()
+
+
 def moe_lora_apply_w13(
     lora_context,
     *,
@@ -344,11 +354,11 @@ def moe_lora_apply_w13(
             caller via _recover_moe_lora_routing (AllGather) or
             _recover_moe_lora_routing_all2all (AlltoAll).
     """
-    expert_per_row, lora_per_row = lora_routing
+    expert_per_row, lora_per_row, rows = _resolve_moe_lora_routing(lora_routing, combined_indices)
     # EP rank may receive 0 dispatched tokens when all tokens route to
     # experts on other ranks. Skip LoRA to avoid passing empty tensors
     # to add_lora_fused_moe (which can trigger NPU kernel crashes).
-    if expert_per_row.numel() == 0:
+    if rows == 0:
         return
     lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
@@ -382,7 +392,7 @@ def moe_lora_apply_w13_swiglu_quant(
     grouped_routing=None,
 ):
     """Project LoRA A, communicate its TP shards, then fuse B/add/SwiGLU/quant."""
-    expert_per_row, lora_per_row = lora_routing
+    expert_per_row, lora_per_row, _ = _resolve_moe_lora_routing(lora_routing, combined_indices)
     return lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
         x=hidden_states,
@@ -409,10 +419,10 @@ def moe_lora_apply_w2(
     Reuses the per-row routing computed by ``moe_lora_apply_w13``; ``silu_out``
     is the activation output that fed the base down GMM.
     """
-    expert_per_row, lora_per_row = lora_routing
+    expert_per_row, lora_per_row, rows = _resolve_moe_lora_routing(lora_routing, combined_indices)
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
     # kernel crashes with empty tensors.
-    if expert_per_row.numel() == 0:
+    if rows == 0:
         return
     offset = 0
     if lora_context.fully_sharded:

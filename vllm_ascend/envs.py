@@ -88,6 +88,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (<=384 pairs). Experimental; default 0; valid 0/1; not sensitive.
     # Unsupported inputs and missing native ops retain the existing path.
     "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FUSED_ROUTING"),
+    # Fuse fully-sharded AllGather routing recovery and combined indices;
+    # cache single-adapter arithmetic on device, with mixed/padded fallback.
+    # Small rows+tokens<=1024 or Prefill rows8161..98304; native op required.
+    # Experimental; default 0; valid 0/1; not sensitive. Set before startup.
+    "VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER"),
     # Fuse SwiGLU (with optional clipping) and quant, retaining floating W2 LoRA
     # activations. Decode <=288 rows without clipping, <=384 with clipping;
     # width 2048 and native op required. Default 0; valid 0/1; not sensitive.

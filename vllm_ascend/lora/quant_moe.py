@@ -43,6 +43,7 @@ from vllm_ascend.lora.fused_moe import (
     supports_tp_fully_sharded_lora,
 )
 from vllm_ascend.lora.grouped_prefill import can_use_grouped_moe_lora, prepare_grouped_moe_lora_routing
+from vllm_ascend.lora.single_adapter import try_single_adapter_indices
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -288,21 +289,26 @@ def _apply_dynamic_int8_moe_lora(
 
     if mlp_compute_input.lora_routing is not None:
         gate_up_out = gate_up_out.masked_fill((mlp_compute_input.lora_routing.expert_ids < 0).unsqueeze(-1), 0)
+    combined_lora_indices = None
     if mlp_compute_input.lora_routing is not None:
         lora_routing = mlp_compute_input.lora_routing
     elif comm_type == MoECommType.ALLGATHER:
-        lora_routing = _recover_moe_lora_routing_allgather(
-            lora_context,
-            mlp_compute_input.expanded_row_idx,
-            mlp_compute_input.topk_ids,
+        combined_lora_indices = try_single_adapter_indices(
+            lora_context, mlp_compute_input.expanded_row_idx, mlp_compute_input.topk_ids
         )
+        lora_routing = None
+        if combined_lora_indices is None:
+            lora_routing = _recover_moe_lora_routing_allgather(
+                lora_context,
+                mlp_compute_input.expanded_row_idx,
+                mlp_compute_input.topk_ids,
+            )
     else:
         lora_routing = _recover_moe_lora_routing_all2all(
             lora_context,
             group_list=mlp_compute_input.group_list,
         )
     act_name = getattr(mlp_compute_input.activation, "value", mlp_compute_input.activation)
-    combined_lora_indices = None
     grouped_routing = None
     if (
         comm_type == MoECommType.ALLGATHER
@@ -326,9 +332,12 @@ def _apply_dynamic_int8_moe_lora(
         and _can_fuse_int8_lora_swiglu(lora_context, gate_up_out.shape[-1] // 2)
     ):
         if can_use_grouped_moe_lora(lora_context, quantized_input, gate_up_out.shape[-1] // 2):
-            expert_ids, slots = lora_routing
             experts = lora_context.w13_lora_a_stacked[0].shape[1]
-            combined_lora_indices = combined_moe_lora_indices(expert_ids, slots, lora_context.adapter_enabled, experts)
+            if combined_lora_indices is None:
+                expert_ids, slots = lora_routing
+                combined_lora_indices = combined_moe_lora_indices(
+                    expert_ids, slots, lora_context.adapter_enabled, experts
+                )
             groups = lora_context.w13_lora_a_stacked[0].shape[0] * experts
             grouped_routing = prepare_grouped_moe_lora_routing(combined_lora_indices, groups)
         quantized_activated, activated_scale, combined_lora_indices = moe_lora_apply_w13_swiglu_quant(
@@ -341,7 +350,7 @@ def _apply_dynamic_int8_moe_lora(
             topk_scales=mlp_compute_input.topk_scales,
             **(
                 {"combined_indices": combined_lora_indices, "grouped_routing": grouped_routing}
-                if grouped_routing is not None
+                if combined_lora_indices is not None
                 else {}
             ),
         )

@@ -25,6 +25,7 @@ vllm_envs.environment_variables["VLLM_ASCEND_MOE_LORA_GROUPED_PREFILL"] = _group
 # layers distinguish opt-in modes. Set these before constructing the engine.
 for _flag in (
     "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING",
+    "VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER",
     "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION",
     "VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR",
     "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY",

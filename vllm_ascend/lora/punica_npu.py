@@ -402,7 +402,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         *,
         topk_weights: torch.Tensor | None = None,
         sorted_token_ids: torch.Tensor | None = None,
-        expert_ids: torch.Tensor,
+        expert_ids: torch.Tensor | None,
         num_tokens_post_padded: torch.Tensor | None = None,
         max_lora_rank: int = 0,
         top_k_num: int = 1,
@@ -451,9 +451,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
-        if token_lora_mapping is None:
-            token_lora_mapping = self.token_lora_indices
-
         x2d = x.view(-1, x.shape[-1])
         y2d = y.view(-1, y.shape[-1])
         if input_scale is not None:
@@ -461,6 +458,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         elif x.dtype == torch.int8:
             raise ValueError("INT8 LoRA requires input_scale.")
         if combined_indices is None:
+            if expert_ids is None:
+                raise ValueError("MoE LoRA requires expert IDs when combined indices are absent.")
+            if token_lora_mapping is None:
+                token_lora_mapping = self.token_lora_indices
             num_experts = lora_a_stacked[0].shape[1]
             combined_idx = combined_moe_lora_indices(expert_ids, token_lora_mapping, adapter_enabled, num_experts)
         else:

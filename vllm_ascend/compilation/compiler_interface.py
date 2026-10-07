@@ -254,6 +254,7 @@ class AscendCompiler(CompilerInterface):
             # These opt-in branches alter the traced kernels and mutations.
             # Separate their persisted graphs even for an identical config.
             "moe_lora_fused_routing": envs.VLLM_ASCEND_MOE_LORA_FUSED_ROUTING,
+            "moe_lora_single_adapter": envs.VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER,
             "moe_lora_fused_activation": envs.VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION,
             "moe_lora_fused_shrink_pair": envs.VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR,
             "optimize_mtp_buffer_copy": envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY,

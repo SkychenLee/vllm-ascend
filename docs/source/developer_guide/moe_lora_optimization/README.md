@@ -7,6 +7,27 @@ Earlier evidence remains in `evidence/2026-10-06/`; new measurements and reviews
 are in `evidence/2026-10-07/`. Implementation does not imply support for every
 model, shape, hardware generation, or speculative configuration.
 
+## Current single-adapter status
+
+The [single-adapter guide](../moe_lora_single_adapter.md) documents the latest
+portable implementation contract and evidence. The final 2026-10-07
+fully-sharded comparison used `VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER=0/1`:
+
+| Metric | Flag OFF (0) | Flag ON (1) |
+| --- | --- | --- |
+| Output throughput | 316.02 tokens/s | 378.05 tokens/s |
+| Mean TTFT | 7.497 s | 7.512 s |
+| Mean TPOT | 19.120 ms | 16.313 ms |
+| DSpark acceptance | 75.30% | 89.33% |
+
+The observed throughput increase was 19.63% for this single pair of runs.
+The acceptance rate also changed, so this is a conditional end-to-end result
+and does not establish a pure kernel speedup or model quality equivalence.
+The existing Cube prefill path remains limited to ordinary TP+EP LoRA;
+fully-sharded Cube has not been implemented.
+
+## Earlier EP comparison
+
 The same TP8+EP8 setup completed eight requests, each with 8192 input and 4096
 output tokens, with `max_num_batched_tokens=16384` and DSpark5. Baseline throughput
 was 259.432696 output tokens/s; the combined candidate reached 278.559021, a 7.37%
@@ -80,13 +101,17 @@ are retained as measurement provenance.
 
 ## Publication validation
 
-This publication task ran no NPU work. Eleven related CPU/Meta/Mock test files
+The earlier publication task ran no NPU work. Eleven related CPU/Meta/Mock test files
 passed 388 tests with no NPU initialization. Functional Ascend Python imports
 came from this publication worktree; installed generated `_build_info` was the
 only metadata exception. The complete repository `bash format.sh ci` hooks
 passed before the signed-off local commit. These checks do not represent the
 full repository test suite or a new model performance run of the formatted
 publication worktree.
+
+The 388-test record belongs to that earlier publication and does not describe
+new single-adapter test results. Current evidence and its scope are recorded
+in the [single-adapter guide](../moe_lora_single_adapter.md).
 
 Publication preparation preserves prior native implementations and applies
 formatting only in this worktree. The new native kernels and installed model

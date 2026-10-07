@@ -1,12 +1,16 @@
 # AllGather W8A8 MoE＋LoRA 优化设计与算子使用约束
 
-更新日期：2026-10-07，Asia/Shanghai。适用对象：ds-ltc-v25-ep 容器、fully_sharede_lora_ok 分支及本轮已安装候选。本文从 2026-10-06 设计扩展而来，适用于 157_moe_ep_lora 发布副本。旧实验的证据保留在独立目录；公开材料范围与路径占位符见 [发布说明](README.md)。
+更新日期：2026-10-07，Asia/Shanghai。此前实验对象：ds-ltc-v25-ep 容器、fully_sharede_lora_ok 分支及当时已安装候选。本文从 2026-10-06 设计扩展而来，适用于 157_moe_ep_and_fully_sharede_lora 发布副本。旧实验的证据保留在独立目录；公开材料范围与路径占位符见 [发布说明](README.md)。
 
 本文汇总此前接入和本轮完成的全部相关优化，逐项说明融合方法、使用条件、原生接口限制、回退/报错、图与缓存约束，以及已有验证。这里的“已实现”指代码已接入，不表示全部模型、形状、硬件或 speculative 配置均已验证。
 
 快速定位：[优化总表](#33-全部优化状态) · [路由与索引](#5-路由与索引融合的全部限制) · [INT8融合](#6-非ep-fully-sharded-int8融合族) · [激活融合](#7-普通ep-swigluint8动态量化) · [Cube](#8-cube-w13-a-prefill) · [MTP与DSpark](#11-deepseek-v4-普通mtp-stash-与-dspark) · [配置](#12-配置使用矩阵与示例) · [验证](#13-精度图与性能证据)。
 
-## 1. 当前状态
+## 1. 最新 single-adapter 状态与此前路径快照
+
+最新 single-adapter 实现合约、可移植配置与证据见 [single-adapter 专项文档](../moe_lora_single_adapter.md)。2026-10-07 最终 fully-sharded `VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER=0/1` 对照，OFF/ON 输出吞吐为 **316.02/378.05 tok/s（+19.63%）**，平均 TTFT 为 7.497/7.512 s，平均 TPOT 为 19.120/16.313 ms，DSpark acceptance 为 75.30%/89.33%。两条件各一次测量，acceptance 也发生变化；这是条件性端到端结果，不建立纯 kernel 因果收益或模型质量等价。
+
+**fully-sharded Cube 尚未实现。** 下文既有 Cube 仅支持受限普通 TP＋EP LoRA。其余路径描述与第 13–16 节的实验、验收状态保留此前发布快照；其中“本轮/当前”指当时的 EP 优化实验，最新 fully-sharded single-adapter 状态以专项文档为准。
 
 当前有两条主计算路径和一个受限 Prefill 替换路径：
 
@@ -126,6 +130,7 @@ INT8 x + scale
 | 无效容量行清零 | 防止未写尾行/NaN污染 | AllGather EP | 正确性基础；不单独宣称加速 |
 | recover small/sort/large | 通用abs/sort/gather替换 | 非EP fully-sharded | 既有自动分派，无env gate |
 | combined_indices native | mask与adapter/expert编码 | 多路径helper | 既有融合；FUSED_ROUTING默认0 |
+| single-adapter metadata | recover＋mask＋combined-index融合，兼容混合adapter | 非EP＋fully-sharded AllGather，受限small/large rows | 已接入；SINGLE_ADAPTER默认0，[合约与证据](../moe_lora_single_adapter.md) |
 | W13/W2 indices复用 | 同forward少做一次编码 | 普通AllGather EP，同A前两维 | 已接入；flag0也复用framework结果 |
 | EP routing native | sort/mask/map/slot恢复单kernel | M≤384/map≤512 | 已接入；FUSED_ROUTING默认0 |
 | INT8 A shrink及paired W13 A | 反量化、FP32 reduction、双A共读输入/rank-major通信 | 非EP fully-sharded | 既有核心native自动布局路径 |
@@ -135,7 +140,7 @@ INT8 x + scale
 | activation_quant | clip/SwiGLU/amax/quant、保留float W2 | 普通EP、I2048、noClip≤288/clip≤384 | 扩大生产guard已接入；FUSED_ACTIVATION默认0 |
 | floating W13 A pair | gate/up共享X及Cast、一次launch、跨核row步进 | 普通非fully-sharded、H4096/r16/M≤384 | 新特化已接入；FUSED_SHRINK_PAIR默认0，其他native shape仍旧双launch |
 | LoRA Decode graph | bucket、定长mapping、真实Prefill排除 | 符合descriptor的请求 | graph配置控制，fresh启动重新capture |
-| compiler/AOT cache隔离 | 图算子与MTP allocation分支隔离 | 编译/捕获 | 4个新flags＋MTP derived skip＋normalized method |
+| compiler/AOT cache隔离 | 图算子与MTP allocation分支隔离 | 编译/捕获 | 5个动态flags（含SINGLE_ADAPTER）＋MTP derived skip＋normalized method |
 | MTP row writer | 避免已观测whole-buffer copies | 保留普通buffer的DeepSeek V4路径 | COPY默认0，flag1 shape适配时scatter |
 | V1 DSpark skip普通MTP | allocation/copy/专用TP gather | 显式V1＋normalizedDSpark＋COPY1 | 已接入；V2/None/nonSpec/ordinaryMTP严格保留 |
 | whole-weight BF16 cache | 缓解weight读开销 | 独立prototype | 未接入，无production开关 |
@@ -505,11 +510,11 @@ npugraph_ex使用force_eager=True、inplace_pass=False、clone_input/output=Fals
 
 ### 10.1 两层cache隔离
 
-AscendCompiler inner hash 与外层AOT compile_factors均包含 effective GROUPED_PREFILL 和四个动态bool：FUSED_ROUTING、FUSED_ACTIVATION、FUSED_SHRINK_PAIR、OPTIMIZE_MTP_BUFFER_COPY，保留torch_npu版本及既有编译参数。GROUPED hash使用实际import-time常量，不用后来env值冒充已traced行为。
+AscendCompiler inner hash 与外层AOT compile_factors均包含 effective GROUPED_PREFILL 和五个动态bool：FUSED_ROUTING、SINGLE_ADAPTER（`VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER`）、FUSED_ACTIVATION、FUSED_SHRINK_PAIR、OPTIMIZE_MTP_BUFFER_COPY，保留torch_npu版本及既有编译参数。GROUPED hash使用实际import-time常量，不用后来env值冒充已traced行为。
 
 MTP allocation分支还依赖runner/spec：inner hash新增与模型构造一致的 `skip_dspark_mtp_buffer` derived bool（COPY1＋explicitV1＋spec非None＋use_dspark）。外层已由上游官方compile_factors包含VLLM_USE_V2_MODEL_RUNNER（False/True/None分别），不新增虚拟env项。上游SpeculativeConfig原hash只用共享aux boolean等因素，DSpark/eagle3可能相同；本地幂等wrapper仅COPY1时hash `(original_hash, normalized method)`，COPY0原hash原样返回。wrapper用wraps/闭包保留original和marker，重复import/reload不重复包裹，不改config method、runner选择或模型语义。
 
-UT验证四flag16组合、persistent cache开关miss及恢复、同aux DSpark/eagle3隔离、flag0 original hash一致性、runnerFalse/True/None、derivedskip保留/跳过、重复wrap/reload；[cache审计](evidence/2026-10-07/analysis/compile-cache-isolation-update.md)。**切开关或runner/spec配置须重启engine并重新编译/capture**；隔离不能让已捕获graph/已构造buffer随env自动更新。当前正式对照禁用编译磁盘cache也不代表可以删除长期隔离。Cube只允许eager，未作为这四个graph factors新增项。
+此前 UT 验证四flag16组合、persistent cache开关miss及恢复、同aux DSpark/eagle3隔离、flag0 original hash一致性、runnerFalse/True/None、derivedskip保留/跳过、重复wrap/reload；[历史cache审计](evidence/2026-10-07/analysis/compile-cache-isolation-update.md)。该四flag记录不代表新增 SINGLE_ADAPTER 的验证，最新证据见 [专项文档](../moe_lora_single_adapter.md)。**切开关或runner/spec配置须重启engine并重新编译/capture**；隔离不能让已捕获graph/已构造buffer随env自动更新。当前正式对照禁用编译磁盘cache也不代表可以删除长期隔离。Cube只允许eager，未作为这五个graph factors新增项。
 
 DECODE_GRAPH_EVIDENCE是rank0 CPU dispatch日志，只说明选择的descriptor，不能证明设备replay完成。
 
@@ -581,6 +586,7 @@ target aux在stash之前收集，skip只省stash服务的临时flatten/gather，
 | 环境变量 | 功能与使用条件 |
 | --- | --- |
 | VLLM_ASCEND_MOE_LORA_FUSED_ROUTING | combined≤98304、EP pairs≤384/map≤512，分别guard；设1不代表两者都命中 |
+| VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER | 非EP＋fully-sharded AllGather metadata融合；形状、存储与回退见[专项文档](../moe_lora_single_adapter.md) |
 | VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION | 普通AllGatherEP、silu、I2048、无topk scales，noClipR≤288/positiveclipR≤384 |
 | VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR | 普通float W13双A、H4096/r16/M≤384、ND/base0/2；不用于INT8/fully-sharded/W2 |
 | VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY | 第11节显式V1 DSpark skip；其他保留buffer配置合法shape走row writer |

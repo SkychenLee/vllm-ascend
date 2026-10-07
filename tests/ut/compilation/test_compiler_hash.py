@@ -20,6 +20,7 @@ from vllm_ascend.patch.platform import patch_compile_cache
 
 DYNAMIC_BRANCH_FLAGS = (
     "VLLM_ASCEND_MOE_LORA_FUSED_ROUTING",
+    "VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER",
     "VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION",
     "VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR",
     "VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY",
@@ -178,7 +179,7 @@ def test_all_decode_branch_combinations_isolate_both_cache_layers(monkeypatch):
             if all(value == "0" for value in flags):
                 assert compiler_key == default_compiler
                 assert aot_compile_hash_factors(config) == default_aot
-        assert len(compiler_keys) == len(aot_keys) == 16
+        assert len(compiler_keys) == len(aot_keys) == 2 ** len(DYNAMIC_BRANCH_FLAGS)
 
 
 def fake_speculative_config(method):
