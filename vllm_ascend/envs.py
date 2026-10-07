@@ -93,6 +93,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Small rows+tokens<=1024 or Prefill rows8161..98304; native op required.
     # Experimental; default 0; valid 0/1; not sensitive. Set before startup.
     "VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER"),
+    # Cube W13/W2 A projections for single-adapter, non-EP TP8 fully-sharded
+    # A3 W8A8 eager prefill, 16384..98304 expert rows; BF16 rank16/H4096/E256.
+    # Experimental; default 0; valid 0/1; not sensitive. Set before startup.
+    "VLLM_ASCEND_MOE_LORA_FULLY_SHARDED_CUBE": lambda: _strict_binary_env("VLLM_ASCEND_MOE_LORA_FULLY_SHARDED_CUBE"),
     # Fuse SwiGLU (with optional clipping) and quant, retaining floating W2 LoRA
     # activations. Decode <=288 rows without clipping, <=384 with clipping;
     # width 2048 and native op required. Default 0; valid 0/1; not sensitive.

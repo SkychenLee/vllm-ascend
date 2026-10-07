@@ -390,6 +390,7 @@ def moe_lora_apply_w13_swiglu_quant(
     topk_scales=None,
     combined_indices=None,
     grouped_routing=None,
+    sharded_cube_routing=None,
 ):
     """Project LoRA A, communicate its TP shards, then fuse B/add/SwiGLU/quant."""
     expert_per_row, lora_per_row, _ = _resolve_moe_lora_routing(lora_routing, combined_indices)
@@ -408,11 +409,20 @@ def moe_lora_apply_w13_swiglu_quant(
         topk_weights=topk_scales,
         **({"combined_indices": combined_indices} if combined_indices is not None else {}),
         **({"grouped_routing": grouped_routing} if grouped_routing is not None else {}),
+        **({"sharded_cube_routing": sharded_cube_routing} if sharded_cube_routing is not None else {}),
     )
 
 
 def moe_lora_apply_w2(
-    lora_context, *, down_out, silu_out, lora_routing, input_scale=None, combined_indices=None, grouped_routing=None
+    lora_context,
+    *,
+    down_out,
+    silu_out,
+    lora_routing,
+    input_scale=None,
+    combined_indices=None,
+    grouped_routing=None,
+    sharded_cube_routing=None,
 ):
     """Add the w2 LoRA delta into ``down_out`` (in place), after the down GMM.
 
@@ -441,6 +451,7 @@ def moe_lora_apply_w2(
         **({"input_scale": input_scale} if input_scale is not None else {}),
         **({"combined_indices": combined_indices} if combined_indices is not None else {}),
         **({"grouped_routing": grouped_routing} if grouped_routing is not None else {}),
+        **({"sharded_cube_routing": sharded_cube_routing} if sharded_cube_routing is not None else {}),
     )
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for

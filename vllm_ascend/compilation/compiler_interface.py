@@ -255,6 +255,7 @@ class AscendCompiler(CompilerInterface):
             # Separate their persisted graphs even for an identical config.
             "moe_lora_fused_routing": envs.VLLM_ASCEND_MOE_LORA_FUSED_ROUTING,
             "moe_lora_single_adapter": envs.VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER,
+            "moe_lora_fully_sharded_cube": envs.VLLM_ASCEND_MOE_LORA_FULLY_SHARDED_CUBE,
             "moe_lora_fused_activation": envs.VLLM_ASCEND_MOE_LORA_FUSED_ACTIVATION,
             "moe_lora_fused_shrink_pair": envs.VLLM_ASCEND_MOE_LORA_FUSED_SHRINK_PAIR,
             "optimize_mtp_buffer_copy": envs.VLLM_ASCEND_OPTIMIZE_MTP_BUFFER_COPY,

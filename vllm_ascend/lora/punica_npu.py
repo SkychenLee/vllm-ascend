@@ -13,6 +13,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
 from vllm_ascend.lora.cube_moe import single_adapter_slot
+from vllm_ascend.lora.fully_sharded_cube import shrink_cube_prefill
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -118,7 +119,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
         self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
-        if envs_ascend.VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL:
+        if envs_ascend.VLLM_ASCEND_MOE_LORA_W13_CUBE_PREFILL or envs_ascend.VLLM_ASCEND_MOE_LORA_FULLY_SHARDED_CUBE:
             self.cube_single_slot = single_adapter_slot(mapping.index_mapping, lora_index_to_id)
 
     def _shrink_prefill(
@@ -420,6 +421,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         grouped_routing=None,
         cube_routing=None,
         cube_state=None,
+        sharded_cube_routing=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -480,7 +482,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             shards = full_rank // local_rank
             rows = x2d.shape[0]
             paired = torch.empty((rows, 2 * local_rank), dtype=torch.float32, device=x2d.device)
-            if grouped_routing is not None:
+            if sharded_cube_routing is not None:
+                if not fully_sharded:
+                    raise ValueError("Fully sharded Cube requires TP rank sharding")
+                shrink_cube_prefill(x2d, lora_a_stacked, combined_idx, input_scale, paired, sharded_cube_routing)
+            elif grouped_routing is not None:
                 torch.ops._C_ascend.bgmv_shrink_int8_pair_grouped(
                     x2d,
                     paired_a_stacked.view(2, -1, local_rank, x2d.shape[-1]),
@@ -589,7 +595,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             else:
                 allocate_shrink = torch.empty if input_scale is not None else torch.zeros
                 shrink_out = allocate_shrink((x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device)
-                if input_scale is not None:
+                if sharded_cube_routing is not None:
+                    if not fully_sharded or input_scale is None or len(lora_a_stacked) != 1:
+                        raise ValueError("Fully sharded Cube W2 requires one INT8 A projection")
+                    shrink_cube_prefill(
+                        x2d, lora_a_stacked, combined_idx, input_scale, shrink_out, sharded_cube_routing
+                    )
+                elif input_scale is not None:
                     # Keep the existing INT8 W13/W2 shrink path unchanged.
                     torch.ops._C_ascend.bgmv_shrink_int8(x2d, a_flat, combined_idx, input_scale, shrink_out)
                 else:

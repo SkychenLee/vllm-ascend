@@ -1,0 +1,200 @@
+{
+  "status": "PASS",
+  "date_local": "2026-10-08",
+  "timezone": "Asia/Shanghai",
+  "scope": "One fresh-engine OFF/ON performance pair; no model-quality equivalence claim.",
+  "configuration": {
+    "model": "DeepSeek-V4-Flash-0731-w8a8",
+    "tp": 8,
+    "ep": false,
+    "fully_sharded_lora": true,
+    "lora_rank": 16,
+    "dspark_speculative_tokens": 5,
+    "prefix_cache": false,
+    "visible_devices": [
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "requests": 8,
+    "concurrency": 8,
+    "input_tokens_per_request": 8192,
+    "output_tokens_per_request": 4096,
+    "max_num_batched_tokens": 16384,
+    "max_num_seqs": 8,
+    "max_model_len": 128000,
+    "gpu_memory_utilization": 0.93,
+    "seed": 2026100702,
+    "only_changed_flag": "VLLM_ASCEND_MOE_LORA_FULLY_SHARDED_CUBE"
+  },
+  "comparison": {
+    "identical_output_sequences": 0,
+    "throughput_change_percent": 10.80021169533094,
+    "ttft_change_percent": -6.70871934928674,
+    "caveat": "One fresh-engine pair using random-token prompts; acceptance and output variation can affect throughput. This is not a model-quality evaluation or isolated kernel speedup."
+  },
+  "tests": {
+    "targeted_cpu_checks": 302,
+    "npu_regression_cases": 3,
+    "native_operator_cases": 24,
+    "full_format_ci": "PASS"
+  },
+  "scenarios": {
+    "cube-off": {
+      "status": "PASS",
+      "measurement_wall_s": 87.01353701000335,
+      "verified_output_tokens": 32768,
+      "effective_output_tokens_per_second": 376.58508234451944,
+      "ttft_s": {
+        "count": 8,
+        "mean": 7.402688469999703,
+        "p50": 7.399753675010288,
+        "p95": 12.61260576300556,
+        "min": 1.6207540899631567,
+        "max": 13.190666750015225
+      },
+      "tpot_ms": {
+        "count": 8,
+        "mean": 16.785130813491907,
+        "p50": 16.381901376066224,
+        "p95": 18.597641920151194,
+        "min": 15.113120449318009,
+        "max": 18.837550588526966
+      },
+      "dspark": {
+        "drafts": 6156.0,
+        "draft_tokens": 30780.0,
+        "accepted_draft_tokens": 26626.0,
+        "draft_acceptance_rate": 0.8650422352176738
+      },
+      "kv_capacity_tokens": 157554,
+      "native_cube_kernel_counts": {},
+      "profiled_kernel_examples": {},
+      "independent_checks": 90,
+      "devices_released": true
+    },
+    "cube-on": {
+      "status": "PASS",
+      "measurement_wall_s": 78.5319230700261,
+      "verified_output_tokens": 32768,
+      "effective_output_tokens_per_second": 417.2570684507639,
+      "ttft_s": {
+        "count": 8,
+        "mean": 6.906062876245414,
+        "p50": 6.90108713999507,
+        "p95": 11.777487911510981,
+        "min": 1.501082659990061,
+        "max": 12.323967310017906
+      },
+      "tpot_ms": {
+        "count": 8,
+        "mean": 16.029044176737997,
+        "p50": 15.742000334547043,
+        "p95": 18.246902505981893,
+        "min": 14.064808627584853,
+        "max": 18.432934871793446
+      },
+      "dspark": {
+        "drafts": 5826.0,
+        "draft_tokens": 29130.0,
+        "accepted_draft_tokens": 26945.0,
+        "draft_acceptance_rate": 0.9249914177823549
+      },
+      "kv_capacity_tokens": 157554,
+      "native_cube_kernel_counts": {
+        "W13": 559,
+        "W2": 86
+      },
+      "profiled_kernel_examples": {
+        "W13": {
+          "Name": "aclnnGroupedMatmulV5_GroupedMatmul_GroupedMatmul",
+          "Input Shapes": "\"8192,4096;256,4,4096;;;;;;256\"",
+          "Input Data Types": "FLOAT;FLOAT;FLOAT;UINT64;FLOAT;FLOAT16;FLOAT16;INT64",
+          "Output Shapes": "\"8192,4\"",
+          "Output Data Types": "FLOAT",
+          "Accelerator Core": "MIX_AIC"
+        },
+        "W2": {
+          "Name": "aclnnGroupedMatmulV5_GroupedMatmul_GroupedMatmul",
+          "Input Shapes": "\"49152,256;256,16,256;;;;;;256\"",
+          "Input Data Types": "FLOAT;FLOAT;FLOAT;UINT64;FLOAT;FLOAT16;FLOAT16;INT64",
+          "Output Shapes": "\"49152,16\"",
+          "Output Data Types": "FLOAT",
+          "Accelerator Core": "MIX_AIC"
+        }
+      },
+      "independent_checks": 90,
+      "devices_released": true
+    }
+  },
+  "runtime_source_hashes": {
+    "csrc/bgmv_shrink_pair_validation.h": "deec37900faf1e72d979dc58ada44e709fdbc036354526c380a6380744f81b28",
+    "csrc/kernels/bgmv_shrink.cpp": "600974537f5db6f7057fa9cb22a1896cc85b8a8d04c4ad411bfc91487cf5d92f",
+    "csrc/kernels/bgmv_shrink_pair_config.h": "68364907d8b5a7cc7257bdc5bc8684162564839888473bcee5322645d923ce07",
+    "csrc/kernels/moe_lora_activation.cpp": "368a459490a1447513c0825f2029b874e26b73ac64feef40062c775bad570ab9",
+    "csrc/kernels/moe_lora_activation.h": "a1d915fb81be26ad17c7e34209c5496c4d9ded4eab5bec3c5e7b6a62df66987c",
+    "csrc/kernels/moe_lora_ep_routing.cpp": "0453e2dbe84444296b6aee7851d3ee2e4126598db2140e480b8b90a376f11de6",
+    "csrc/kernels/moe_lora_ep_routing.h": "e8b87b54ff893afa06991763a1a0277ec6dccdaae90e23f78789b9bd61875482",
+    "csrc/kernels/moe_lora_single_adapter_indices.cpp": "806905abed1212568aebc61d8db0d8016da090ccfd8ab1c33d5e79babf66355e",
+    "csrc/kernels/moe_lora_single_adapter_indices.h": "e28b0de6c38416314a5ed0d446a9593cdb3d431bce65c224b0e083e63c972d94",
+    "csrc/moe_lora_activation.cpp": "a250b4a513b517ed4fdac05ae0f58f3007f16cd549459ac19cd60730a099d89e",
+    "csrc/moe_lora_ep_routing.cpp": "14720e1cdb90e03d5bd0a54fafee6a69981aadb85a269db06839b364c72ecde0",
+    "csrc/moe_lora_single_adapter_indices.cpp": "13e2c20114603cff732ef47c969ed164afd626eabbbba5d170236f9eab72ca64",
+    "csrc/torch_binding.cpp": "454f6be60f64c8da39ea7128f68de9063816a653f3b559f5f657a50a86b402d9",
+    "csrc/torch_binding_meta.cpp": "261dfafe1193858c696679f218a8398977be5985990e8112fb0a480fb944a497",
+    "vllm_ascend/compilation/compiler_interface.py": "b3651997ba207f244bd9750759f4b9bade73753e63dfe9bb5a2aa543da305b41",
+    "vllm_ascend/envs.py": "ea0cb68a5e404043fa95701e21852ddbebe00d4205d4459e889d27e52a546f20",
+    "vllm_ascend/lib/libvllm_ascend_kernels.so": "6944ea3a18d978e63266586a79240087310fe5cf4914238f4a0c132f54f0ddc3",
+    "vllm_ascend/libvllm_ascend_kernels.so": "6944ea3a18d978e63266586a79240087310fe5cf4914238f4a0c132f54f0ddc3",
+    "vllm_ascend/lora/activation.py": "e9238576a601bc9f38b78dc97b175954606fe74826ec72e03ed1968cda666b8b",
+    "vllm_ascend/lora/combined_indices.py": "b29304c9df821b5d73462d3d6e96a0f9ab4af83778b7dbc8903cf123a30fa029",
+    "vllm_ascend/lora/cube_moe.py": "8a9e5397f3402f4aab5a2c3806bee8b2d2735942a106ef5d85ddb7ab26ec7186",
+    "vllm_ascend/lora/fully_sharded_cube.py": "aaaa2337e792c66886be03e43c4814fcab62ac5b2a964dd2fbda6128d220c5ff",
+    "vllm_ascend/lora/fused_moe.py": "1ad88b81170ab9e709926191fa9278651cb33c6038b1a01389c35cf1d04645c0",
+    "vllm_ascend/lora/punica_npu.py": "8e79c68c73a14e3238e5fe9bcb86ebf21d43203aa8360f19ce2a18104145f29a",
+    "vllm_ascend/lora/quant_moe.py": "5c2c07b4d8d97b3fb18a75f307e19b37d6f8a7a6852e766b2de2a33e234d1c0f",
+    "vllm_ascend/lora/routing.py": "a71de30ebf28b9dc43880cd27d514a175c5cf8ac85a0e91b221993304fe092a7",
+    "vllm_ascend/lora/single_adapter.py": "0e522edf7359f3c44f707f6c6f565501e2a2047185f90148e9d06159437da4b9",
+    "vllm_ascend/models/deepseek_v4.py": "727dea8949d971873cfe4948b26acff4c5d204235818743f1123f490b8a5f733",
+    "vllm_ascend/models/deepseek_v4_dspark.py": "12b4758a01df81f6a5a0d98af411f5296dd4cc39f71fda045bd485f600438746",
+    "vllm_ascend/patch/platform/patch_compile_cache.py": "ca02d853f8d17bbd4b4483d272fa7c0244246c1fa5c6fcbdf8a2720832dd6849",
+    "vllm_ascend/spec_decode/dspark_proposer.py": "916cad15b496ca143e4c5cef627754760089215ad674dde5b9d94003b5c7ccf1",
+    "vllm_ascend/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": "dba2e82b6d53ca68cd28a7dbed141fa18fd3c446762c0cc78ce724dd30a1f797"
+  },
+  "artifact_digests": {
+    "bench/cube-off-full/result.json": "962d4376b4fbebf2e744171c0c1fce7cad694ca166f080c652317d6c0124ff43",
+    "bench/cube-off-full/parameters.json": "8aed5818c0f60dd2dcc76ae21642a78b59535281236a4818ae8e8f2ce3adccbc",
+    "bench/cube-off-full/prompts.json": "69e1529bfb3b8225c8ea57ff4228c3ab36e191e321af9dd8819ac63893de4ff7",
+    "bench/cube-off-full/requests.jsonl": "823e63b509b83279ac690a8f900e936ea453ca3fc027c62c9a5d327fe4eca91e",
+    "bench/cube-off-full/metrics-before.txt": "a006311dc0b9acd1064da2a6161d8b31122dbed09b19ca262586811904c57519",
+    "bench/cube-off-full/metrics-after.txt": "4c83c23af1b9d5f74987cbe1190d2df0851bdf70c46b4097cd7f93860fa426e0",
+    "bench/cube-off-service-owner.json": "06c9bdb00acc78bf8ba54e691fceab4721a485ab13fa15d04f107e05ae9a0517",
+    "bench/cube-off-service-stop.json": "02c40603d9c8528bbc2acccb4f1c5e0ee33fe58205d76012448ba6833ac89555",
+    "bench/cube-off-native-path-evidence.json": "09c7210d847820b9ace0d00c924494312a256649e81883661002b6c8e0e11ec4",
+    "bench/cube-off-independent-validation.json": "90385cbe43b38a465908b604f1b713c3f24ba756bfe5086e984e3d7d5622d170",
+    "bench/cube-off-warmup-profile-control.json": "3199c6ed0196d59c364341d5ed32ea28aac6de3f1c54297689229c210d79a575",
+    "bench/cube-off-warmup-kernel_details.csv": "dedaa55673eb2e0c0513d03216732e1041e39c630c190d6bbee4c8dec62d730a",
+    "bench/cube-on-full/result.json": "b16b768ed8211ef6338db04e7a95923a09f06e694e5e9afd36fd1caa8667e5d0",
+    "bench/cube-on-full/parameters.json": "599aa5cee68e89f2ce2268a95715b1f5861e9ca8cfea8d23733f5d85e38364b5",
+    "bench/cube-on-full/prompts.json": "69e1529bfb3b8225c8ea57ff4228c3ab36e191e321af9dd8819ac63893de4ff7",
+    "bench/cube-on-full/requests.jsonl": "ccfeff6c6d7d1326533833ea952422399610b7142f9caa16ac3f7352d9dedfe6",
+    "bench/cube-on-full/metrics-before.txt": "9cb7eb3720286581493fc3dfb7b07239e3f288c12a647ddda16a916dc8090e27",
+    "bench/cube-on-full/metrics-after.txt": "37643e93537fa4ca91e2a368d5fdc410e67de0265ef53078bc5c4b5ad39fde9c",
+    "bench/cube-on-service-owner.json": "2d293bbbe3641248868ae7ea5da30002464c3373ca93ceb75d4e5b81de212d6c",
+    "bench/cube-on-service-stop.json": "0f85a9647962f86c0a3f7149595d405b7dbd0b49b726784363647c5bd1e4432b",
+    "bench/cube-on-native-path-evidence.json": "da72637efbd05b3583c6d4e61b65e717df5a0312f72aeedc106e1b7c7ea27bab",
+    "bench/cube-on-independent-validation.json": "754611d0f8a7baf4b3b798bdd30940b72a63ef829c6676d88e7f0ef79ab778fc",
+    "bench/cube-on-warmup-profile-control.json": "f08875477a5cb0f1fa8cd62956666ffb7e63dade56dd9f28e8a071e226656cb3",
+    "bench/cube-on-warmup-kernel_details.csv": "970c2a614edf8188d50b3815c42e07250ee1313795d7293187644548b8aede3b",
+    "cube-native.json": "5b4f026b500ca9d090abb94f1557a3954180d6104f7727f79a96bd3eb966549e",
+    "cpu-final.log": "bdd368cc6806632484f260ece30a53bb2c58165a553e9a84a2fa28e9bc0dc148",
+    "npu-st-final.log": "570f1ee3932a6bf386fe24ecd3a7af64a15b02f568d26b4a96a777c1e3c09d8d",
+    "installed-candidate-manifest.json": "1351120e5b0ee8fe9a0685e31f631f888099637f985d5c4c3c9a21f643efb584",
+    "format-ci-final.log": "61551b98eaf391e93b0062acbdcd66300e5cd272ac4f49c356bcbe7fce82ebbf"
+  }
+}

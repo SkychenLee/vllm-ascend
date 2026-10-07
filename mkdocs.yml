@@ -303,6 +303,7 @@ nav:
         - developer_guide/Design_Documents/npugraph_ex.md
         - developer_guide/moe_lora_optimization/design.md
         - developer_guide/moe_lora_single_adapter.md
+        - developer_guide/moe_lora_fully_sharded_cube.md
     - Evaluation:
         - developer_guide/evaluation/index.md
         - developer_guide/evaluation/using_evalscope.md

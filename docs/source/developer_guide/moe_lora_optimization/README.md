@@ -23,8 +23,10 @@ fully-sharded comparison used `VLLM_ASCEND_MOE_LORA_SINGLE_ADAPTER=0/1`:
 The observed throughput increase was 19.63% for this single pair of runs.
 The acceptance rate also changed, so this is a conditional end-to-end result
 and does not establish a pure kernel speedup or model quality equivalence.
-The existing Cube prefill path remains limited to ordinary TP+EP LoRA;
-fully-sharded Cube has not been implemented.
+The existing Cube prefill flag remains limited to ordinary TP+EP LoRA.
+The independent [fully-sharded Cube path](../moe_lora_fully_sharded_cube.md)
+now accelerates large eager prefill A projections behind a separate,
+default-off flag; see that guide for its limits and validation.
 
 ## Earlier EP comparison
 

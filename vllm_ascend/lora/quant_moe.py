@@ -28,11 +28,13 @@ import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.lora.activation import can_fuse_moe_lora_activation
 from vllm_ascend.lora.combined_indices import combined_moe_lora_indices
 from vllm_ascend.lora.cube_moe import supports_cube_target_prefill_context
+from vllm_ascend.lora.fully_sharded_cube import prepare_cube_prefill
 from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_all2all,
     _recover_moe_lora_routing_allgather,
@@ -310,6 +312,7 @@ def _apply_dynamic_int8_moe_lora(
         )
     act_name = getattr(mlp_compute_input.activation, "value", mlp_compute_input.activation)
     grouped_routing = None
+    sharded_cube_routing = None
     if (
         comm_type == MoECommType.ALLGATHER
         and getattr(lora_context, "use_ep", False)
@@ -331,6 +334,14 @@ def _apply_dynamic_int8_moe_lora(
         and act_name == "silu"
         and _can_fuse_int8_lora_swiglu(lora_context, gate_up_out.shape[-1] // 2)
     ):
+        if envs_ascend.VLLM_ASCEND_MOE_LORA_FULLY_SHARDED_CUBE:
+            sharded_cube_routing = prepare_cube_prefill(
+                lora_context,
+                quantized_input,
+                mlp_compute_input.group_list,
+                mlp_compute_input.group_list_type,
+                get_forward_context(),
+            )
         if can_use_grouped_moe_lora(lora_context, quantized_input, gate_up_out.shape[-1] // 2):
             experts = lora_context.w13_lora_a_stacked[0].shape[1]
             if combined_lora_indices is None:
@@ -348,6 +359,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_routing=lora_routing,
             swiglu_limit=mlp_compute_input.swiglu_limit,
             topk_scales=mlp_compute_input.topk_scales,
+            **({"sharded_cube_routing": sharded_cube_routing} if sharded_cube_routing is not None else {}),
             **(
                 {"combined_indices": combined_lora_indices, "grouped_routing": grouped_routing}
                 if combined_lora_indices is not None
@@ -415,6 +427,7 @@ def _apply_dynamic_int8_moe_lora(
         **({"input_scale": activated_scale} if allgather_int8 else {}),
         **({"combined_indices": combined_lora_indices} if combined_lora_indices is not None else {}),
         **({"grouped_routing": grouped_routing} if grouped_routing is not None else {}),
+        **({"sharded_cube_routing": sharded_cube_routing} if sharded_cube_routing is not None else {}),
     )
     return down_out, before_gmm2_evt
 
