@@ -798,18 +798,14 @@ static bool add_lora_eligible(const at::Tensor& y, const at::Tensor& x,
             return false;
         }
         int64_t r = lora_a[s].size(2);
-        if (r % 16 != 0) {
-            *reason = "lora rank is not a multiple of 16";
-            return false;
-        }
-        if (64 % r != 0) {
-            // z2 replicates z1 into a 64-element repeat; a rank that does not
-            // divide 64 (e.g. 48) would overflow the dup buffer (UB)
-            *reason = "lora rank must divide 64 (supported: 16/32/64)";
-            return false;
-        }
-        if (r > 64) {
-            *reason = "lora rank is > 64 (fused kernel reduce-tree limit)";
+        // z2 replicates z1 into a 64-element repeat (rank must divide 64)
+        // and z1's GM workspace rows must stay 32B-aligned (rank multiple
+        // of 8); the reduce tree covers exactly 8/16/32/64. Narrow ranks
+        // (< 8) and non-divisors (e.g. 24, 48) stay on the bgmv/gmm
+        // fallback.
+        if (r != 8 && r != 16 && r != 32 && r != 64) {
+            *reason = "lora rank must be one of 8/16/32/64 "
+                      "(fused kernel reduce-tree shapes)";
             return false;
         }
         if (output_slices[s] % 16 != 0) {

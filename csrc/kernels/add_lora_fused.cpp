@@ -20,9 +20,11 @@
  *     with src0RepStride=0, Block/PairReduceSum tree).
  *
  * Constraints (enforced by add_lora_eligible in torch_binding.cpp):
- *   - R in {16, 32, 64}: must divide 64 (z2 replicates z1 into a
+ *   - R in {8, 16, 32, 64}: must divide 64 (z2 replicates z1 into a
  *     64-element repeat; also selects the reduce-tree shape below) and be a
- *     multiple of 16 (GM copy alignment)
+ *     multiple of 8 (z1out row writes / z1 loads must stay 32B-aligned).
+ *     R=8 reduces with a single BlockReduceSum (one output per 32B block),
+ *     mirroring bgmv_expand's rank-8 path.
  *   - H1 / every H2_s / y width are multiples of 16; <= 4 slices;
  *     offset_start == 0 (the kernels address y from column 0)
  *   - indices are int64; -1 skips the token (overwrite mode zeroes it)
@@ -165,7 +167,7 @@ public:
             }
             // fold scale (fp32, same rounding as the v1 vector Muls) and
             // write this group's segment to the GM workspace (32B-aligned:
-            // rankBlock is a multiple of 8 and R % 16 == 0)
+            // rankBlock is a multiple of 8 and R % 8 == 0)
             for (uint32_t r = 0; r < (r1 - r0); ++r) {
                 stage.SetValue(r, stage.GetValue(r) * scale_);
             }
@@ -342,7 +344,14 @@ private:
         Mul(wTmp, dup, wTmp, NUM_ELEMENTS_PER_REPEAT, blockReduceRepeatCount, dotProductParams_);
         AscendC::PipeBarrier<PIPE_V>();
 
-        if (R_ == 16) {
+        if (R_ == 8) {
+            // one output per 32B block: the intra-block reduction IS the
+            // full dot (bgmv_expand's rank-8 shape)
+            BlockReduceSum(yLocal[progress], wTmp, blockReduceRepeatCount,
+                           NUM_ELEMENTS_PER_REPEAT, REDUCE_DST_REP_STRIDE,
+                           REDUCE_SRC_BLK_STRIDE, REDUCE_SRC_REP_STRIDE);
+            AscendC::PipeBarrier<PIPE_V>();
+        } else if (R_ == 16) {
             BlockReduceSum(wTmp, wTmp, blockReduceRepeatCount, NUM_ELEMENTS_PER_REPEAT,
                            REDUCE_DST_REP_STRIDE, REDUCE_SRC_BLK_STRIDE, REDUCE_SRC_REP_STRIDE);
             AscendC::PipeBarrier<PIPE_V>();
@@ -414,7 +423,7 @@ private:
     // Unified full-tile + remainder path (merges v1's main loop and
     // ComputeLastIteration); start offsets are multiples of 16 (chunk and
     // slice boundaries), W reads at la*R elements are 32B-aligned, and the
-    // remainder W count rem*R is a multiple of 64 (rem % 16, R % 16).
+    // remainder W count rem*R is a multiple of 64 (rem % 16, R % 8).
     __aicore__ inline void RangeSlice(int64_t t, uint32_t s, int64_t slot, uint32_t la,
                                       uint32_t lb, uint32_t yAddr)
     {
@@ -528,7 +537,7 @@ extern void add_lora_fused_impl(AscendType type, void *stream, void *x,
 {
     // ---- z1: (slice, token, rank-group) units; rank groups sized to fill
     // the machine at small B (rankBlock multiple of 8 keeps GM writes
-    // 32B-aligned; R % 16 == 0 keeps the tail group aligned too)
+    // 32B-aligned; R % 8 == 0 keeps the tail group aligned too)
     uint32_t targetGroups = (aivNum + batch - 1) / batch;
     if (targetGroups < 1) {
         targetGroups = 1;
@@ -553,8 +562,9 @@ extern void add_lora_fused_impl(AscendType type, void *stream, void *x,
     if (wantChunks < 1) {
         wantChunks = 1;
     }
-    // outPerTile in {128, 256, 512} (R in {16,32,64}) divides Y_OUT_TILE,
-    // so a plain cap preserves the W-tile quantum — no alignment fixups needed
+    // outPerTile in {128, 256, 512, 1024} (R in {8,16,32,64}) divides
+    // Y_OUT_TILE, so a plain cap preserves the W-tile quantum — no alignment
+    // fixups needed
     uint32_t chunk = outPerTile * ((totalH2 + wantChunks * outPerTile - 1) / (wantChunks * outPerTile));
     if (chunk > Y_OUT_TILE) {
         chunk = Y_OUT_TILE;

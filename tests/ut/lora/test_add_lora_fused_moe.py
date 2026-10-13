@@ -4,7 +4,10 @@
 Validates that the decode path (single opaque add_lora op with the in-tree
 fused kernel) produces the same result as the legacy per-row bgmv loop and
 the einsum reference, on DeepSeek-V4-Flash-shaped w13/w2 projections with
-expert-dispatched rows, mixed adapters and -1 (no-adapter) rows.
+expert-dispatched rows, mixed adapters and -1 (no-adapter) rows. Covers
+rank 16 natively and rank 8 (the fused kernel's BlockReduceSum branch),
+including native-r8 vs zero-padded-r16 equivalence and remainder-tile
+edges at the R=8 W-tile quantum.
 """
 
 import pytest
@@ -38,13 +41,13 @@ def _make_wrapper():
     return wrapper
 
 
-def _make_case(rows, seed, with_offset=0):
+def _make_case(rows, seed, with_offset=0, rank=R):
     torch.manual_seed(seed)
     x = (torch.randn(rows, H, device=DEV) * 0.3).bfloat16()
-    a13 = [(torch.randn(W, E_LOCAL, R, H, device=DEV) * 0.05).bfloat16() for _ in W13_SLICES]
-    b13 = [(torch.randn(W, E_LOCAL, s, R, device=DEV) * 0.05).bfloat16() for s in W13_SLICES]
-    a2 = [(torch.randn(W, E_LOCAL, R, I, device=DEV) * 0.05).bfloat16() for _ in W2_SLICES]
-    b2 = [(torch.randn(W, E_LOCAL, s, R, device=DEV) * 0.05).bfloat16() for s in W2_SLICES]
+    a13 = [(torch.randn(W, E_LOCAL, rank, H, device=DEV) * 0.05).bfloat16() for _ in W13_SLICES]
+    b13 = [(torch.randn(W, E_LOCAL, s, rank, device=DEV) * 0.05).bfloat16() for s in W13_SLICES]
+    a2 = [(torch.randn(W, E_LOCAL, rank, I, device=DEV) * 0.05).bfloat16() for _ in W2_SLICES]
+    b2 = [(torch.randn(W, E_LOCAL, s, rank, device=DEV) * 0.05).bfloat16() for s in W2_SLICES]
     # mixed adapters, ~1/4 rows without adapter (-1)
     token_lora_mapping = torch.randint(-1, W, (rows,), device=DEV, dtype=torch.long)
     adapter_enabled = torch.ones(W + 1, device=DEV, dtype=torch.int32)
@@ -116,6 +119,97 @@ def test_fused_matches_reference_and_legacy(rows):
     assert err_leg2 < 3e-2, err_leg2
 
 
+@pytest.mark.parametrize("rows", [8, 64, 256])
+def test_fused_r8_matches_reference_and_legacy(rows):
+    """Rank-8 stacks: the fused kernel's R=8 reduce branch (single
+    BlockReduceSum per 32B block) vs the fp32 reference and the legacy
+    bgmv loop."""
+    wrapper = _make_wrapper()
+    x, a13, b13, a2, b2, mapping, enabled, eids = _make_case(rows, seed=rows, rank=8)
+
+    y_f, ref = _reference(x, a13, b13, mapping, enabled, eids, 2 * I, 0, seed_y=100)
+    y_l = y_f.clone()
+    _run(wrapper, x, a13, b13, mapping, enabled, eids, y_f, fused=True)
+    _run(wrapper, x, a13, b13, mapping, enabled, eids, y_l, fused=False)
+    err_ref = (y_f.float() - ref).abs().max().item()
+    err_leg = (y_f.float() - y_l.float()).abs().max().item()
+    print(f"w13 r8 rows={rows}: vs-ref {err_ref:.2e}, vs-legacy {err_leg:.2e}")
+    assert err_ref < 3e-2, err_ref
+    assert err_leg < 3e-2, err_leg
+
+    x2 = (torch.randn(rows, I, device=DEV) * 0.3).bfloat16()
+    y_f2, ref2 = _reference(x2, a2, b2, mapping, enabled, eids, H, 0, seed_y=200)
+    y_l2 = y_f2.clone()
+    _run(wrapper, x2, a2, b2, mapping, enabled, eids, y_f2, fused=True)
+    _run(wrapper, x2, a2, b2, mapping, enabled, eids, y_l2, fused=False)
+    err_ref2 = (y_f2.float() - ref2).abs().max().item()
+    err_leg2 = (y_f2.float() - y_l2.float()).abs().max().item()
+    print(f"w2  r8 rows={rows}: vs-ref {err_ref2:.2e}, vs-legacy {err_leg2:.2e}")
+    assert err_ref2 < 3e-2, err_ref2
+    assert err_leg2 < 3e-2, err_leg2
+
+
+def _pad_stacks_to_r16(a_stack, b_stack):
+    """Zero-pad rank-8 stacks to rank 16 (A rows / B cols 8..15 = 0), the
+    layout vLLM core's set_lora produces for a rank-8 adapter served with
+    --max-lora-rank 16."""
+    a16, b16 = [], []
+    for a8 in a_stack:
+        a = torch.zeros(*a8.shape[:-2], 16, a8.shape[-1], device=DEV, dtype=a8.dtype)
+        a[..., :8, :] = a8
+        a16.append(a)
+    for b8 in b_stack:
+        # b8 is [W, E, out, 8]; build the [W, E, out, 16] pad directly
+        b = torch.zeros(*b8.shape[:-1], 16, device=DEV, dtype=b8.dtype)
+        b[..., :8] = b8
+        b16.append(b)
+    return a16, b16
+
+
+def test_r8_native_matches_padded_r16():
+    """Native R=8 run vs the same weights zero-padded to R=16 (what serving
+    with --max-lora-rank 16 does today): identical math — the padded lanes
+    contribute exact zeros — so only reduce-tree ordering differs."""
+    wrapper = _make_wrapper()
+    rows = 64
+    x, a13, b13, a2, b2, mapping, enabled, eids = _make_case(rows, seed=17, rank=8)
+    a13p, b13p = _pad_stacks_to_r16(a13, b13)
+
+    y8, _ = _reference(x, a13, b13, mapping, enabled, eids, 2 * I, 0, seed_y=42)
+    y16 = y8.clone()
+    _run(wrapper, x, a13, b13, mapping, enabled, eids, y8, fused=True)
+    _run(wrapper, x, a13p, b13p, mapping, enabled, eids, y16, fused=True)
+    err = (y8.float() - y16.float()).abs().max().item()
+    print(f"r8-native vs padded-r16: {err:.2e}")
+    assert err < 1e-2, err
+
+
+def test_r8_remainder_edges():
+    """Slice widths that are not multiples of the R=8 W-tile quantum (1024
+    outputs): exercises z2's remainder tile and chunk/slice-boundary
+    straddling (the 1040-width slice leaves a 16-output tail intersection)."""
+    wrapper = _make_wrapper()
+    rows, e_out = 32, 8
+    widths = (1040, 1552)  # both multiples of 16, neither of 1024
+    torch.manual_seed(23)
+    x = (torch.randn(rows, I, device=DEV) * 0.3).bfloat16()
+    a = [(torch.randn(W, e_out, 8, I, device=DEV) * 0.05).bfloat16() for _ in widths]
+    b = [(torch.randn(W, e_out, w, 8, device=DEV) * 0.05).bfloat16() for w in widths]
+    mapping = torch.randint(-1, W, (rows,), device=DEV, dtype=torch.long)
+    enabled = torch.ones(W + 1, device=DEV, dtype=torch.int32)
+    eids = torch.randint(0, e_out, (rows,), device=DEV, dtype=torch.long)
+
+    y_f, ref = _reference(x, a, b, mapping, enabled, eids, sum(widths), 0, seed_y=29)
+    y_l = y_f.clone()
+    _run(wrapper, x, a, b, mapping, enabled, eids, y_f, fused=True)
+    _run(wrapper, x, a, b, mapping, enabled, eids, y_l, fused=False)
+    err_ref = (y_f.float() - ref).abs().max().item()
+    err_leg = (y_f.float() - y_l.float()).abs().max().item()
+    print(f"r8 remainder edges: vs-ref {err_ref:.2e}, vs-legacy {err_leg:.2e}")
+    assert err_ref < 3e-2, err_ref
+    assert err_leg < 3e-2, err_leg
+
+
 def test_no_adapter_rows_untouched():
     wrapper = _make_wrapper()
     rows = 32
@@ -140,11 +234,12 @@ def test_large_rows_falls_back_inside_op():
 
 
 @pytest.mark.parametrize("rows", [8, 288])
-def test_overwrite_delta_matches_inplace(rows):
+@pytest.mark.parametrize("rank", [16, 8])
+def test_overwrite_delta_matches_inplace(rows, rank):
     """overwrite=True (aux-stream delta-buffer mode) must produce a delta
     that, once added to the base output, equals the in-place apply."""
     wrapper = _make_wrapper()
-    x, a13, b13, a2, b2, mapping, enabled, eids = _make_case(rows, seed=rows)
+    x, a13, b13, a2, b2, mapping, enabled, eids = _make_case(rows, seed=rows, rank=rank)
     torch.manual_seed(31)
     base13 = (torch.randn(rows, 2 * I, device=DEV) * 0.2).bfloat16()
     x2 = (torch.randn(rows, I, device=DEV) * 0.3).bfloat16()
@@ -175,5 +270,5 @@ def test_overwrite_delta_matches_inplace(rows):
         run_delta(delta, xx, a, b)
         y_delta = base + delta
         err = (y_ip.float() - y_delta.float()).abs().max().item()
-        print(f"{tag} rows={rows}: inplace-vs-delta {err:.2e}")
+        print(f"{tag} rows={rows} r{rank}: inplace-vs-delta {err:.2e}")
         assert err < 1e-2, err
