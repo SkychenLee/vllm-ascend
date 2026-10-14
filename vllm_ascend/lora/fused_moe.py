@@ -414,7 +414,7 @@ def moe_lora_apply_w13(
     group_list=None,
     group_list_type=1,
 ):
-    """Add the w13 LoRA delta into ``gate_up_out`` (in place), before activation.
+    """Apply the w13 LoRA delta, before activation.
 
     Called from ``unquant_apply_mlp`` right after the base gate_up GMM.
 
@@ -423,6 +423,9 @@ def moe_lora_apply_w13(
             caller via _recover_moe_lora_routing (AllGather) or
             _recover_moe_lora_routing_all2all (AlltoAll).
         group_list: base per-expert row counts, reused by the gmm path.
+
+    Returns:
+        The delta when it was not folded into ``gate_up_out``, else None.
     """
     # AG callers (quant_moe / unquant_apply_mlp) stash the single-pass
     # combined index built by _build_combined_lora_idx_allgather directly;
@@ -441,7 +444,7 @@ def moe_lora_apply_w13(
         # experts on other ranks. Skip LoRA to avoid passing empty tensors
         # to add_lora_fused_moe (which can trigger NPU kernel crashes).
         if expert_per_row.numel() == 0:
-            return
+            return None
         # The w13 and w2 applies of this layer share one routing, hence one
         # combined gather index: build it once here, stash it for w2, and
         # pass it through explicitly.
@@ -454,7 +457,7 @@ def moe_lora_apply_w13(
             lora_context.w13_lora_a_stacked[0].shape[1],
         )
         lora_context.combined_lora_idx = combined_idx
-        lora_context.punica_wrapper.add_lora_fused_moe(
+        return lora_context.punica_wrapper.add_lora_fused_moe(
             y=gate_up_out,
             x=hidden_states,
             lora_a_stacked=lora_context.w13_lora_a_stacked,
@@ -466,10 +469,9 @@ def moe_lora_apply_w13(
             group_list=group_list,
             combined_idx=combined_idx,
         )
-        return
     if combined_idx.numel() == 0:
-        return
-    lora_context.punica_wrapper.add_lora_fused_moe(
+        return None
+    return lora_context.punica_wrapper.add_lora_fused_moe(
         y=gate_up_out,
         x=hidden_states,
         lora_a_stacked=lora_context.w13_lora_a_stacked,
@@ -513,7 +515,7 @@ def moe_lora_apply_w2(
         # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
         # kernel crashes with empty tensors.
         if expert_per_row.numel() == 0:
-            return
+            return None
     offset = 0
     if lora_context.fully_sharded:
         shard_size = lora_context.w2_lora_b_stacked[0].shape[-2]
@@ -529,7 +531,7 @@ def moe_lora_apply_w2(
         and getattr(lora_context, "tp_size", 1) > 1
         and not getattr(lora_context, "use_ep", False)
     )
-    lora_context.punica_wrapper.add_lora_fused_moe(
+    delta = lora_context.punica_wrapper.add_lora_fused_moe(
         y=down_out,
         x=silu_out,
         lora_a_stacked=lora_context.w2_lora_a_stacked,
@@ -544,6 +546,8 @@ def moe_lora_apply_w2(
         group_list_type=group_list_type,
         combined_idx=combined_idx,
     )
+    if delta is not None:
+        down_out += delta
     # Clear per-forward intermediate indices now that the LoRA delta
     # for this layer has been fully applied — they are not needed for
     # the remaining combine/finalize stages.

@@ -533,7 +533,7 @@ def unquant_apply_mlp(
                 "(AlltoAll). Neither was provided."
             )
 
-        moe_lora_apply_w13(
+        delta = moe_lora_apply_w13(
             lora_context,
             gate_up_out=gate_up_out,
             hidden_states=hidden_states,
@@ -541,6 +541,8 @@ def unquant_apply_mlp(
             group_list=group_list,
             group_list_type=group_list_type,
         )
+        if delta is not None:
+            gate_up_out += delta
 
     act_name = getattr(activation, "value", activation)
     if activation == MoEActivation.SWIGLUOAI:

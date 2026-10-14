@@ -63,6 +63,20 @@ namespace vllm_ascend {
         uint32_t add_inputs,
         uint32_t aiv_num);
 
+  extern void add_lora_swiglu_quant_impl(
+        AscendType type,
+        void *stream,
+        void *gate_up,
+        void *delta,
+        void *act,
+        void *y,
+        void *scale,
+        uint32_t batch,
+        uint32_t width,
+        uint32_t has_delta,
+        float swiglu_limit,
+        uint32_t aiv_num);
+
   extern void bgmv_shrink_impl(
         AscendType type,
         void *stream,

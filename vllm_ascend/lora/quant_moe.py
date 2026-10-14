@@ -189,6 +189,24 @@ def _apply_moe_activation(
     return torch_npu.npu_swiglu(gate_up_out)
 
 
+def _fused_w13_epilogue_eligible(mlp_compute_input, lora_context) -> bool:
+    """Can add_lora_swiglu_quant replace swiglu -> dynamic_quant for this batch?"""
+    if mlp_compute_input.topk_scales is not None:
+        return False
+    activation = mlp_compute_input.activation
+    act_name = getattr(activation, "value", activation)
+    if activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUSTEP,
+        MoEActivation.GELU,
+        MoEActivation.GELU_TANH,
+    ):
+        return False
+    if act_name == "swigluoai_uninterleave":
+        return False
+    return True
+
+
 def _validate_dynamic_int8_activations(
     hidden_states: torch.Tensor,
     dynamic_scale: torch.Tensor | None,
@@ -297,7 +315,7 @@ def _apply_dynamic_int8_moe_lora(
             lora_context,
             group_list=mlp_compute_input.group_list,
         )
-    moe_lora_apply_w13(
+    delta = moe_lora_apply_w13(
         lora_context,
         gate_up_out=gate_up_out,
         hidden_states=hidden_states,
@@ -306,22 +324,31 @@ def _apply_dynamic_int8_moe_lora(
         group_list_type=mlp_compute_input.group_list_type,
     )
 
-    activated = _apply_moe_activation(
-        gate_up_out,
-        mlp_compute_input.activation,
-        mlp_compute_input.swiglu_limit,
-        mlp_compute_input.swiglu_alpha,
-        mlp_compute_input.swiglu_beta,
-    )
-    if mlp_compute_input.topk_scales is not None:
-        activated *= mlp_compute_input.topk_scales
+    if _fused_w13_epilogue_eligible(mlp_compute_input, lora_context):
+        activated, quantized_activated, activated_scale = (
+            torch.ops._C_ascend.add_lora_swiglu_quant(
+                gate_up_out, delta, mlp_compute_input.swiglu_limit
+            )
+        )
+    else:
+        if delta is not None:
+            gate_up_out += delta
+        activated = _apply_moe_activation(
+            gate_up_out,
+            mlp_compute_input.activation,
+            mlp_compute_input.swiglu_limit,
+            mlp_compute_input.swiglu_alpha,
+            mlp_compute_input.swiglu_beta,
+        )
+        if mlp_compute_input.topk_scales is not None:
+            activated *= mlp_compute_input.topk_scales
 
-    quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=activated,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
+        quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
+            hidden_states=activated,
+            dynamic_scale=None,
+            act_quant_type=torch.int8,
+            use_mxfp_quant=False,
+        )
     before_gmm2_evt = torch.npu.current_stream().record_event()
     down_out = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=quantized_activated,
@@ -371,6 +398,9 @@ def _apply_dynamic_int8_moe_lora_overlap_delta(
       M: activation (-> topk scale) -> ev_act.record
       B: wait ev_act -> delta2.zero_ -> w2 apply -> ev2.record
       M: quant2 -> gmm2 -> wait ev2 -> down_out += delta2
+    When the fused w13 epilogue is eligible, the += / activation / quant2
+    trio on M collapses into one add_lora_swiglu_quant(gate_up_out, delta13)
+    before ev_act (same kernel and gate as the sequential path).
     The applies and the metadata build only touch tensors produced before
     their GEMM, so B never waits on M mid-flight.
     """
@@ -431,17 +461,26 @@ def _apply_dynamic_int8_moe_lora_overlap_delta(
         output_dtype=input_dtype,
     )[0]
     main.wait_event(ev13)
-    gate_up_out += delta13
-
-    activated = _apply_moe_activation(
-        gate_up_out,
-        mlp_compute_input.activation,
-        mlp_compute_input.swiglu_limit,
-        mlp_compute_input.swiglu_alpha,
-        mlp_compute_input.swiglu_beta,
-    )
-    if mlp_compute_input.topk_scales is not None:
-        activated *= mlp_compute_input.topk_scales
+    fuse_epilogue = _fused_w13_epilogue_eligible(
+        mlp_compute_input, lora_context
+    ) and delta13.shape == gate_up_out.shape
+    if fuse_epilogue:
+        activated, quantized_activated, activated_scale = (
+            torch.ops._C_ascend.add_lora_swiglu_quant(
+                gate_up_out, delta13, mlp_compute_input.swiglu_limit
+            )
+        )
+    else:
+        gate_up_out += delta13
+        activated = _apply_moe_activation(
+            gate_up_out,
+            mlp_compute_input.activation,
+            mlp_compute_input.swiglu_limit,
+            mlp_compute_input.swiglu_alpha,
+            mlp_compute_input.swiglu_beta,
+        )
+        if mlp_compute_input.topk_scales is not None:
+            activated *= mlp_compute_input.topk_scales
 
     ev_act = torch.npu.Event()
     ev_act.record(main)
@@ -455,12 +494,13 @@ def _apply_dynamic_int8_moe_lora_overlap_delta(
         ev2 = torch.npu.Event()
         ev2.record(aux)
 
-    quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
-        hidden_states=activated,
-        dynamic_scale=None,
-        act_quant_type=torch.int8,
-        use_mxfp_quant=False,
-    )
+    if not fuse_epilogue:
+        quantized_activated, activated_scale = DeviceOperator.npu_dynamic_quant(
+            hidden_states=activated,
+            dynamic_scale=None,
+            act_quant_type=torch.int8,
+            use_mxfp_quant=False,
+        )
     before_gmm2_evt = main.record_event()
     down_out = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=quantized_activated,

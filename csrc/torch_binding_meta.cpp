@@ -75,6 +75,24 @@ void add_lora_meta(at::Tensor y, at::Tensor x, std::vector<at::Tensor> lora_a,
                    int64_t offset_start, double scale, bool add_inputs,
                    at::Tensor use_gmm, at::Tensor no_lora, at::Tensor use_add_lora) {}
 
+at::Tensor add_lora_expand_delta_meta(const at::Tensor &gate_up, std::vector<at::Tensor> x,
+                                      std::vector<at::Tensor> lora_b, at::Tensor seq_len,
+                                      int64_t group_list_type = 1)
+{
+    return at::empty_symint({gate_up.sym_size(0), gate_up.sym_size(1)}, gate_up.options());
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> add_lora_swiglu_quant_meta(
+    const at::Tensor &gate_up, const c10::optional<at::Tensor> &delta, double swiglu_limit = 0.0)
+{
+    // sym-safe: dynamo traces a dynamic token count through here
+    auto batch = gate_up.sym_size(0);
+    auto width = gate_up.sym_size(1) / 2;
+    return {at::empty_symint({batch, width}, gate_up.options()),
+            at::empty_symint({batch, width}, gate_up.options().dtype(at::kChar)),
+            at::empty_symint({batch}, gate_up.options().dtype(at::kFloat))};
+}
+
 at::Tensor build_combined_lora_idx_meta(at::Tensor dest, at::Tensor topk_ids,
                                         at::Tensor lora_indices, at::Tensor adapter_enabled,
                                         int64_t first_expert_idx, int64_t num_experts,
@@ -1585,6 +1603,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("add_lora_expand", &vllm_ascend::meta::add_lora_expand_meta);
     // Fused LoRA apply for add_lora_linear (in-tree fused kernel / gmm / bgmv)
     ops.impl("add_lora", &vllm_ascend::meta::add_lora_meta);
+    ops.impl("add_lora_swiglu_quant", &vllm_ascend::meta::add_lora_swiglu_quant_meta);
+    ops.impl("add_lora_expand_delta", &vllm_ascend::meta::add_lora_expand_delta_meta);
     ops.impl("build_combined_lora_idx", &vllm_ascend::meta::build_combined_lora_idx_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);

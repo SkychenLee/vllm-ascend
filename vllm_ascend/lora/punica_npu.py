@@ -365,7 +365,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         overwrite: bool = False,
         phase: str = "full",
         shrink_buffers: list | None = None,
-    ) -> list | None:
+    ) -> list | torch.Tensor | None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
         same bgmv_shrink/bgmv_expand AscendC kernels (csrc/kernels/bgmv_*.cpp)
@@ -543,6 +543,15 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                         )
                     else:
                         buffers[n_slices] = tensor_model_parallel_all_reduce(stacked)
+            # the gmm expand cannot accumulate into its own output, so it hands
+            # the delta back and the caller folds it; every other branch folds
+            # in place and returns None. fully-sharded w2 and partial_expand
+            # target a tp_rank slice, so they keep folding.
+            covers_y = offset == 0 and sum(output_slices) == y2d.shape[1]
+            if covers_y and bool(gmm_flag.item()):
+                return torch.ops._C_ascend.add_lora_expand_delta(
+                    y2d, buffers, list(lora_b_stacked), group_list, group_list_type,
+                )
             torch.ops._C_ascend.add_lora_expand(
                 y2d, buffers, list(lora_b_stacked), combined_idx, group_list, combined_idx,
                 output_slices, offset, True, gmm_flag, self._no_lora_cpu,
