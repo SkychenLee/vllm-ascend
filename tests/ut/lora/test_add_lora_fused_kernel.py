@@ -13,7 +13,7 @@ overwrite (columns beyond the concatenated slices are NEVER touched).
 
 Kernel-declared constraints (violations reaching the op are ELIGIBILITY
 BUGS; correct results with them come from the bgmv fallback):
-  - R in {16, 32, 64}; H1, every h2 and yWidth multiples of 16; <= 4 slices
+  - R in {8, 16, 32, 64}; H1, every h2 and yWidth multiples of 16; <= 4 slices
   - offset_start == 0; indices int64 with -1 = no-adapter; fp16/bf16 in/out,
     fp32 accumulate inside, deterministic (two launches bitwise equal)
 Grid-boundary constants mirrored from the kernel (keep in sync when editing
@@ -163,8 +163,9 @@ def _check(x, y0, a, b, mapping, h2s, *, scale=1.0, add_inputs=True,
 
 # ---------------------------------------------------------------- shape ---
 
-# TILE_H branch boundary + the R in {16,32,64} domain, on one batch/mapping
-@pytest.mark.parametrize("rank", [16, 32, 64])
+# TILE_H branch boundary + the R in {8,16,32,64} domain, on one batch/mapping
+# (R=8 added with the rank8 kernel support: single-BlockReduceSum tree)
+@pytest.mark.parametrize("rank", [8, 16, 32, 64])
 @pytest.mark.parametrize("h1", [4096, TILE_H_REF + 16, 6144, 7168, 8192, 12288])
 def test_h1_rank_sweep(h1, rank):
     # fixed mixed mapping: same-slot runs, -1 interruptions, all slices live
@@ -285,7 +286,7 @@ def test_dtypes_and_scales(dtype, scale):
 # z1's Z1_TOK_SUB batching must not change any token's arithmetic: one
 # batched launch has to be BITWISE equal to per-token launches (the run path
 # only reuses the loaded A tile, it never reorders the per-token ops).
-@pytest.mark.parametrize("rank,h1,h2", [(16, 2048, 256), (64, 1024, 128)])
+@pytest.mark.parametrize("rank,h1,h2", [(8, 2048, 256), (16, 2048, 256), (64, 1024, 128)])
 def test_same_slot_batching_bitwise(rank, h1, h2):
     batch = 8
     h2s = (h2,)
@@ -319,9 +320,6 @@ def test_determinism_two_launches():
 # configs add_lora_eligible must reject where the bgmv fallback is a sound
 # substitute; the TEST ONLY asserts correct numerics, never which path ran
 FALLBACK_CASES = {
-    # rank 8: fused rejects it ("rank is not a multiple of 16"), bgmv
-    # supports small ranks (cf. test_bgmv_small_rank.py)
-    "rank8": dict(h1=1024, rank=8, h2s=(64,), offset=0),
     # more than 4 slices (only the fused kernel supports 4)
     "five_slices": dict(h1=1024, rank=16, h2s=(64, 64, 64, 64, 64), offset=0),
     # non-zero offset_start: fused kernel addresses y from column 0

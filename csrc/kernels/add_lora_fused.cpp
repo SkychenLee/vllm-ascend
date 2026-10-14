@@ -29,7 +29,6 @@
  *     offset_start == 0 (the kernels address y from column 0)
  *   - indices are int64; -1 skips the token (overwrite mode zeroes it)
  * Native fp16/bf16 (template T), fp32 accumulate, deterministic.
- * UB budget: z1 ~145KB, z2 ~112KB (192KB per AIV on Ascend910B).
  *
  * EDITING NOTE: these kernels are parsed by the build's auto_gen tool —
  * pointer parameters MUST be written `__gm__ void* name` (star on the type,
@@ -45,7 +44,7 @@
 namespace {
 constexpr uint32_t TILE_H = 4096;               // x / A-row tile (z1 phase)
 constexpr uint32_t Z1_RANK_SUB = 4;             // batch size for MTE2 load
-constexpr uint32_t Z1_TOK_SUB = 2;              // tokens per z1 unit-run
+constexpr uint32_t Z1_TOK_SUB = 4;              // tokens per z1 unit-run
 constexpr uint32_t W_IN_TILE = 8192;            // B elements per z2 compute tile
 constexpr uint32_t Y_OUT_TILE = 4096;           // max outputs per block (tmpY_ size)
 constexpr uint32_t NUM_BYTES_PER_REPEAT = 256;  // vector unit read granularity
