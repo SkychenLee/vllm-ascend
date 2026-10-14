@@ -995,6 +995,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> add_lora_swiglu_quant(
     const int64_t width = two_w / 2;
     TORCH_CHECK(width > 0 && width <= kSwigluQuantMaxWidth, "add_lora_swiglu_quant: W must be in [1, ",
                 kSwigluQuantMaxWidth, "], got ", width);
+    // The kernel's W%64 tail reduce misaligns UB accesses (vector core fault
+    // for tail in {8,40,48,56,...}) or miscomputes the row max (silent
+    // quant corruption for tail 16/48) - bz-ascend sweep 2026-10-14.
+    TORCH_CHECK(width % 64 == 0, "add_lora_swiglu_quant: W must be a multiple of 64, got ", width);
 
     const bool has_delta = delta.has_value();
     if (has_delta) {

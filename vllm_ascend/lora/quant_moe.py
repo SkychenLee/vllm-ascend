@@ -189,9 +189,14 @@ def _apply_moe_activation(
     return torch_npu.npu_swiglu(gate_up_out)
 
 
-def _fused_w13_epilogue_eligible(mlp_compute_input, lora_context) -> bool:
+def _fused_w13_epilogue_eligible(mlp_compute_input, lora_context, gate_up_out=None) -> bool:
     """Can add_lora_swiglu_quant replace swiglu -> dynamic_quant for this batch?"""
     if mlp_compute_input.topk_scales is not None:
+        return False
+    if gate_up_out is not None and (gate_up_out.shape[-1] // 2) % 64 != 0:
+        # The kernel's W%64 tail reduce misaligns UB accesses (device fault)
+        # or miscomputes the row max (silent quant corruption, bz-ascend
+        # sweep 2026-10-14). Only W%64==0 is correct; fall back otherwise.
         return False
     activation = mlp_compute_input.activation
     act_name = getattr(activation, "value", activation)
@@ -324,7 +329,7 @@ def _apply_dynamic_int8_moe_lora(
         group_list_type=mlp_compute_input.group_list_type,
     )
 
-    if _fused_w13_epilogue_eligible(mlp_compute_input, lora_context):
+    if _fused_w13_epilogue_eligible(mlp_compute_input, lora_context, gate_up_out):
         activated, quantized_activated, activated_scale = (
             torch.ops._C_ascend.add_lora_swiglu_quant(
                 gate_up_out, delta, mlp_compute_input.swiglu_limit
@@ -462,7 +467,7 @@ def _apply_dynamic_int8_moe_lora_overlap_delta(
     )[0]
     main.wait_event(ev13)
     fuse_epilogue = _fused_w13_epilogue_eligible(
-        mlp_compute_input, lora_context
+        mlp_compute_input, lora_context, gate_up_out
     ) and delta13.shape == gate_up_out.shape
     if fuse_epilogue:
         activated, quantized_activated, activated_scale = (
