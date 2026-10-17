@@ -373,7 +373,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
-        if soc_version == AscendDeviceType.A2:
+        if get_ascend_config().moe_lora_ep_backend == "allgather":
+            # Reuse the EP-aware AllGather dispatcher and local-expert LoRA
+            # mapping on every supported device when explicitly requested.
+            moe_comm_type = MoECommType.ALLGATHER
+        elif soc_version == AscendDeviceType.A2:
             # On A2 the only MC2 alternative in the menu is AllGather, and
             # the AllGather dispatcher already keeps routed activations in
             # BF16/FP16 for LoRA batches (quant policy) with routing

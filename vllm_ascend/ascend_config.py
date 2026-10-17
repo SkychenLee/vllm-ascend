@@ -32,6 +32,9 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self.moe_lora_ep_backend = additional_config.get("moe_lora_ep_backend", "auto")
+        if self.moe_lora_ep_backend not in ("auto", "allgather"):
+            raise ValueError(f"moe_lora_ep_backend must be 'auto' or 'allgather', got {self.moe_lora_ep_backend!r}")
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})

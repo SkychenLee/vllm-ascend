@@ -877,7 +877,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        return True
+        from vllm_ascend import envs
+
+        return not envs.VLLM_ASCEND_DISABLE_PIN_MEMORY
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

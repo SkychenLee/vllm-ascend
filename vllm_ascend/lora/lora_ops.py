@@ -15,6 +15,8 @@
 
 import torch
 
+from vllm_ascend.lora.ops_backend import get_lora_ops
+
 
 def bgmv_shrink(
     inputs: torch.Tensor,
@@ -23,7 +25,7 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
-    return torch.ops._C_ascend.bgmv_shrink(
+    return get_lora_ops().bgmv_shrink(
         inputs,
         lora_a_weights,
         lora_indices_tensor,
@@ -39,7 +41,7 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ):
-    return torch.ops._C_ascend.bgmv_expand(
+    return get_lora_ops().bgmv_expand(
         inputs,
         lora_b_weights,
         lora_indices_tensor,
@@ -58,7 +60,7 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ):
-    return torch.ops._C_ascend.bgmv_expand(
+    return get_lora_ops().bgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, output_tensor, slice_offset, slice_size
     )
 
@@ -75,7 +77,7 @@ def sgmv_shrink(
     token_nums: int,
     scaling: float,
 ):
-    return torch.ops._C_ascend.sgmv_shrink(
+    return get_lora_ops().sgmv_shrink(
         inputs, lora_a_weights, lora_indices_tensor, seq_len_tensor, output_tensor, scaling
     )
 
@@ -92,7 +94,7 @@ def sgmv_expand(
     token_nums: int,
     add_inputs: bool = False,
 ):
-    return torch.ops._C_ascend.sgmv_expand(
+    return get_lora_ops().sgmv_expand(
         inputs,
         lora_b_weights,
         lora_indices_tensor,
@@ -117,6 +119,6 @@ def sgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = False,
 ):
-    return torch.ops._C_ascend.sgmv_expand(
+    return get_lora_ops().sgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, seq_len_tensor, output_tensor, slice_offset, slice_size
     )

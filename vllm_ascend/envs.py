@@ -82,6 +82,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 1: only quant case enable nz;
     # 2: enable nz as long as possible.
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # Disable pinned host memory, including CPU-resident LoRA adapter weights.
+    # Read before worker startup; vLLM caches the platform capability on import.
+    "VLLM_ASCEND_DISABLE_PIN_MEMORY": lambda: bool(int(os.getenv("VLLM_ASCEND_DISABLE_PIN_MEMORY", "0"))),
     # Whether to overlap the quantized MoE LoRA applies (W13/W2) with the
     # base grouped matmuls on an auxiliary NPU stream (AllGather + decode).
     # Two variants, picked per batch: non-fully-sharded (EP) runs the whole

@@ -35,6 +35,7 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w2,
     moe_lora_apply_w13,
 )
+from vllm_ascend.lora.ops_backend import get_lora_ops
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -331,7 +332,7 @@ def _apply_dynamic_int8_moe_lora(
 
     if _fused_w13_epilogue_eligible(mlp_compute_input, lora_context, gate_up_out):
         activated, quantized_activated, activated_scale = (
-            torch.ops._C_ascend.add_lora_swiglu_quant(
+            get_lora_ops().add_lora_swiglu_quant(
                 gate_up_out, delta, mlp_compute_input.swiglu_limit
             )
         )
@@ -471,7 +472,7 @@ def _apply_dynamic_int8_moe_lora_overlap_delta(
     ) and delta13.shape == gate_up_out.shape
     if fuse_epilogue:
         activated, quantized_activated, activated_scale = (
-            torch.ops._C_ascend.add_lora_swiglu_quant(
+            get_lora_ops().add_lora_swiglu_quant(
                 gate_up_out, delta13, mlp_compute_input.swiglu_limit
             )
         )

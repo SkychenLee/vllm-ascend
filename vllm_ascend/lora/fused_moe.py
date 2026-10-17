@@ -40,6 +40,7 @@ from vllm.lora.layers.utils import _get_lora_device
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.lora.ops_backend import get_lora_ops
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
@@ -272,10 +273,8 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
 def _build_combined_lora_idx_allgather(lora_context, expanded_row_idx, topk_ids):
     """Build the per-row combined gather index (AG path).
 
-    aten builds the unique fp32 sort keys and argsorts them; the in-tree
-    kernel (torch.ops._C_ascend.build_combined_lora_idx,
-    csrc/kernels/combined_lora_idx.cpp) then folds the per-pair
-    slot/expert/adapter lookup into a single gather pass.
+    The selected kernel builds the unique fp32 sort keys, argsorts them,
+    and folds the per-pair slot/expert/adapter lookup into a single gather pass.
     Bit-identical to _build_combined_lora_idx_allgather_torch, which is kept
     as the reference implementation for the equality tests.
     """
@@ -291,7 +290,7 @@ def _build_combined_lora_idx_allgather(lora_context, expanded_row_idx, topk_ids)
 
         first_expert_idx = get_ep_group().rank_in_group * lora_context.local_num_experts
     num_experts = lora_context.w13_lora_a_stacked[0].shape[1]
-    return torch.ops._C_ascend.build_combined_lora_idx(
+    return get_lora_ops().build_combined_lora_idx(
         expanded_row_idx,
         topk_ids,
         lora_indices,

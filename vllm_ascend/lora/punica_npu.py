@@ -12,10 +12,11 @@ from vllm.distributed import (
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.logger import logger
 
+from vllm_ascend.lora.ops_backend import get_lora_ops
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# in-tree fused kernel for decode
+# Fused kernel for decode, supplied by the selected LoRA backend.
 ENABLE_ADD_LORA_KERNEL = True
 
 
@@ -183,7 +184,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         y_views = [y[i].view(-1, y[i].shape[-1]) for i in range(len(lora_a_stacked))]
         _, seq_len, lora_indices, _, _, _ = self.prefill_metadata
-        torch.ops._C_ascend.add_lora_shrink(
+        get_lora_ops().add_lora_shrink(
             y_views, x, list(lora_a_stacked),
             lora_indices, seq_len, self.token_lora_indices,
             scale, self._use_gmm_shrink_cpu, self._no_lora_cpu,
@@ -219,7 +220,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_org = y
         y = y.view(-1, y.shape[-1])
         _, seq_len, lora_indices, _, _, _ = self.prefill_metadata
-        torch.ops._C_ascend.add_lora_expand(
+        get_lora_ops().add_lora_expand(
             y, [x[i] for i in range(len(lora_b_stacked))], list(lora_b_stacked),
             lora_indices, seq_len, self.token_lora_indices,
             list(output_slices), offset_start, add_inputs,
@@ -272,7 +273,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y2d = y.view(-1, y.shape[-1])
         x2d = x.view(-1, x.shape[-1])
         _, seq_len, lora_indices, _, _, _ = self.prefill_metadata
-        torch.ops._C_ascend.add_lora(
+        get_lora_ops().add_lora(
             y2d, x2d, list(lora_a_stacked), list(lora_b_stacked),
             lora_indices, seq_len, self.token_lora_indices,
             list(output_slices), offset_start, scale, add_inputs,
@@ -448,7 +449,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             a_views = [a.view(-1, 1, a.shape[-2], a.shape[-1]) for a in lora_a_stacked]
             b_views = [b.view(-1, 1, b.shape[-2], b.shape[-1]) for b in lora_b_stacked]
             output_slices_fused = [b.shape[-2] for b in lora_b_stacked]
-            torch.ops._C_ascend.add_lora(
+            get_lora_ops().add_lora(
                 y2d, x2d, a_views, b_views,
                 combined_idx, combined_idx, combined_idx,
                 output_slices_fused, offset, 1.0, not overwrite,
@@ -495,7 +496,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                         (n_slices, x2d.shape[0], local_rank), dtype=torch.float32, device=x2d.device
                     )
                 )
-                torch.ops._C_ascend.add_lora_shrink(
+                get_lora_ops().add_lora_shrink(
                     buffers, x2d, list(lora_a_stacked), combined_idx, group_list, combined_idx,
                     1.0, gmm_flag, self._no_lora_cpu, True, group_list_type,
                 )
@@ -549,10 +550,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             # target a tp_rank slice, so they keep folding.
             covers_y = offset == 0 and sum(output_slices) == y2d.shape[1]
             if covers_y and bool(gmm_flag.item()):
-                return torch.ops._C_ascend.add_lora_expand_delta(
+                return get_lora_ops().add_lora_expand_delta(
                     y2d, buffers, list(lora_b_stacked), group_list, group_list_type,
                 )
-            torch.ops._C_ascend.add_lora_expand(
+            get_lora_ops().add_lora_expand(
                 y2d, buffers, list(lora_b_stacked), combined_idx, group_list, combined_idx,
                 output_slices, offset, True, gmm_flag, self._no_lora_cpu,
                 True, group_list_type,
