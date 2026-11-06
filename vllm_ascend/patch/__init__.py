@@ -1684,3 +1684,41 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** 37. File: platform/patch_mistral4_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Targets: ModelConfig._verify_quantization and Ascend quantization detection.
+#    Why:
+#       Mistral Small 4's HF main model and native EAGLE draft use scalar FP8
+#       scales; the generic Ascend FP8 backend only accepts block-wise scales.
+#    How:
+#       Select model-specific load-time BF16 conversion before upstream FP8
+#       validation and prevent the later auto-detector from restoring FP8.
+#       Identify the draft from its architecture and parsed config, including
+#       remote model IDs. Block FP8 and unrelated models keep their own paths.
+#    Future Plan:
+#       Remove when the generic backend supports this checkpoint format.
+#
+# ** 38. File: worker/patch_mistral4.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Targets: Mistral4Model and EagleMistralLarge3ForCausalLM weight loaders.
+#    How:
+#       Expand HF fused expert stacks into individual FP8 projection views,
+#       pair each weight with its scalar scale, and convert one projection at a
+#       time before ordinary TP/EP loading. Ignore unused activation metadata;
+#       reject missing/duplicate scales. Native EAGLE conversion precedes the
+#       v0.30 WeightsMapper. Complete its borrowed multimodal embedding helper.
+#       The HF main model requires the matching vLLM Mistral 4 core patch.
+#    Future Plan:
+#       Remove with the configuration patch once scalar FP8 is supported.
+#
+# ** 39. File: worker/patch_mistral4_mla.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Targets: EAGLE initialization and AscendMLAAttention KV-cache specification.
+#    How:
+#       Keep semantic latent rank 256 while padding the draft's physical cache
+#       to 512, and pad its prefill NoPE Q/K to 128. The Ascend backend and both
+#       runners use the physical dimensions and slice back before projections.
+#       Restrict the fallback to its supported unquantized PA-cache topology.
+#    Future Plan:
+#       Remove when Ascend attention kernels support the original dimensions.
+#

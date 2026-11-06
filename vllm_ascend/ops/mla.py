@@ -200,6 +200,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # constructor compatibility, but its indexer does not consume it.
         del allow_short_prefill_indexer_scoring_skip
         hf_config = get_current_vllm_config().model_config.hf_text_config
+        if mla_modules.is_sparse and isinstance(getattr(hf_config, "llama_4_scaling", None), dict):
+            raise NotImplementedError("Llama-4 query scaling is currently supported only by dense Ascend MLA.")
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:
@@ -270,6 +272,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+        *,
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
@@ -277,7 +281,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
         output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
 
-        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix)
+        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix, llama_4_scaling)
         output = output.view(-1, hidden_dim)
         return output
 
@@ -287,6 +291,7 @@ def mla_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    llama_4_scaling: torch.Tensor | None = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
@@ -295,7 +300,18 @@ def mla_forward(
     else:
         attn_metadata = forward_context.attn_metadata
     kv_cache = self.mla_attn.kv_cache
-    self.mla_attn.impl.forward(self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
+    if llama_4_scaling is None:
+        # Sparse backends override forward and retain their existing signature.
+        self.mla_attn.impl.forward(self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
+    else:
+        self.mla_attn.impl.forward(
+            self.mla_attn.layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            output,
+            llama_4_scaling=llama_4_scaling,
+        )
     return
 
 
@@ -303,6 +319,7 @@ def mla_forward_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    llama_4_scaling: torch.Tensor | None = None,
 ) -> None:
     return
 

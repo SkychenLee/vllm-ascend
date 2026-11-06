@@ -647,7 +647,8 @@ def _get_attention_kv_cache_dims(
         attn_layer = attn_layers[layer_name]
         if not isinstance(attn_layer, MLAAttention):
             raise TypeError(f"Expected an MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}.")
-        return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
+        cache_rank = getattr(attn_layer.impl, "kv_cache_lora_rank", attn_layer.kv_lora_rank)
+        return cache_rank, attn_layer.qk_rope_head_dim
 
     head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
     return kv_cache_spec.head_size, head_size_v

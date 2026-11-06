@@ -64,6 +64,15 @@ _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
 
 
+def _uses_mla_rope_buffer(model_config) -> bool:
+    # The HF Mistral4 text model uses ordinary Attention but retains the
+    # DeepSeek interleaved rotary implementation inside its multimodal wrapper.
+    return model_config.use_mla or (
+        getattr(getattr(model_config, "hf_config", None), "model_type", None) == "mistral3"
+        and getattr(getattr(model_config, "hf_text_config", None), "model_type", None) == "mistral4"
+    )
+
+
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
     global _cos_mla
     global _sin_mla
@@ -76,7 +85,7 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
     model_config = vllm_config.model_config
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-    if model_config.use_mla:
+    if _uses_mla_rope_buffer(model_config):
         rope_dim = model_config.hf_text_config.qk_rope_head_dim
         _cos_mla = torch.ones(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
         _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
@@ -441,6 +450,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        attention_factor: float | None = None,
     ) -> None:
         # Note: we adopt the native huggingface deepseek rope initialization code from
         # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
@@ -456,6 +466,8 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             / self._yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
             * attn_factor
         )
+        if attention_factor is not None:
+            self.mscale = float(attention_factor)
         super(DeepseekScalingRotaryEmbedding, self).__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )

@@ -34,6 +34,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.mla_compat import pad_mla_head, scale_mla_query
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -925,6 +926,27 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
+        hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
+        self.uses_llama_4_scaling = isinstance(getattr(hf_text_config, "llama_4_scaling", None), dict)
+        if self.uses_llama_4_scaling:
+            self._validate_mla_compatibility()
+            # The fused prolog cannot apply a position-dependent Q multiplier.
+            self.enable_mlapo = False
+
+    def _validate_mla_compatibility(self) -> None:
+        """Reject layouts not implemented by the padded/scaled MLA path."""
+        parallel = self.vllm_config.parallel_config
+        if parallel.prefill_context_parallel_size > 1 or parallel.decode_context_parallel_size > 1:
+            raise NotImplementedError("Padded/scaled Ascend MLA currently requires PCP=1 and DCP=1.")
+        if (
+            self.enable_kv_nz
+            or self.fa_quant_layer
+            or getattr(self, "kv_cache_dtype", "auto") not in ("auto", "bfloat16", "float16")
+        ):
+            raise NotImplementedError("Padded/scaled Ascend MLA requires PA layout and unquantized KV cache.")
+
+    def _pad_prefill_qk(self, tensor: torch.Tensor) -> torch.Tensor:
+        return pad_mla_head(tensor, self.qk_nope_head_dim, getattr(self, "prefill_qk_head_dim", self.qk_nope_head_dim))
 
     @staticmethod
     def update_graph_params(
@@ -1066,13 +1088,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         return x.reshape(-1, self.num_heads * self.v_head_dim)
 
     # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _q_proj_and_k_up_proj(self, x, llama_4_scaling: torch.Tensor | None = None):
         q_nope, q_pe = (
             self.q_proj(x)[0]
             .view(-1, self.num_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
+        if llama_4_scaling is not None:
+            # Match upstream's BF16 rounding: scale the semantic query before
+            # absorbing the K projection, not the resulting latent query.
+            q_nope = scale_mla_query(q_nope, llama_4_scaling)
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
@@ -1092,6 +1118,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if getattr(self, "kv_cache_lora_rank", self.kv_lora_rank) != self.kv_lora_rank or getattr(
+            self, "uses_llama_4_scaling", False
+        ):
+            self._validate_mla_compatibility()
+            self.enable_mlapo = False
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
@@ -1309,6 +1340,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if iters == 0:
             return prefix_output, prefix_lse
 
+        q_nope = self._pad_prefill_qk(q_nope)
         num_tokens = q_nope.size(0)
         D = self.v_head_dim
         H = self.num_heads
@@ -1372,12 +1404,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             if kv_c_normed.numel() == 0:
                 continue
             kv_c_normed = kv_c_normed.squeeze()
+            if kv_c_normed.shape[-1] < self.kv_lora_rank:
+                raise ValueError("MLA physical cache rank is smaller than the semantic latent rank.")
+            kv_c_normed = kv_c_normed[..., : self.kv_lora_rank]
             if self.fa_quant_layer and self.support_fp8_attention:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
                     torch.bfloat16
                 )
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_nope = self._pad_prefill_qk(k_nope)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
             actual_seq_lengths_kv = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
@@ -1439,6 +1475,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.to(torch.bfloat16)
             value = value.to(torch.bfloat16)
 
+        q_nope = self._pad_prefill_qk(q_nope)
+        k_nope = self._pad_prefill_qk(k_nope)
         attn_output = torch.empty(num_tokens, self.num_heads, self.v_head_dim, dtype=q_nope.dtype, device=q_nope.device)
         attn_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=q_nope.device)
 
@@ -1546,6 +1584,26 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
         return False
 
+    def _exec_kv_unfused(self, kv_no_split, cos, sin, kv_cache, slots):
+        """Normalize the semantic rank before padding the physical cache."""
+        self._validate_mla_compatibility()
+        assert self.kv_a_layernorm is not None
+        k_nope, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        k_nope, _ = torch_npu.npu_rms_norm(
+            k_nope.contiguous(), self.kv_a_layernorm.weight, epsilon=self.kv_a_layernorm.variance_epsilon
+        )
+        k_pe = torch_npu.npu_interleave_rope(k_pe.contiguous(), cos, sin)
+        cache_rank = getattr(self, "kv_cache_lora_rank", self.kv_lora_rank)
+        cache_k_nope = pad_mla_head(k_nope, self.kv_lora_rank, cache_rank)
+        DeviceOperator.reshape_and_cache(
+            key=cache_k_nope.view(-1, self.num_kv_heads, cache_rank),
+            value=k_pe.view(-1, self.num_kv_heads, self.qk_rope_head_dim),
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slots.to(torch.int32),
+        )
+        return k_pe, k_nope
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1567,6 +1625,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         S = 1
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+        if getattr(self, "kv_cache_lora_rank", self.kv_lora_rank) != self.kv_lora_rank:
+            current_k_pe, current_k_nope = self._exec_kv_unfused(kv_no_split, cos, sin, kv_cache, slots)
+            if return_current_kv:
+                return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
+            return kv_cache[1], kv_cache[0]
         if self.qk_rope_head_dim == 0:
             result = self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=return_current_kv)
             if return_current_kv:
@@ -1648,6 +1711,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             S = 1
             # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
             kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+            if getattr(self, "kv_cache_lora_rank", self.kv_lora_rank) != self.kv_lora_rank:
+                return self._exec_kv_unfused(kv_no_split, cos, sin, kv_cache, slots)
             if self.qk_rope_head_dim == 0:
                 # The PCP gather carries rank padding with slot -1.
                 k_pe, k_nope = self._exec_kv_mla_nope(
@@ -1715,12 +1780,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         # `if self.head_padding > 0` in this function can be removed.
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
-        # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
+        # Keep the model's latent rank separate from the padded cache layout.
+        cache_rank = getattr(self, "kv_cache_lora_rank", self.kv_lora_rank)
+        if cache_rank < self.kv_lora_rank:
+            raise ValueError("MLA physical cache rank is smaller than the semantic latent rank.")
+        # [num_blocks, num_kv_heads, block_size, cache_rank/qk_rope_head_dim]
         actual_seq_lengths = None
         if self.fa_quant_layer and not self.support_fp8_attention:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
-                -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
+                -1, self.num_kv_heads, cache_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
             )
             if self.qk_rope_head_dim == 0:
                 k_pe = k_nope.new_empty(k_nope.shape[0], self.num_kv_heads, 0, block_size, nz_fmt_last_dim)
@@ -1730,9 +1799,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
         elif self.enable_kv_nz:
             nz_fmt_last_dim = 16
-            k_nope = k_nope.view(
-                -1, self.num_kv_heads, self.kv_lora_rank // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
+            k_nope = k_nope.view(-1, self.num_kv_heads, cache_rank // nz_fmt_last_dim, block_size, nz_fmt_last_dim)
             if self.qk_rope_head_dim == 0:
                 k_pe = k_nope.new_empty(k_nope.shape[0], self.num_kv_heads, 0, block_size, nz_fmt_last_dim)
             else:
@@ -1740,7 +1807,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
                 )
         else:
-            k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+            k_nope = k_nope.view(-1, self.num_kv_heads, block_size, cache_rank)
             # mla_nope_skip_kpe_view: empty rope cache cannot view(-1, ..., 0)
             if self.qk_rope_head_dim == 0:
                 k_pe = k_nope.new_empty(k_nope.shape[0], self.num_kv_heads, block_size, 0)
@@ -1772,7 +1839,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                 q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
-            attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
+            attn_output_shape = (self.num_heads_padded, num_tokens, cache_rank)
             if not attn_metadata.causal:
                 # K3's DSpark draft block is bidirectional. With FIA this is
                 # sparse_mode=0 and no mask; a default mask here would hide the
@@ -1799,7 +1866,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                 assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
-                attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
+                attn_output_shape = (num_tokens, self.num_heads_padded, 1, cache_rank)
             else:
                 input_layout = "BSND_NBSD"
                 q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
@@ -1809,7 +1876,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
                 assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
-                attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
+                attn_output_shape = (self.num_heads_padded, num_tokens, 1, cache_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
@@ -1830,7 +1897,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, seq_len, dim]
-            attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
+            attn_output_shape = (self.num_heads_padded, num_tokens, 1, cache_rank)
             sparse_mode = 0
             attn_mask = None
 
@@ -1847,6 +1914,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
+        if cache_rank != self.kv_lora_rank:
+            q_nope = pad_mla_head(q_nope, self.kv_lora_rank, cache_rank)
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -1937,6 +2006,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if self.head_padding > 0:
             attn_output = attn_output[: self.num_heads]
+        if cache_rank != self.kv_lora_rank:
+            attn_output = attn_output[..., : self.kv_lora_rank].contiguous()
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
@@ -2124,14 +2195,19 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
-    def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata, written_kv=None):
+    def mla_preprocess_decode(
+        self, q_c, kv_no_split, kv_cache, attn_metadata, written_kv=None, *, llama_4_scaling=None
+    ):
         """``written_kv`` holds normalized (k_pe, k_nope) of every local token
         when the caller has already written this step's KV cache."""
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
         cos = attn_metadata.decode.cos
         sin = attn_metadata.decode.sin
-        decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
+        if llama_4_scaling is None:
+            decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
+        else:
+            decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c, llama_4_scaling)
         decode_ql_nope, decode_q_pe = self.reorg_decode_q(
             decode_ql_nope,
             decode_q_pe,
@@ -2169,7 +2245,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_k_pe=current_k_pe,
         )
 
-    def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
+    def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata, *, llama_4_scaling=None):
         # MLA Preprocess:
         # 1. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
         # or
@@ -2219,7 +2295,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         # Preprocess for decode tokens
         if has_decode:
-            decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata, written_kv)
+            if llama_4_scaling is None:
+                decode_preprocess_res = self.mla_preprocess_decode(
+                    q_c, kv_no_split, kv_cache, attn_metadata, written_kv
+                )
+            else:
+                decode_preprocess_res = self.mla_preprocess_decode(
+                    q_c, kv_no_split, kv_cache, attn_metadata, written_kv, llama_4_scaling=llama_4_scaling
+                )
         # Preprocess for prefill tokens
         if has_prefill:
             prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata, written_kv)
@@ -2260,6 +2343,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: M,
         output: torch.Tensor | None = None,
+        *,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
@@ -2274,6 +2359,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
         num_decode_tokens = attn_metadata.num_decode_tokens
+        if llama_4_scaling is not None:
+            self._validate_mla_compatibility()
+            if self.enable_mlapo:
+                raise RuntimeError("Llama-4 query scaling requires the unfused MLA preprocessing path.")
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
@@ -2307,9 +2396,30 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states, kv_cache, attn_metadata
             )
         else:
-            decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
-                layer_name, hidden_states, kv_cache, attn_metadata
-            )
+            if llama_4_scaling is None:
+                decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+                    layer_name, hidden_states, kv_cache, attn_metadata
+                )
+            else:
+                decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+                    layer_name, hidden_states, kv_cache, attn_metadata, llama_4_scaling=llama_4_scaling
+                )
+        if llama_4_scaling is not None:
+            # Decode NoPE was scaled before absorbing the K projection to
+            # preserve BF16 rounding. Scale the rotary query after RoPE.
+            # Keep this tensor as a custom-op input for position-correct graph
+            # replay; never retain a value computed on a previous forward.
+            if decode_preprocess_res is not None:
+                assert decode_preprocess_res.q_pe is not None
+                decode_preprocess_res = decode_preprocess_res._replace(
+                    q_pe=scale_mla_query(decode_preprocess_res.q_pe, llama_4_scaling),
+                )
+            if prefill_preprocess_res is not None:
+                assert prefill_preprocess_res.q_nope is not None and prefill_preprocess_res.q_pe is not None
+                prefill_preprocess_res = prefill_preprocess_res._replace(
+                    q_nope=scale_mla_query(prefill_preprocess_res.q_nope, llama_4_scaling, num_decode_tokens),
+                    q_pe=scale_mla_query(prefill_preprocess_res.q_pe, llama_4_scaling, num_decode_tokens),
+                )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
             output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
