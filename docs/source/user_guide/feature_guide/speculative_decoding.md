@@ -409,6 +409,28 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+6. **A2/A3 device-side draft lengths**: on model runner V2, installing the
+   optional `flash_attn_npu_3` package with the `get_scheduler_metadata` and
+   `flash_attn_with_kvcache` APIs (the 0.4.2.post2 scheduler ABI) enables the
+   device-length FA3 backend for compatible DFlash2 draft layers. This is a
+   different package from the training-consistency `flash_attn_npu_v3` backend.
+   It consumes exact device lengths after rejection without the draft
+   attention builder's `seq_lens.tolist()` synchronization. Identical layers
+   share device tiling, refreshed before ACL graph replay at stable addresses.
+
+   Selection requires FP16/BF16 queries, draft KV with the same dtype, head
+   sizes up to 256, and PP/PCP/DCP sizes of 1. Causal and non-causal sliding windows
+   are preserved. Missing APIs, attention sinks, adaptive verification,
+   multimodal prefixes, batch invariance, and unsupported configurations
+   retain the existing backend. The target backend is selected independently;
+   any CPU length synchronization required by the target still applies.
+   A5 retains its existing CANN path. Check the backend's numerical and graph
+   replay behavior on A2/A3 with:
+
+    ```shell
+    pytest -sv tests/e2e/pull_request/one_card/test_dflash2_fa3_precision.py
+    ```
+
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
