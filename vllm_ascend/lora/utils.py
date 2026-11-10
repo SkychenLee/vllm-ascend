@@ -19,6 +19,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.platforms import current_platform
 
+from vllm_ascend.lora.debug import initialize_linear_lora_debug
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoE3DWithLoRA,
     AscendFusedMoEWithLoRA,
@@ -30,6 +31,8 @@ def _apply_packed_lora(layer, x: torch.Tensor, output: torch.Tensor) -> torch.Te
     original_shape = output.shape if output.ndim == 3 else None
     if original_shape is not None and x.ndim == 3:
         x, output = x.flatten(0, 1), output.flatten(0, 1)
+    debug = getattr(layer, "_ascend_lora_debug", None)
+    sample = debug.before(layer, x, output) if debug is not None else None
     lora_output = layer.punica_wrapper.add_lora_linear(
         output,
         x,
@@ -42,6 +45,8 @@ def _apply_packed_lora(layer, x: torch.Tensor, output: torch.Tensor) -> torch.Te
     )
     if not current_platform.can_update_inplace():
         output = lora_output
+    if sample is not None:
+        debug.after(sample, output)
     return output.reshape(original_shape) if original_shape is not None else output
 
 
@@ -155,10 +160,13 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        initialize_linear_lora_debug(self)
 
     def reset_lora(self, index: int) -> None:
         super().reset_lora(index)
         self.lora_b_packed[index].zero_()
+        if self._ascend_lora_debug is not None:
+            self._ascend_lora_debug.set_slot(index, loaded=False)
 
     def set_lora(
         self,
@@ -171,6 +179,8 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
             self.lora_b_stacked[0][index, 0].transpose(0, 1),
             non_blocking=True,
         )
+        if self._ascend_lora_debug is not None:
+            self._ascend_lora_debug.set_slot(index, loaded=True)
 
     def _apply_lora_to_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         return _apply_packed_lora(self, x, output)

@@ -97,6 +97,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Valid values: 0 (default, sequential applies) or 1 (overlap).
     # This configuration is not sensitive.
     "VLLM_ASCEND_LORA_MOE_OVERLAP": lambda: _strict_binary_env("VLLM_ASCEND_LORA_MOE_OVERLAP"),
+    # Debug q_b_proj/kv_b_proj/o_proj single-slot LoRA on A2/A3. Requires
+    # --enforce-eager. Logs TP rank 0 and samples local output differences,
+    # which synchronize the device. Valid: 0 (default, off) or 1. Not sensitive;
+    # logs shapes, dtypes and adapter IDs, never prompts or weight contents.
+    "VLLM_ASCEND_LORA_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_LORA_DEBUG"),
 }
 
 # end-env-vars-definition

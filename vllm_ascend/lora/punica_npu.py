@@ -12,6 +12,7 @@ from vllm.logger import logger
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.lora.debug import configure_lora_debug, update_lora_debug_metadata
 from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, lora_linear
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -91,6 +92,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             and self.lora_config.max_loras == 1
             and not self.lora_config.fully_sharded_loras
         )
+        configure_lora_debug(self)
         self._single_lora_mask = None
         self._wrapper_id = next(_LORA_WRAPPER_IDS)
         _LORA_WRAPPERS[self._wrapper_id] = self
@@ -116,7 +118,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # In the previous punica_npu code there were no switch between prefill/decode,
         # everything was processed via SGMV kernels. GroupGEMM on prefill is generally
         # much faster, but kernel launch takes way to much time for using it for decode,
-        # so we temporarely use the serving tokens number switch to distinguish
+        # so we temporarily use the serving tokens number switch to distinguish
         # prefill GroupGEMM and decode BGMV/fused addlora
         self.gmm_threshold = (
             int(os.environ["LORA_GMM_THRESHOLD"]) if "LORA_GMM_THRESHOLD" in os.environ else max_batches
@@ -195,6 +197,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         self.is_prefill = bool(getattr(mapping, "is_prefill", True))
         self._prefill_meta_ready = gmm_enabled
+        update_lora_debug_metadata(self, mapping, lora_index_to_id)
 
     def add_shrink(
         self,
@@ -206,7 +209,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     ):
         """
         Performs GEMM  for multiple slices of lora_a.
-        Prefill/decode kernel is choosen within native op.
+        Prefill/decode kernel is chosen within native op.
         Semantics:
         for i in range(len(lora_a_stacked)):
             y[i] += (x @ lora_a_stacked[i]) * scale
@@ -719,7 +722,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             covers_y = offset == 0 and sum(output_slices) == y2d.shape[1]
             if covers_y and bool(gmm_flag.item()):
                 return torch.ops._C_ascend.add_lora_expand_delta(
-                    y2d, buffers, list(lora_b_stacked), group_list, group_list_type,
+                    y2d,
+                    buffers,
+                    list(lora_b_stacked),
+                    group_list,
+                    group_list_type,
                 )
             torch.ops._C_ascend.add_lora_expand(
                 y2d,

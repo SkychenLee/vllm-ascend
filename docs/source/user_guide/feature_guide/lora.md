@@ -104,6 +104,52 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `Qwen3.5-27B` is the served base name from this example. If the launch sets `--served-model-name`, use that string instead. A successful call returns HTTP 200 and a non-empty `choices[0].message.content`.
 
+## Debug attention projection LoRA
+
+For the A2/A3 single-slot path, enable diagnostics for `q_b_proj`,
+`kv_b_proj` and `o_proj` with:
+
+```bash
+export VLLM_ASCEND_LORA_DEBUG=1
+```
+
+Add `--enforce-eager --max-loras 1` to the existing LoRA server command and
+leave `--fully-sharded-loras` off. The debug mode rejects incompatible settings
+at startup: Python logs do not run on each graph replay. Send the request with
+the adapter's served name (the `name` in `--lora-modules`), rather than the base
+model name. Search the worker logs for `AscendLoRADebug`.
+
+The events distinguish registration from execution:
+
+- `event=config`: debug settings, including the model's `use_mla` and dtype.
+- `event=wrap`: this projection has an Ascend LoRA wrapper; includes its full
+  layer name, base weight dtype and LoRA dtype.
+- `event=load`: this layer received adapter tensors in the reported slot.
+- `event=enter`: the forward path reached this layer's LoRA apply. Includes
+  the actual attention phase (`prefill`, `decode` or `mixed`), active adapter
+  IDs, active token count and the slots with weights installed in this layer.
+  `active_tokens=0` indicates that the batch selects no adapter.
+- `event=apply_done`: the LoRA apply returned. `sample_local_delta_abs_max`
+  measures the change to the first 128 output columns of one active token
+  (or the first token for a base-only batch), after output dtype rounding.
+  A positive value proves a local output change at this projection. Zero is
+  inconclusive: zero inputs/weights, rounding or the limited sample can all
+  produce zero even when the apply is called.
+
+Projection events are logged only on TP rank 0. Samples are local;
+`o_proj` has not yet performed its
+TP output reduction. Forward logs appear once per layer, phase and adapter
+combination, and reset when that layer's adapter slot is reset/reloaded.
+Profile dummy runs and capture are skipped. `event=call_unmeasured` means the
+apply was reached but the token metadata could not be attributed reliably.
+
+The diagnostic performs a bounded tensor copy and a device synchronization.
+Use it to establish execution, then unset `VLLM_ASCEND_LORA_DEBUG` before
+measuring performance. A2 LoRA can appear as ordinary matrix operations in a
+profiler, so absence of an operator name containing `LoRA` is not sufficient
+evidence that the adapter was skipped. The flag is off by default and does not
+log prompts or weight contents.
+
 ## Dynamic LoRA
 
 The server can load and unload adapters after startup. Start it with `--enable-lora`, and set:
