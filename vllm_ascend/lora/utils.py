@@ -75,11 +75,14 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        initialize_linear_lora_debug(self)
 
     def reset_lora(self, index: int) -> None:
         super().reset_lora(index)
         self.lora_a_packed[index].zero_()
         self.lora_b_packed[index].zero_()
+        if self._ascend_lora_debug is not None:
+            self._ascend_lora_debug.set_slot(index, loaded=False)
 
     def set_lora(
         self,
@@ -102,6 +105,13 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
                 non_blocking=True,
             )
             offset += out_size
+        if self._ascend_lora_debug is not None:
+            projections = tuple(
+                name
+                for name, a, b in zip(self._ascend_lora_debug.projections, lora_a, lora_b)
+                if a is not None and b is not None
+            )
+            self._ascend_lora_debug.set_slot(index, loaded=bool(projections), projections=projections)
 
     def _apply_lora_to_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         return _apply_packed_lora(self, x, output)

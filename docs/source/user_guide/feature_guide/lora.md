@@ -104,10 +104,10 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `Qwen3.5-27B` is the served base name from this example. If the launch sets `--served-model-name`, use that string instead. A successful call returns HTTP 200 and a non-empty `choices[0].message.content`.
 
-## Debug attention projection LoRA
+## Debug attention and shared-expert LoRA
 
 For the A2/A3 single-slot path, enable diagnostics for `q_b_proj`,
-`kv_b_proj` and `o_proj` with:
+`kv_b_proj`, `o_proj` and `mlp.shared_experts` projections with:
 
 ```bash
 export VLLM_ASCEND_LORA_DEBUG=1
@@ -119,29 +119,43 @@ at startup: Python logs do not run on each graph replay. Send the request with
 the adapter's served name (the `name` in `--lora-modules`), rather than the base
 model name. Search the worker logs for `AscendLoRADebug`.
 
+For Mistral shared experts, adapter targets `gate_proj` and `up_proj` execute
+inside the merged `mlp.shared_experts.gate_up_proj` wrapper. Diagnostics sample
+the two output slices separately and log `projection=gate_proj` and
+`projection=up_proj`. `mlp.shared_experts.down_proj` is logged separately.
+Other dense MLP modules and routed experts are outside this diagnostic filter.
+
 The events distinguish registration from execution:
 
 - `event=config`: debug settings, including the model's `use_mla` and dtype.
 - `event=wrap`: this projection has an Ascend LoRA wrapper; includes its full
   layer name, base weight dtype and LoRA dtype.
 - `event=load`: this layer received adapter tensors in the reported slot.
+  `loaded_projections` lists the projections with both A and B tensors present;
+  an up-only adapter reports `('up_proj',)`, without claiming gate was loaded.
 - `event=enter`: the forward path reached this layer's LoRA apply. Includes
   the actual attention phase (`prefill`, `decode` or `mixed`), active adapter
-  IDs, active token count and the slots with weights installed in this layer.
+  IDs, active token count, the slots with weights installed in this layer and
+  their `loaded_projections`.
   `active_tokens=0` indicates that the batch selects no adapter.
 - `event=apply_done`: the LoRA apply returned. `sample_local_delta_abs_max`
-  measures the change to the first 128 output columns of one active token
+  measures the change to at most the first 128 output columns of each projection
+  for one active token
   (or the first token for a base-only batch), after output dtype rounding.
   A positive value proves a local output change at this projection. Zero is
   inconclusive: zero inputs/weights, rounding or the limited sample can all
   produce zero even when the apply is called.
 
-Projection events are logged only on TP rank 0. Samples are local;
-`o_proj` has not yet performed its
-TP output reduction. Forward logs appear once per layer, phase and adapter
+Projection events are logged only on physical TP rank 0. Samples are local;
+`o_proj` and shared-expert `down_proj` have not yet performed their downstream
+TP output reductions. Forward logs appear once per layer, phase and adapter
 combination, and reset when that layer's adapter slot is reset/reloaded.
 Profile dummy runs and capture are skipped. `event=call_unmeasured` means the
 apply was reached but the token metadata could not be attributed reliably.
+In particular, `enable_shared_expert_dp=True` changes the token layout, so
+shared-expert calls report `call_unmeasured` without attributing the full-batch
+mapping to the local shard. `mix_placement=True` can fuse shared experts into
+routed weights, in which case independent dense shared-expert logs are absent.
 
 The diagnostic performs a bounded tensor copy and a device synchronization.
 Use it to establish execution, then unset `VLLM_ASCEND_LORA_DEBUG` before

@@ -10,8 +10,10 @@ from torch import nn
 
 from vllm_ascend.lora import debug
 from vllm_ascend.lora import utils as lora_utils
+from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
 PREFIX = "language_model.model.layers.0.self_attn.q_b_proj"
+SHARED_PREFIX = "language_model.model.layers.0.mlp.shared_experts"
 
 
 @pytest.fixture
@@ -28,6 +30,8 @@ def debug_runtime(monkeypatch):
     monkeypatch.setattr(debug, "get_current_vllm_config", Mock(return_value=config))
     monkeypatch.setattr(debug, "is_forward_context_available", Mock(return_value=True))
     monkeypatch.setattr(debug, "get_forward_context", Mock(return_value=context))
+    monkeypatch.setattr(debug, "get_tensor_model_parallel_rank", Mock(return_value=0))
+    monkeypatch.setattr(debug, "get_ascend_config", Mock(return_value=SimpleNamespace(enable_shared_expert_dp=False)))
     return SimpleNamespace(context=context, logger=logger, config=config)
 
 
@@ -106,6 +110,7 @@ def test_debug_configuration_and_metadata_copy_use_host_values(debug_runtime):
     ],
 )
 def test_debug_initialization_filters_targets_and_tp_rank(debug_runtime, name, tp_rank, enabled):
+    debug.get_tensor_model_parallel_rank.return_value = tp_rank
     layer = _layer(PREFIX.rsplit(".", 1)[0] + "." + name, tp_rank)
     debug.initialize_linear_lora_debug(layer)
     assert (layer._ascend_lora_debug is not None) is enabled
@@ -126,8 +131,10 @@ def test_debug_phase_comes_from_attention_metadata(debug_runtime, prefills, deco
     state = debug.LinearLoRADebug(PREFIX, 0)
     sample = state.before(layer, torch.ones(3, 4), torch.zeros(3, 200))
     assert sample[0] == phase
-    assert sample[2:4] == (1, 128)
-    assert sample[-1].shape == (128,)
+    assert sample[2] == 1
+    assert len(sample[3]) == 1
+    assert sample[3][0][:3] == ("q_b_proj", 0, 128)
+    assert sample[3][0][-1].shape == (128,)
     assert f"phase={phase}" in _logs(debug_runtime.logger)[-1]
 
 
@@ -243,3 +250,184 @@ def test_real_transposed_mixin_set_reset_updates_debug_state(debug_runtime):
     assert not layer._ascend_lora_debug.loaded_slots
     assert not layer._ascend_lora_debug.seen
     assert torch.count_nonzero(layer.lora_b_packed) == 0
+
+
+@pytest.mark.parametrize(
+    "suffix,expected",
+    [
+        (".mlp.shared_experts.gate_up_proj", ("gate_proj", "up_proj")),
+        (".mlp.shared_experts.gate_proj", ("gate_proj",)),
+        (".mlp.shared_experts.up_proj", ("up_proj",)),
+        (".mlp.shared_experts.down_proj", ("down_proj",)),
+        (".mlp.down_proj", None),
+        (".mlp.experts.0.down_proj", None),
+        (".mlp.shared_experts_other.down_proj", None),
+    ],
+)
+def test_debug_adds_only_exact_shared_expert_projection_targets(debug_runtime, suffix, expected):
+    layer = _layer("language_model.model.layers.0" + suffix)
+    debug.initialize_linear_lora_debug(layer)
+    state = layer._ascend_lora_debug
+    if expected is None:
+        assert state is None
+        debug_runtime.logger.info.assert_not_called()
+    else:
+        assert state.projections == expected
+        assert "event=wrap" in _logs(debug_runtime.logger)[-1]
+
+
+def test_shared_debug_filters_physical_rank_even_when_layer_is_replicated(debug_runtime):
+    debug.get_tensor_model_parallel_rank.return_value = 1
+    layer = _layer(SHARED_PREFIX + ".down_proj", tp_rank=0)
+    debug.initialize_linear_lora_debug(layer)
+    assert layer._ascend_lora_debug is None
+    debug_runtime.logger.info.assert_not_called()
+
+
+def test_shared_expert_dp_keeps_wrap_log_but_does_not_attribute_token_mapping(debug_runtime):
+    debug.get_ascend_config.return_value.enable_shared_expert_dp = True
+    layer = _layer(SHARED_PREFIX + ".down_proj")
+    debug.initialize_linear_lora_debug(layer)
+    state = layer._ascend_lora_debug
+    assert state is not None and not state.token_mapping_supported
+    debug_runtime.logger.info.reset_mock()
+    with patch.object(torch.Tensor, "clone", side_effect=AssertionError("shared DP output sampled")):
+        assert state.before(layer, torch.ones(3, 4), torch.zeros(3, 200)) is None
+    debug_runtime.logger.info.assert_not_called()
+    debug_runtime.logger.warning_once.assert_called_once()
+    assert not state.seen
+    attention_layer = _layer()
+    debug.initialize_linear_lora_debug(attention_layer)
+    assert attention_layer._ascend_lora_debug.token_mapping_supported
+
+
+@pytest.mark.parametrize("has_matching_layer", [False, True])
+def test_shared_projection_metadata_matches_its_decoder_layer(debug_runtime, has_matching_layer):
+    layer = _layer(SHARED_PREFIX + ".down_proj")
+    state = debug.LinearLoRADebug(layer.base_layer.prefix, 0)
+    metadata = {
+        "language_model.model.layers.1.self_attn.attn": SimpleNamespace(
+            num_actual_tokens=1, num_prefills=1, num_decode_tokens=0
+        )
+    }
+    if has_matching_layer:
+        metadata["language_model.model.layers.0.self_attn.attn"] = SimpleNamespace(
+            num_actual_tokens=3, num_prefills=0, num_decode_tokens=3
+        )
+    debug_runtime.context.attn_metadata = metadata
+    sample = state.before(layer, torch.ones(3, 4), torch.zeros(3, 200))
+    if has_matching_layer:
+        assert sample[0] == "decode"
+        assert "active_tokens=2/3" in _logs(debug_runtime.logger)[-1]
+    else:
+        assert sample is None
+        assert not state.seen
+        debug_runtime.logger.info.assert_not_called()
+        debug_runtime.logger.warning_once.assert_called_once()
+
+
+@pytest.mark.parametrize("projections", [("gate_proj",), ("up_proj",), ("gate_proj", "up_proj")])
+def test_shared_debug_tracks_loaded_projection_names_and_reset(debug_runtime, projections):
+    layer = _layer(SHARED_PREFIX + ".gate_up_proj", columns=400)
+    layer.output_slices = (200, 200)
+    state = debug.LinearLoRADebug(layer.base_layer.prefix, 0)
+    state.set_slot(0, loaded=True, projections=projections)
+    assert state.loaded_projections == {0: projections}
+    sample = state.before(layer, torch.ones(3, 4), torch.zeros(3, 400))
+    assert tuple(part[:3] for part in sample[3]) == (("gate_proj", 0, 128), ("up_proj", 200, 128))
+    assert "loaded_projections=" in _logs(debug_runtime.logger)[-1]
+    for projection in projections:
+        assert projection in _logs(debug_runtime.logger)[-1]
+    state.set_slot(0, loaded=False)
+    assert not state.loaded_projections
+    assert not state.loaded_slots
+    assert not state.seen
+    state.set_slot(0, loaded=True)
+    assert state.loaded_projections == {0: ("gate_proj", "up_proj")}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("adapted", [(True, False), (False, True), (True, True)], ids=["gate", "up", "both"])
+def test_real_shared_packed_weights_log_per_slice_without_changing_bf16_math(
+    debug_runtime, monkeypatch, enabled, adapted
+):
+    debug.envs.VLLM_ASCEND_LORA_DEBUG = enabled
+    monkeypatch.setattr(lora_utils, "current_platform", SimpleNamespace(can_update_inplace=lambda: True))
+    layer = lora_utils.AscendMergedColumnParallelLinearWithLoRA.__new__(
+        lora_utils.AscendMergedColumnParallelLinearWithLoRA
+    )
+    nn.Module.__init__(layer)
+    layer.input_size = 4
+    layer.n_slices = 2
+    layer.output_sizes = layer.output_slices = (200, 200)
+    layer.output_size = 400
+    layer.output_ids = (0, 0)
+    layer.tp_size, layer.tp_rank = 1, 0
+    layer.device = torch.device("cpu")
+    layer._enable_aux_cuda_stream = False
+    layer.base_layer = SimpleNamespace(
+        prefix=SHARED_PREFIX + ".gate_up_proj",
+        weight=torch.full((400, 4), 0.25, dtype=torch.bfloat16),
+        bias=None,
+        skip_bias_add=False,
+        gather_output=False,
+        return_bias=True,
+        quant_method=SimpleNamespace(apply=lambda base, x, bias: torch.nn.functional.linear(x, base.weight, bias)),
+    )
+    layer.create_lora_weights(1, SimpleNamespace(max_lora_rank=2, fully_sharded_loras=False, lora_dtype=torch.bfloat16))
+    layer.punica_wrapper = _layer().punica_wrapper
+    layer.punica_wrapper._single_lora_mask = torch.tensor([[0], [1], [1]], dtype=torch.bfloat16)
+
+    def add_lora(output, x, a, b, scale, slices, **kwargs):
+        return PunicaWrapperNPU._lora_linear_matmul(
+            layer.punica_wrapper, output, x, a, b, scale, slices, kwargs["packed_lora_a"], kwargs["packed_lora_b"], True
+        )
+
+    layer.punica_wrapper.add_lora_linear = Mock(side_effect=add_lora)
+    a = [torch.full((2, 4), 0.25, dtype=torch.bfloat16) if active else None for active in adapted]
+    b = [
+        torch.full((200, 2), 0.125 * (index + 1), dtype=torch.bfloat16) if active else None
+        for index, active in enumerate(adapted)
+    ]
+    layer.set_lora(0, a, b)
+    if enabled:
+        expected_names = tuple(name for name, active in zip(("gate_proj", "up_proj"), adapted) if active)
+        assert layer._ascend_lora_debug.loaded_projections == {0: expected_names}
+    else:
+        assert layer._ascend_lora_debug is None
+    x = torch.tensor([[1, 2, 3, 4], [2, 1, 0, 1], [1, 3, 2, 4]], dtype=torch.bfloat16)
+    baseline = torch.nn.functional.linear(x, layer.base_layer.weight)
+    expected = baseline.clone()
+    for index, active in enumerate(adapted):
+        if active:
+            delta = (x @ a[index].T) @ b[index].T
+            delta[0].zero_()
+            expected[:, index * 200 : (index + 1) * 200] += delta
+    actual = layer.forward(x)[0]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    layer.punica_wrapper.add_lora_linear.assert_called_once()
+    done = [line for line in _logs(debug_runtime.logger) if "event=apply_done" in line]
+    if enabled:
+        assert len(done) == 2
+        for index, name in enumerate(("gate_proj", "up_proj")):
+            log = next(line for line in done if f"projection={name}" in line)
+            expected_delta = (
+                (
+                    expected[1, index * 200 : index * 200 + 128].float()
+                    - baseline[1, index * 200 : index * 200 + 128].float()
+                )
+                .abs()
+                .max()
+                .item()
+            )
+            assert f"sample_local_delta_abs_max={expected_delta:g}" in log
+    else:
+        assert not done
+        debug_runtime.logger.info.assert_not_called()
+    layer.reset_lora(0)
+    assert torch.count_nonzero(layer.lora_a_packed) == 0
+    assert torch.count_nonzero(layer.lora_b_packed) == 0
+    if enabled:
+        assert not layer._ascend_lora_debug.loaded_projections
+        assert not layer._ascend_lora_debug.loaded_slots
+    torch.testing.assert_close(layer.forward(x)[0], baseline, rtol=0, atol=0)

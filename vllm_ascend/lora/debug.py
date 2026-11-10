@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in, eager-only diagnostics for the single-slot attention LoRA path."""
+"""Opt-in, eager-only diagnostics for attention and shared-expert LoRA."""
 
 from dataclasses import dataclass, field
 
 import torch
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 
 from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
 
 DEBUG_SAMPLE_COLUMNS = 128
 
@@ -23,7 +25,7 @@ def configure_lora_debug(wrapper) -> None:
     if not wrapper._single_lora_slot:
         raise ValueError("VLLM_ASCEND_LORA_DEBUG requires A2/A3, --max-loras 1 and non-fully-sharded LoRA.")
     logger.warning_once(
-        "Ascend LoRA debug is enabled: TP rank 0 logs q_b_proj/kv_b_proj/o_proj. "
+        "Ascend LoRA debug is enabled: TP rank 0 logs q_b_proj/kv_b_proj/o_proj and shared-expert projections. "
         "Sampled output differences synchronize the device; disable debug for performance measurements."
     )
     logger.info(
@@ -44,15 +46,31 @@ def update_lora_debug_metadata(wrapper, mapping, lora_index_to_id) -> None:
 class LinearLoRADebug:
     prefix: str
     tp_rank: int
+    token_mapping_supported: bool = True
     loaded_slots: set[int] = field(default_factory=set)
+    loaded_projections: dict[int, tuple[str, ...]] = field(default_factory=dict)
     seen: set[tuple] = field(default_factory=set)
 
-    def set_slot(self, index: int, loaded: bool) -> None:
+    @property
+    def projections(self) -> tuple[str, ...]:
+        if self.prefix.endswith(".mlp.shared_experts.gate_up_proj"):
+            return ("gate_proj", "up_proj")
+        return (self.prefix.rsplit(".", 1)[-1],)
+
+    def set_slot(self, index: int, loaded: bool, projections: tuple[str, ...] | None = None) -> None:
         if loaded:
             self.loaded_slots.add(index)
-            logger.info("[AscendLoRADebug] event=load layer=%s tp_rank=%d slot=%d", self.prefix, self.tp_rank, index)
+            self.loaded_projections[index] = self.projections if projections is None else projections
+            logger.info(
+                "[AscendLoRADebug] event=load layer=%s tp_rank=%d slot=%d loaded_projections=%s",
+                self.prefix,
+                self.tp_rank,
+                index,
+                self.loaded_projections[index],
+            )
         else:
             self.loaded_slots.discard(index)
+            self.loaded_projections.pop(index, None)
         self.seen.clear()
 
     def before(self, layer, x: torch.Tensor, output: torch.Tensor):
@@ -64,8 +82,19 @@ class LinearLoRADebug:
         metadata = context.attn_metadata
         if metadata is None:
             return None
+        if not self.token_mapping_supported:
+            logger.warning_once(
+                "[AscendLoRADebug] event=call_unmeasured layer=%s: shared-expert DP changes the token layout; "
+                "cannot attribute the full-batch LoRA mapping to this input.",
+                self.prefix,
+            )
+            return None
         if isinstance(metadata, dict):
-            metadata = metadata.get(self.prefix.rsplit(".", 1)[0] + ".attn")
+            if ".mlp.shared_experts." in self.prefix:
+                attention_prefix = self.prefix.rsplit(".mlp.shared_experts.", 1)[0] + ".self_attn.attn"
+            else:
+                attention_prefix = self.prefix.rsplit(".", 1)[0] + ".attn"
+            metadata = metadata.get(attention_prefix)
         mapping = getattr(layer.punica_wrapper, "_ascend_lora_debug_mapping", None)
         actual = getattr(metadata, "num_actual_tokens", None)
         if mapping is None or actual is None or not (0 < actual <= len(mapping) and actual <= x.shape[0]):
@@ -85,18 +114,19 @@ class LinearLoRADebug:
         slots = getattr(layer.punica_wrapper, "_ascend_lora_debug_slots", ())
         active_slots = tuple(slot for slot, adapter_id in enumerate(slots) if adapter_id in adapter_ids)
         loaded_slots = tuple(slot for slot in active_slots if slot in self.loaded_slots)
+        loaded_projections = {slot: self.loaded_projections[slot] for slot in loaded_slots}
         key = (phase, adapter_ids, loaded_slots)
         if key in self.seen:
             return None
         self.seen.add(key)
         active_tokens = sum(adapter_id > 0 for adapter_id in token_ids)
         row = next((i for i, adapter_id in enumerate(token_ids) if adapter_id > 0), 0)
-        columns = min(DEBUG_SAMPLE_COLUMNS, output.shape[-1])
+        samples = self.sample_outputs(layer, output, row)
         logger.info(
             "[AscendLoRADebug] event=enter layer=%s tp_rank=%d phase=%s wrapper=%s "
             "input_shape=%s input_dtype=%s weight_dtype=%s lora_dtype=%s "
-            "adapter_ids=%s active_tokens=%d/%d active_slots=%s loaded_slots=%s "
-            "no_lora=%s sample_row=%d sample_columns=%d",
+            "adapter_ids=%s active_tokens=%d/%d active_slots=%s loaded_slots=%s loaded_projections=%s "
+            "no_lora=%s sample_row=%d sample_columns=%s",
             self.prefix,
             self.tp_rank,
             phase,
@@ -110,41 +140,68 @@ class LinearLoRADebug:
             actual,
             active_slots,
             loaded_slots,
+            loaded_projections,
             layer.punica_wrapper.no_lora,
             row,
-            columns,
+            tuple((projection, columns) for projection, _, columns, _ in samples),
         )
-        # Bound debug memory independently of the prompt length and hidden size.
-        return phase, adapter_ids, row, columns, output[row, :columns].detach().clone()
+        return phase, adapter_ids, row, samples
+
+    def sample_outputs(self, layer, output: torch.Tensor, row: int):
+        # Sample each merged projection separately, including an up-only adapter.
+        # Bound memory independently of prompt length and intermediate size.
+        samples = []
+        offset = 0
+        for projection, width in zip(self.projections, layer.output_slices):
+            columns = min(DEBUG_SAMPLE_COLUMNS, width)
+            samples.append((projection, offset, columns, output[row, offset : offset + columns].detach().clone()))
+            offset += width
+        return tuple(samples)
 
     def after(self, sample, output: torch.Tensor) -> None:
-        phase, adapter_ids, row, columns, before = sample
-        delta = (output[row, :columns].detach().float() - before.float()).abs().amax().item()
-        logger.info(
-            "[AscendLoRADebug] event=apply_done layer=%s tp_rank=%d phase=%s adapter_ids=%s "
-            "sample_local_delta_abs_max=%.9g (after output dtype rounding, before any TP output reduction)",
-            self.prefix,
-            self.tp_rank,
-            phase,
-            adapter_ids,
-            delta,
-        )
+        phase, adapter_ids, row, samples = sample
+        for projection, offset, columns, before in samples:
+            delta = (output[row, offset : offset + columns].detach().float() - before.float()).abs().amax().item()
+            logger.info(
+                "[AscendLoRADebug] event=apply_done layer=%s projection=%s tp_rank=%d phase=%s adapter_ids=%s "
+                "sample_local_delta_abs_max=%.9g (after output dtype rounding, before any TP output reduction)",
+                self.prefix,
+                projection,
+                self.tp_rank,
+                phase,
+                adapter_ids,
+                delta,
+            )
 
 
 def initialize_linear_lora_debug(layer) -> None:
     layer._ascend_lora_debug = None
-    if not envs.VLLM_ASCEND_LORA_DEBUG or layer.tp_rank != 0:
+    if not envs.VLLM_ASCEND_LORA_DEBUG:
+        return
+    # Replicated shared-expert linears have local tp_rank=0 on every rank.
+    tp_rank = get_tensor_model_parallel_rank()
+    if tp_rank != 0:
         return
     prefix = layer.base_layer.prefix
-    if prefix.rsplit(".", 1)[-1] not in ("q_b_proj", "kv_b_proj", "o_proj"):
+    projection = prefix.rsplit(".", 1)[-1]
+    shared_projection = ".mlp.shared_experts." in prefix and projection in (
+        "gate_up_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
+    if projection not in ("q_b_proj", "kv_b_proj", "o_proj") and not shared_projection:
         return
-    layer._ascend_lora_debug = LinearLoRADebug(prefix, layer.tp_rank)
+    token_mapping_supported = not (shared_projection and get_ascend_config().enable_shared_expert_dp)
+    layer._ascend_lora_debug = LinearLoRADebug(prefix, tp_rank, token_mapping_supported=token_mapping_supported)
     logger.info(
-        "[AscendLoRADebug] event=wrap layer=%s tp_rank=%d wrapper=%s base=%s weight_dtype=%s lora_dtype=%s",
+        "[AscendLoRADebug] event=wrap layer=%s tp_rank=%d wrapper=%s base=%s weight_dtype=%s lora_dtype=%s "
+        "token_mapping_supported=%s",
         prefix,
-        layer.tp_rank,
+        tp_rank,
         type(layer).__name__,
         type(layer.base_layer).__name__,
         layer.base_layer.weight.dtype,
         layer.lora_a_stacked[0].dtype,
+        token_mapping_supported,
     )
